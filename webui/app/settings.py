@@ -31,9 +31,9 @@ DEFAULT_SETTINGS = {
     # HandBrake threads (0 = auto / HandBrake default)
     "hb_threads": 0,
 
-    # Global output muxer. All bundled presets currently use Matroska, so MKV
-    # remains the migration-safe default for existing installations. The
-    # setting is snapshotted onto a job when it is queued.
+    # Global output muxer. MKV remains the migration-safe default for existing
+    # installations; users may explicitly opt into per-file Auto selection.
+    # The requested setting is snapshotted onto a job when it is queued.
     "output_container": "mkv",
     "web_optimized": False,
 
@@ -190,6 +190,8 @@ def normalize_output_container(value) -> str:
     """Return the supported public container id for settings and job policy."""
     normalized = str(value or "").strip().lower()
     aliases = {
+        "auto": "auto",
+        "smart": "auto",
         "mp4": "mp4",
         "m4v": "mp4",
         "av_mp4": "mp4",

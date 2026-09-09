@@ -561,8 +561,9 @@
         <select id="outputContainerSelect" style="min-width:180px;">
           <option value="mkv">MKV</option>
           <option value="mp4">MP4</option>
+          <option value="auto">Auto (smart per file)</option>
         </select>
-        <span class="small">Sets the container and filename extension for all newly queued local and worker encodes.</span>
+        <span class="small">Auto uses MP4 when the selected tracks are compatible, then safely keeps MKV for DTS/DTS-HD, bitmap or styled subtitles, and other MKV-only output.</span>
       </div>
 
       <div id="webOptimizedSetting" class="row" style="margin-top:10px;" hidden>
@@ -2084,7 +2085,8 @@
 
       const outputContainerSelect = document.getElementById("outputContainerSelect");
       if (outputContainerSelect) {
-        outputContainerSelect.value = initialSettings?.output_container === "mp4" ? "mp4" : "mkv";
+        const configuredContainer = String(initialSettings?.output_container || "mkv").toLowerCase();
+        outputContainerSelect.value = ["mkv", "mp4", "auto"].includes(configuredContainer) ? configuredContainer : "mkv";
         outputContainerSelect.addEventListener("change", syncOutputContainerOptions);
       }
       const webOptimizedToggle = document.getElementById("webOptimizedToggle");
@@ -2211,7 +2213,8 @@
       const hardwareTranscodeConcurrency = safeNumber(document.getElementById("hardwareTranscodeConcurrency")?.value, 1, 1, 8);
       const autoStopLargeOutputEnabled = Boolean(document.getElementById("autoStopLargeOutputEnabled")?.checked);
       const autoStopLargeOutputPercent = safeNumber(document.getElementById("autoStopLargeOutputPercent")?.value, 90, 1, 500);
-      const outputContainer = document.getElementById("outputContainerSelect")?.value === "mp4" ? "mp4" : "mkv";
+      const selectedOutputContainer = document.getElementById("outputContainerSelect")?.value || "mkv";
+      const outputContainer = ["mkv", "mp4", "auto"].includes(selectedOutputContainer) ? selectedOutputContainer : "mkv";
       const webOptimized = outputContainer === "mp4" && Boolean(document.getElementById("webOptimizedToggle")?.checked);
 
       let threads = parseInt(threadsRaw, 10);

@@ -38,8 +38,8 @@ concurrency:
 env:
   IMAGE_NAME: kevina1724/handbrake-tsd-helper
   WORKER_IMAGE_NAME: kevina1724/handbrake-tsd-worker
-  CONTROLLER_VERSION: 3.22.0
-  WORKER_VERSION: 2.8.0
+  CONTROLLER_VERSION: 3.23.0
+  WORKER_VERSION: 2.9.0
 
 jobs:
   publish:
@@ -69,7 +69,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=main,enable={{is_default_branch}}
             type=raw,value=${{ env.CONTROLLER_VERSION }},enable={{is_default_branch}}
-            type=raw,value=3.22,enable={{is_default_branch}}
+            type=raw,value=3.23,enable={{is_default_branch}}
             type=raw,value=beta,enable=${{ github.event_name == 'workflow_dispatch' && inputs.channel == 'beta' }}
             type=raw,value=${{ inputs.controller_version_tag }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.controller_version_tag != '' }}
             type=semver,pattern={{version}}
@@ -104,7 +104,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=main,enable={{is_default_branch}}
             type=raw,value=${{ env.WORKER_VERSION }},enable={{is_default_branch}}
-            type=raw,value=2.8,enable={{is_default_branch}}
+            type=raw,value=2.9,enable={{is_default_branch}}
             type=raw,value=beta,enable=${{ github.event_name == 'workflow_dispatch' && inputs.channel == 'beta' }}
             type=raw,value=${{ inputs.worker_version_tag }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.worker_version_tag != '' }}
             type=sha,prefix=sha-

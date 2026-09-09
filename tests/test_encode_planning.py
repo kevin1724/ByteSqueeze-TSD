@@ -37,6 +37,163 @@ class EncodePlanningTests(unittest.TestCase):
         self.assertFalse(mkv_plan["web_optimized"])
         self.assertNotIn("--optimize", mkv_plan["cli_args"])
 
+    def test_auto_container_is_selected_per_file_from_effective_tracks(self):
+        copy_preset = {
+            "AudioTrackSelectionBehavior": "all",
+            "AudioCopyMask": ["copy:aac", "copy:eac3", "copy:dts", "copy:dtshd"],
+            "AudioList": [{"AudioEncoder": "copy"}],
+            "SubtitleTrackSelectionBehavior": "selected",
+            "SubtitleLanguageList": ["eng", "spa"],
+        }
+        compatible = {
+            "error": "",
+            "streams": [
+                {"type": "video", "codec": "hevc"},
+                {"type": "audio", "codec": "eac3", "profile": ""},
+                {"type": "subtitle", "codec": "subrip", "language": "eng"},
+            ],
+        }
+        mp4 = jobs._output_container_plan(
+            {"output_container": "auto"},
+            compatible,
+            job={},
+            preset_definition=copy_preset,
+            selected_encoder="qsv_h265_10bit",
+        )
+        self.assertEqual(mp4["requested_container"], "auto")
+        self.assertEqual(mp4["container"], "mp4")
+        self.assertEqual(mp4["extension"], ".mp4")
+        self.assertIn("MP4-compatible", mp4["reason"])
+
+        dts_hd = {
+            **compatible,
+            "streams": [
+                compatible["streams"][0],
+                {"type": "audio", "codec": "dts", "profile": "DTS-HD MA"},
+            ],
+        }
+        mkv_audio = jobs._output_container_plan(
+            {"output_container": "auto"},
+            dts_hd,
+            job={},
+            preset_definition=copy_preset,
+            selected_encoder="qsv_h265_10bit",
+        )
+        self.assertEqual(mkv_audio["container"], "mkv")
+        self.assertIn("DTS-HD", mkv_audio["reason"])
+
+        convert_preset = {
+            **copy_preset,
+            "AudioCopyMask": [],
+            "AudioList": [{"AudioEncoder": "eac3"}],
+        }
+        converted_audio = jobs._output_container_plan(
+            {"output_container": "auto"},
+            dts_hd,
+            job={},
+            preset_definition=convert_preset,
+            selected_encoder="qsv_h265_10bit",
+        )
+        self.assertEqual(converted_audio["container"], "mp4")
+
+    def test_auto_container_keeps_bitmap_and_styled_subtitles_in_mkv(self):
+        preset = {
+            "AudioTrackSelectionBehavior": "all",
+            "AudioCopyMask": ["copy:aac"],
+            "AudioList": [{"AudioEncoder": "copy"}],
+            "SubtitleTrackSelectionBehavior": "selected",
+            "SubtitleLanguageList": ["eng"],
+        }
+        for codec, expected in (("hdmv_pgs_subtitle", "PGS"), ("dvd_subtitle", "VobSub"), ("ass", "ASS")):
+            with self.subTest(codec=codec):
+                source = {
+                    "error": "",
+                    "streams": [
+                        {"type": "video", "codec": "h264"},
+                        {"type": "audio", "codec": "aac"},
+                        {"type": "subtitle", "codec": codec, "language": "eng"},
+                    ],
+                }
+                plan = jobs._output_container_plan(
+                    {"output_container": "auto"},
+                    source,
+                    job={},
+                    preset_definition=preset,
+                    selected_encoder="x265_10bit",
+                )
+                self.assertEqual(plan["container"], "mkv")
+                self.assertIn(expected, plan["reason"])
+
+        unselected_bitmap = {
+            "error": "",
+            "streams": [
+                {"type": "video", "codec": "h264"},
+                {"type": "audio", "codec": "aac"},
+                {"type": "subtitle", "codec": "hdmv_pgs_subtitle", "language": "jpn"},
+                {"type": "subtitle", "codec": "subrip", "language": "eng"},
+            ],
+        }
+        plan = jobs._output_container_plan(
+            {"output_container": "auto"},
+            unselected_bitmap,
+            job={},
+            preset_definition=preset,
+            selected_encoder="x265_10bit",
+        )
+        self.assertEqual(plan["container"], "mp4")
+
+    def test_auto_container_fails_safe_and_fixed_choices_remain_authoritative(self):
+        missing = jobs._output_container_plan(
+            {"output_container": "auto"},
+            {"error": "ffprobe timed out"},
+            selected_encoder="x265",
+        )
+        self.assertEqual(missing["container"], "mkv")
+        self.assertIn("could not be inspected", missing["reason"])
+
+        pgs = {
+            "error": "",
+            "streams": [{"type": "subtitle", "codec": "hdmv_pgs_subtitle", "language": "eng"}],
+        }
+        forced_mp4 = jobs._output_container_plan(
+            {"output_container": "mp4", "web_optimized": True},
+            pgs,
+            selected_encoder="x265",
+        )
+        self.assertEqual(forced_mp4["container"], "mp4")
+        self.assertTrue(forced_mp4["web_optimized"])
+
+    def test_source_probe_collects_all_tracks_in_one_pass(self):
+        payload = {
+            "streams": [
+                {
+                    "index": 0,
+                    "codec_type": "video",
+                    "codec_name": "hevc",
+                    "profile": "Main 10",
+                    "pix_fmt": "yuv420p10le",
+                    "width": 3840,
+                    "height": 2160,
+                    "avg_frame_rate": "24000/1001",
+                    "r_frame_rate": "24000/1001",
+                    "disposition": {"attached_pic": 0},
+                },
+                {"index": 1, "codec_type": "audio", "codec_name": "dts", "profile": "DTS-HD MA", "tags": {"language": "eng"}},
+                {"index": 2, "codec_type": "subtitle", "codec_name": "hdmv_pgs_subtitle", "tags": {"language": "eng"}},
+            ],
+            "format": {"format_name": "matroska,webm"},
+        }
+        result = mock.Mock(returncode=0, stdout=json.dumps(payload), stderr="")
+        with mock.patch.object(jobs.subprocess, "run", return_value=result) as run:
+            probe = jobs._source_video_probe("/media/Episode.mkv")
+
+        self.assertEqual(probe["codec"], "hevc")
+        self.assertEqual((probe["width"], probe["height"]), (3840, 2160))
+        self.assertEqual([row["type"] for row in probe["streams"]], ["video", "audio", "subtitle"])
+        self.assertEqual(probe["streams"][1]["profile"], "DTS-HD MA")
+        command = run.call_args.args[0]
+        self.assertNotIn("-select_streams", command)
+
     def test_requested_qsv_scenarios_use_the_expected_decode_and_resolution_plan(self):
         scenarios = (
             ("local H.264 1080p", "local", "1080", "h264", 1920, 1080, (1920, 1080)),

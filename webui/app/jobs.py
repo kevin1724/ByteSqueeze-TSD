@@ -661,24 +661,281 @@ def _job_encoding_policy(job: dict | None) -> dict:
     return _normalize_encoding_policy(stored if isinstance(stored, dict) else None)
 
 
-def _output_container_plan(policy: dict | None = None) -> dict:
+def _normalized_copy_codec(value: str) -> str:
+    codec = str(value or "").strip().lower().replace("copy:", "")
+    aliases = {
+        "dca": "dts",
+        "dts-hd": "dtshd",
+        "dts_hd": "dtshd",
+        "ac-3": "ac3",
+        "e-ac-3": "eac3",
+        "mp4a": "aac",
+    }
+    return aliases.get(codec, codec)
+
+
+def _preset_audio_encoders(job: dict | None, preset_definition: dict | None) -> list[str]:
+    """Return the effective HandBrake audio encoders for container planning."""
+    args = _split_extra_args((job or {}).get("extra_args") or "")
+    override = _argument_value(args, "--aencoder", "-E")
+    if override:
+        return [part.strip().lower() for part in override.split(",") if part.strip()]
+    preset = preset_definition if isinstance(preset_definition, dict) else {}
+    if str(preset.get("AudioTrackSelectionBehavior") or "").strip().lower() == "none":
+        return []
+    rows = preset.get("AudioList") if isinstance(preset.get("AudioList"), list) else []
+    return [
+        str(row.get("AudioEncoder") or row.get("PresetEncoder") or "").strip().lower()
+        for row in rows
+        if isinstance(row, dict)
+        and str(row.get("AudioEncoder") or row.get("PresetEncoder") or "").strip()
+    ]
+
+
+def _audio_passthrough_codecs(job: dict | None, preset_definition: dict | None) -> set[str]:
+    """Return source codecs which the effective audio plan may pass through."""
+    encoders = _preset_audio_encoders(job, preset_definition)
+    generic_copy = any(encoder == "copy" for encoder in encoders)
+    direct = {
+        _normalized_copy_codec(encoder)
+        for encoder in encoders
+        if encoder.startswith("copy:")
+    }
+    if not generic_copy:
+        return {codec for codec in direct if codec}
+
+    args = _split_extra_args((job or {}).get("extra_args") or "")
+    mask_value = _argument_value(args, "--audio-copy-mask")
+    if mask_value:
+        mask = mask_value.split(",")
+    else:
+        preset = preset_definition if isinstance(preset_definition, dict) else {}
+        configured = preset.get("AudioCopyMask")
+        mask = configured if isinstance(configured, list) else []
+    normalized = {
+        _normalized_copy_codec(codec)
+        for codec in mask
+        if _normalized_copy_codec(codec)
+    }
+    # A generic copy encoder without a mask asks HandBrake to copy any source
+    # it can and use its fallback otherwise. Treat that as unknown passthrough
+    # so Auto chooses the compatibility-first container.
+    return direct | (normalized or {"*"})
+
+
+def _selected_audio_streams(
+    source: dict | None,
+    job: dict | None,
+    preset_definition: dict | None,
+) -> list[dict]:
+    streams = [
+        row for row in (source or {}).get("streams", [])
+        if isinstance(row, dict) and row.get("type") == "audio"
+    ]
+    if not streams:
+        return []
+    args = _split_extra_args((job or {}).get("extra_args") or "")
+    lowered = [str(arg or "").strip().lower() for arg in args]
+    audio_value = _argument_value(args, "--audio", "-a").strip().lower()
+    if audio_value in {"none", "0"}:
+        return []
+    if "--all-audio" in lowered or audio_value:
+        return streams
+
+    preset = preset_definition if isinstance(preset_definition, dict) else {}
+    behavior = str(preset.get("AudioTrackSelectionBehavior") or "none").strip().lower()
+    if behavior == "none":
+        return []
+    languages = {
+        str(value or "").strip().lower()
+        for value in (preset.get("AudioLanguageList") or [])
+        if str(value or "").strip()
+    }
+    if not languages or languages & {"any", "*", "und"}:
+        candidates = streams
+    else:
+        candidates = [
+            row for row in streams
+            if str(row.get("language") or "und").strip().lower() in languages
+        ]
+    return candidates[:1] if behavior == "first" else candidates
+
+
+def _encoded_audio_codec(encoder: str) -> str:
+    value = str(encoder or "").strip().lower()
+    if not value or value == "none" or value.startswith("copy"):
+        return ""
+    for marker, codec in (
+        ("eac3", "eac3"),
+        ("ac3", "ac3"),
+        ("aac", "aac"),
+        ("mp3", "mp3"),
+        ("lame", "mp3"),
+        ("truehd", "truehd"),
+        ("opus", "opus"),
+        ("flac", "flac"),
+        ("alac", "alac"),
+        ("vorbis", "vorbis"),
+    ):
+        if marker in value:
+            return codec
+    return value
+
+
+def _selected_subtitle_streams(
+    source: dict | None,
+    job: dict | None,
+    preset_definition: dict | None,
+) -> list[dict]:
+    streams = [
+        row for row in (source or {}).get("streams", [])
+        if isinstance(row, dict) and row.get("type") == "subtitle"
+    ]
+    if not streams:
+        return []
+    args = _split_extra_args((job or {}).get("extra_args") or "")
+    lowered = [str(arg or "").strip().lower() for arg in args]
+    subtitle_value = _argument_value(args, "--subtitle", "-s").strip().lower()
+    if subtitle_value in {"none", "0"}:
+        return []
+    if "--all-subtitles" in lowered:
+        return streams
+
+    preset = preset_definition if isinstance(preset_definition, dict) else {}
+    behavior = str(preset.get("SubtitleTrackSelectionBehavior") or "none").strip().lower()
+    if behavior == "none" and not subtitle_value:
+        return []
+    if behavior in {"all", "first"} or subtitle_value:
+        # An explicit track-number expression is difficult to map reliably to
+        # ffprobe's stream indexes. Checking all subtitle tracks is the safe
+        # choice and avoids silently selecting MP4 for a bitmap track.
+        return streams
+
+    languages = {
+        str(value or "").strip().lower()
+        for value in (preset.get("SubtitleLanguageList") or [])
+        if str(value or "").strip()
+    }
+    if not languages:
+        return []
+    if languages & {"any", "*", "und"}:
+        return streams
+    return [
+        row for row in streams
+        if str(row.get("language") or "und").strip().lower() in languages
+    ]
+
+
+def _auto_output_container(
+    source: dict | None,
+    job: dict | None = None,
+    preset_definition: dict | None = None,
+    selected_encoder: str = "",
+) -> tuple[str, str]:
+    """Choose the safest container for the tracks this encode can preserve."""
+    source = source if isinstance(source, dict) else {}
+    if source.get("error"):
+        return "mkv", f"source tracks could not be inspected: {source.get('error')}"
+    streams = [row for row in source.get("streams", []) if isinstance(row, dict)]
+    if not streams:
+        return "mkv", "source track inventory is unavailable"
+
+    encoder = str(selected_encoder or "").strip().lower()
+    mp4_video_markers = ("h264", "x264", "h265", "hevc", "x265", "av1", "mpeg2", "mpeg4", "vp9")
+    if not encoder:
+        return "mkv", "the selected video encoder could not be identified"
+    if not any(marker in encoder for marker in mp4_video_markers):
+        return "mkv", f"video encoder {encoder} is not in the MP4-safe set"
+
+    mp4_audio = {"aac", "mp3", "ac3", "eac3", "truehd", "opus", "flac", "alac"}
+    for encoder_name in _preset_audio_encoders(job, preset_definition):
+        encoded_codec = _encoded_audio_codec(encoder_name)
+        if encoded_codec and encoded_codec not in mp4_audio:
+            return "mkv", f"audio encoder {encoder_name} produces {encoded_codec.upper()}, which is not MP4-safe"
+
+    passthrough = _audio_passthrough_codecs(job, preset_definition)
+    for stream in _selected_audio_streams(source, job, preset_definition):
+        codec = _normalized_copy_codec(stream.get("codec") or "")
+        profile = str(stream.get("profile") or "").strip().lower()
+        aliases = {codec}
+        if codec == "dts" and any(marker in profile for marker in ("dts-hd", "dts hd", "master audio", "ma")):
+            aliases.add("dtshd")
+        copied = "*" in passthrough or bool(aliases & passthrough)
+        if not copied or codec in mp4_audio:
+            continue
+        if "dtshd" in aliases:
+            label = "DTS-HD"
+        elif codec == "dts":
+            label = "DTS"
+        else:
+            label = (codec or "unknown").upper()
+        return "mkv", f"{label} audio is configured for passthrough"
+
+    subtitle_labels = {
+        "hdmv_pgs_subtitle": "PGS bitmap",
+        "dvd_subtitle": "VobSub bitmap",
+        "dvb_subtitle": "DVB bitmap",
+        "xsub": "XSUB bitmap",
+        "ass": "styled ASS",
+        "ssa": "styled SSA",
+    }
+    mp4_text_subtitles = {
+        "subrip", "srt", "mov_text", "text", "webvtt", "eia_608",
+        "eia_708", "cea_608", "cea_708", "closed_caption", "ttml",
+    }
+    for stream in _selected_subtitle_streams(source, job, preset_definition):
+        codec = str(stream.get("codec") or "").strip().lower()
+        if codec in mp4_text_subtitles:
+            continue
+        label = subtitle_labels.get(codec, (codec or "unknown").upper())
+        return "mkv", f"selected {label} subtitle is safer to preserve in MKV"
+
+    return "mp4", "all selected video, audio, and subtitle tracks are MP4-compatible"
+
+
+def _output_container_plan(
+    policy: dict | None = None,
+    source: dict | None = None,
+    *,
+    job: dict | None = None,
+    preset_definition: dict | None = None,
+    selected_encoder: str = "",
+) -> dict:
     """Build the controlled HandBrake muxer options and filename extension."""
     normalized = _normalize_encoding_policy(policy)
-    container = normalized["output_container"]
+    requested_container = normalized["output_container"]
+    if requested_container == "auto":
+        container, reason = _auto_output_container(
+            source,
+            job,
+            preset_definition,
+            selected_encoder,
+        )
+    else:
+        container = requested_container
+        reason = f"{container.upper()} selected in Settings"
     web_optimized = bool(container == "mp4" and normalized.get("web_optimized"))
     cli_args = ["--format", "av_mp4" if container == "mp4" else "av_mkv"]
     if web_optimized:
         cli_args.append("--optimize")
     return {
+        "requested_container": requested_container,
         "container": container,
         "extension": ".mp4" if container == "mp4" else ".mkv",
         "web_optimized": web_optimized,
+        "reason": reason,
         "cli_args": cli_args,
     }
 
 
-def _output_path_for_source(src: str, suffix: str, policy: dict | None = None) -> str:
-    plan = _output_container_plan(policy)
+def _output_path_for_source(
+    src: str,
+    suffix: str,
+    policy: dict | None = None,
+    *,
+    plan: dict | None = None,
+) -> str:
+    plan = plan if isinstance(plan, dict) else _output_container_plan(policy)
     folder = os.path.dirname(src)
     name = os.path.splitext(os.path.basename(src))[0]
     return os.path.join(folder, f"{name}-{suffix}{plan['extension']}")
@@ -831,6 +1088,13 @@ def _upload_transfer_output(url: str, token: str, worker_node_id: str, out_path:
         conn.putheader("X-Worker-Job-Id", str(job_id or ""))
         conn.putheader("X-Output-Filename", os.path.basename(out_path))
         job = jobs.get(job_id) or {}
+        selected_container = str(job.get("output_container") or "").strip().lower()
+        if selected_container in {"mp4", "mkv"}:
+            conn.putheader("X-Output-Container", selected_container)
+        container_reason = str(job.get("output_container_reason") or "").strip()
+        if container_reason:
+            safe_reason = container_reason.encode("ascii", errors="replace").decode("ascii")
+            conn.putheader("X-Output-Container-Reason", safe_reason[:240])
         for header, key in (
             ("X-Encode-Method", "encode_method"),
             ("X-Encode-Encoder", "encoder"),
@@ -1259,15 +1523,17 @@ def _preset_video_encoder(job: dict | None) -> str:
 
 
 def _source_video_probe(src_path: str) -> dict:
-    """Read the first source video stream for decode and resolution planning."""
+    """Read source video facts and one complete track inventory with ffprobe."""
     command = [
         "ffprobe",
         "-v",
         "error",
-        "-select_streams",
-        "v:0",
         "-show_entries",
-        "stream=codec_name,profile,pix_fmt,width,height,avg_frame_rate,r_frame_rate",
+        (
+            "stream=index,codec_type,codec_name,codec_tag_string,profile,pix_fmt,"
+            "width,height,avg_frame_rate,r_frame_rate:stream_tags=language,title:"
+            "stream_disposition=attached_pic:format=format_name"
+        ),
         "-of",
         "json",
         src_path,
@@ -1294,9 +1560,36 @@ def _source_video_probe(src_path: str) -> dict:
     try:
         payload = json.loads(result.stdout or "{}")
         streams = payload.get("streams") if isinstance(payload, dict) else []
-        stream = streams[0] if isinstance(streams, list) and streams and isinstance(streams[0], dict) else {}
+        streams = streams if isinstance(streams, list) else []
+        stream = next(
+            (
+                row for row in streams
+                if isinstance(row, dict)
+                and row.get("codec_type") == "video"
+                and not bool((row.get("disposition") or {}).get("attached_pic"))
+            ),
+            {},
+        )
+        if not stream:
+            stream = next((row for row in streams if isinstance(row, dict)), {})
         average_fps = _parse_frame_rate(stream.get("avg_frame_rate"))
         nominal_fps = _parse_frame_rate(stream.get("r_frame_rate"))
+        track_inventory = []
+        for row in streams:
+            if not isinstance(row, dict):
+                continue
+            tags = row.get("tags") if isinstance(row.get("tags"), dict) else {}
+            disposition = row.get("disposition") if isinstance(row.get("disposition"), dict) else {}
+            track_inventory.append({
+                "index": int(row.get("index") or 0),
+                "type": str(row.get("codec_type") or "").strip().lower(),
+                "codec": str(row.get("codec_name") or "").strip().lower(),
+                "codec_tag": str(row.get("codec_tag_string") or "").strip().lower(),
+                "profile": str(row.get("profile") or "").strip(),
+                "language": str(tags.get("language") or "und").strip().lower(),
+                "title": str(tags.get("title") or "").strip(),
+                "attached_pic": bool(disposition.get("attached_pic")),
+            })
         return {
             "codec": str(stream.get("codec_name") or "").strip().lower(),
             "profile": str(stream.get("profile") or "").strip(),
@@ -1305,6 +1598,8 @@ def _source_video_probe(src_path: str) -> dict:
             "height": max(0, int(stream.get("height") or 0)),
             "fps": average_fps or nominal_fps,
             "nominal_fps": nominal_fps or average_fps,
+            "format": str((payload.get("format") or {}).get("format_name") or "").strip().lower(),
+            "streams": track_inventory,
             "error": "",
         }
     except Exception as exc:
@@ -2949,12 +3244,6 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
     except Exception:
         suffix = "TSD"
     job_policy = _job_encoding_policy(job)
-    output_plan = _output_container_plan(job_policy)
-    out_path = _output_path_for_source(encode_src_path, suffix, job_policy)
-    out_path_existed_before = os.path.exists(out_path)
-    job["out_path"] = out_path
-    job["output_container"] = output_plan["container"]
-    job["web_optimized"] = output_plan["web_optimized"]
 
     log_event(
         "job_started",
@@ -3011,6 +3300,29 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
             source_video.get("fps"),
         )
     selected_encoder = _selected_video_encoder(job, preset_file, preset_name)
+    try:
+        preset_definition = load_preset_definition(preset_file, preset_name)
+    except Exception:
+        preset_definition = {}
+    output_plan = _output_container_plan(
+        job_policy,
+        source_video,
+        job=job,
+        preset_definition=preset_definition,
+        selected_encoder=selected_encoder,
+    )
+    out_path = _output_path_for_source(
+        encode_src_path,
+        suffix,
+        job_policy,
+        plan=output_plan,
+    )
+    out_path_existed_before = os.path.exists(out_path)
+    job["out_path"] = out_path
+    job["output_container_requested"] = output_plan["requested_container"]
+    job["output_container"] = output_plan["container"]
+    job["output_container_reason"] = output_plan["reason"]
+    job["web_optimized"] = output_plan["web_optimized"]
     resolution_plan = _resolution_plan(
         preset_key,
         source_video,
@@ -3140,7 +3452,9 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
             f"[ByteSqueeze] Source resolution: {source_resolution_label}\n"
             f"[ByteSqueeze] Target resolution: {target_resolution_label}\n"
             f"[ByteSqueeze] Selected preset: {preset_name}\n"
-            f"[ByteSqueeze] Output container: {output_plan['container'].upper()}\n"
+            f"[ByteSqueeze] Output container: {output_plan['container'].upper()}"
+            f" (requested {output_plan['requested_container'].upper()})\n"
+            f"[ByteSqueeze] Container decision: {output_plan['reason']}\n"
             f"[ByteSqueeze] Web optimized: {'on' if output_plan['web_optimized'] else 'off'}\n"
             f"{smart_episode_log}"
             f"{frame_rate_log}"

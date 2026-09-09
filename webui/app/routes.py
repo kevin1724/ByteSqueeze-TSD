@@ -3641,7 +3641,7 @@ BETA_MEDIA_TAG_RE = re.compile(
 )
 
 
-APP_RELEASE = "3.22.0"
+APP_RELEASE = "3.23.0"
 BETA_DIMENSION_TAG_RE = re.compile(r"(?<!\d)(?:\d{3,4}x\d{3,4}|(?:8|10|12)bit)(?!\d)", re.IGNORECASE)
 HDR_PATH_RE = re.compile(
     r"(?:^|[ ._\-\[\(])(?:"
@@ -8518,6 +8518,15 @@ def _transfer_output_path_for_src(src: str, output_container: str | None = None)
     return os.path.join(folder, f"{name}-{suffix}{extension}")
 
 
+def _resolved_transfer_output_container(requested: str | None, reported: str | None) -> str:
+    """Honor fixed policies and accept a worker's per-file choice for Auto."""
+    configured = normalize_output_container(requested)
+    if configured != "auto":
+        return configured
+    selected = normalize_output_container(reported)
+    return selected if selected in {"mp4", "mkv"} else "mkv"
+
+
 def _authorize_transfer_request(transfer_id: str, kind: str) -> tuple[dict | None, str | None]:
     row = get_transfer(transfer_id)
     if not row:
@@ -8562,7 +8571,12 @@ def _finalize_transfer_output(row: dict, upload_tmp: str) -> dict:
     if not upload_ok:
         raise RuntimeError(f"uploaded output failed validation: {upload_reason}")
 
-    out_path = _transfer_output_path_for_src(src, row.get("output_container"))
+    selected_container = _resolved_transfer_output_container(
+        row.get("output_container"),
+        request.headers.get("X-Output-Container"),
+    )
+    container_reason = str(request.headers.get("X-Output-Container-Reason") or "").strip()[:240]
+    out_path = _transfer_output_path_for_src(src, selected_container)
     if os.path.exists(out_path):
         raise RuntimeError(f"output already exists: {out_path}")
 
@@ -8645,6 +8659,8 @@ def _finalize_transfer_output(row: dict, upload_tmp: str) -> dict:
         "status": "complete",
         "completed_at": time.time(),
         "out_path": out_path,
+        "output_container_selected": selected_container,
+        "output_container_reason": container_reason,
         "out_bytes": out_bytes,
         "saved_bytes": saved_bytes,
         "source_deleted": source_deleted,
@@ -8663,6 +8679,7 @@ def _finalize_transfer_output(row: dict, upload_tmp: str) -> dict:
     )
     return {
         "out_path": out_path,
+        "output_container": selected_container,
         "out_bytes": out_bytes,
         "saved_bytes": saved_bytes,
         "source_deleted": source_deleted,

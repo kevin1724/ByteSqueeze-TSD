@@ -464,11 +464,16 @@ job from starting until usage is below the new limit.
 
 ### Output container
 
-**Settings → General → Encoding settings → Output Container** selects MKV or
-MP4 for newly queued jobs. MKV remains the default for existing installations.
-The choice is snapshotted with each job and is sent to linked workers, so the
-HandBrake muxer and final `.mkv` or `.mp4` filename stay aligned. MP4 also has
-an optional **Web Optimized / Fast Start** switch; it is disabled for MKV.
+**Settings → General → Encoding settings → Output Container** selects MKV,
+MP4, or Auto for newly queued jobs. MKV remains the default for existing
+installations. Auto inspects each file independently and uses MP4 when the
+effective video, audio, and subtitle output is compatible. It safely keeps MKV
+when a selected track needs features such as DTS/DTS-HD passthrough, PGS/VobSub
+bitmap subtitles, or styled ASS/SSA subtitles. The requested policy is
+snapshotted with each job and sent to linked workers; workers return the actual
+per-file choice so the HandBrake muxer and final `.mkv` or `.mp4` filename stay
+aligned. MP4 also has an optional **Web Optimized / Fast Start** switch; it is
+disabled for MKV and Auto.
 
 ## Official Image
 
@@ -492,14 +497,14 @@ docker run -d \
 ```
 
 The `latest` and `main` images are published automatically from `main`. Stable
-controller releases also publish `3.22.0` and `3.22` tags.
+controller releases also publish `3.23.0` and `3.23` tags.
 
 The encoding-only worker has its own public Docker Hub image:
 
 [kevina1724/handbrake-tsd-worker on Docker Hub](https://hub.docker.com/r/kevina1724/handbrake-tsd-worker)
 
 `latest` and `main` follow the main branch. Stable worker releases also publish
-`2.8.0` and `2.8` tags:
+`2.9.0` and `2.9` tags:
 
 ```bash
 docker pull kevina1724/handbrake-tsd-worker:latest

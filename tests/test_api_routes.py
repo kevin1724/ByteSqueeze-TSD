@@ -83,7 +83,7 @@ class ApiRouteSmokeTests(unittest.TestCase):
 
         status = self.client.get("/api/autopilot/status")
         self.assertEqual(status.status_code, 200)
-        self.assertEqual(status.get_json()["release"], "3.22.0")
+        self.assertEqual(status.get_json()["release"], "3.23.0")
         self.assertIn("continuous_learning", status.get_json())
         self.assertIn("onboarding", status.get_json())
 
@@ -1046,6 +1046,7 @@ class ApiRouteSmokeTests(unittest.TestCase):
 
             settings_page = self.client.get("/settings")
             self.assertIn(b'id="outputContainerSelect"', settings_page.data)
+            self.assertIn(b'<option value="auto">Auto (smart per file)</option>', settings_page.data)
             self.assertIn(b'id="webOptimizedToggle"', settings_page.data)
             self.assertIn(
                 b"Moves MP4 metadata to the beginning of the file for faster streaming and playback startup.",
@@ -1058,6 +1059,19 @@ class ApiRouteSmokeTests(unittest.TestCase):
             ).get_json()["settings"]
             self.assertEqual(mkv["output_container"], "mkv")
             self.assertFalse(mkv["web_optimized"])
+
+            auto = self.client.post(
+                "/api/settings",
+                json={"output_container": "auto", "web_optimized": True},
+            ).get_json()["settings"]
+            self.assertEqual(auto["output_container"], "auto")
+            self.assertFalse(auto["web_optimized"])
+
+            app_settings._settings_cache = None
+            self.assertEqual(
+                self.client.get("/api/settings").get_json()["settings"]["output_container"],
+                "auto",
+            )
 
             invalid = self.client.post(
                 "/api/settings",
@@ -1089,6 +1103,10 @@ class ApiRouteSmokeTests(unittest.TestCase):
             ),
             os.path.join(TEST_MEDIA, "Source.Movie-TSD.mp4"),
         )
+        self.assertEqual(app_routes._resolved_transfer_output_container("auto", "mp4"), "mp4")
+        self.assertEqual(app_routes._resolved_transfer_output_container("auto", "mkv"), "mkv")
+        self.assertEqual(app_routes._resolved_transfer_output_container("auto", "invalid"), "mkv")
+        self.assertEqual(app_routes._resolved_transfer_output_container("mkv", "mp4"), "mkv")
 
     def test_mobile_next_available_distributes_a_show_as_independent_jobs(self):
         paths = []
@@ -3443,7 +3461,7 @@ class ApiRouteSmokeTests(unittest.TestCase):
 
         self.assertEqual(dashboard.status_code, 200, dashboard.get_data(as_text=True))
         dashboard_payload = dashboard.get_json()
-        self.assertEqual(dashboard_payload["release"], "3.22.0")
+        self.assertEqual(dashboard_payload["release"], "3.23.0")
         self.assertEqual(dashboard_payload["library"]["movies"], 1)
         self.assertIn("automation", dashboard_payload)
         self.assertIn("storage", dashboard_payload)
