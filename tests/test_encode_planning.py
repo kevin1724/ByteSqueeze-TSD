@@ -8,6 +8,35 @@ from webui.app import jobs, presets
 
 
 class EncodePlanningTests(unittest.TestCase):
+    def test_output_container_plan_controls_muxer_fast_start_and_extension(self):
+        default_plan = jobs._output_container_plan({})
+        self.assertEqual(default_plan["container"], "mkv")
+        self.assertEqual(default_plan["extension"], ".mkv")
+        self.assertEqual(default_plan["cli_args"], ["--format", "av_mkv"])
+
+        mp4_plan = jobs._output_container_plan(
+            {"output_container": "mp4", "web_optimized": True}
+        )
+        self.assertEqual(mp4_plan["extension"], ".mp4")
+        self.assertEqual(
+            mp4_plan["cli_args"],
+            ["--format", "av_mp4", "--optimize"],
+        )
+        self.assertEqual(
+            jobs._output_path_for_source(
+                "/media/Movie.Source.mkv",
+                "TSD",
+                {"output_container": "mp4", "web_optimized": True},
+            ),
+            os.path.join("/media", "Movie.Source-TSD.mp4"),
+        )
+
+        mkv_plan = jobs._output_container_plan(
+            {"output_container": "mkv", "web_optimized": True}
+        )
+        self.assertFalse(mkv_plan["web_optimized"])
+        self.assertNotIn("--optimize", mkv_plan["cli_args"])
+
     def test_requested_qsv_scenarios_use_the_expected_decode_and_resolution_plan(self):
         scenarios = (
             ("local H.264 1080p", "local", "1080", "h264", 1920, 1080, (1920, 1080)),
@@ -226,7 +255,14 @@ class EncodePlanningTests(unittest.TestCase):
 
         self.assertLess(script.index("${EXTRA_ARGS}"), script.index("${DIMENSION_OPTS}"))
         self.assertLess(script.index("${DIMENSION_OPTS}"), script.index("${HW_DECODE_OPTS}"))
+        self.assertLess(script.index("${HW_DECODE_OPTS}"), script.index("${CONTAINER_OPTS}"))
         self.assertIn('HW_DECODE_OPTS="${HB_HW_DECODE_OPTS:---disable-hw-decoding}"', script)
+        self.assertIn('OUTPUT_CONTAINER=$(printf', script)
+        self.assertIn('CONTAINER_OPTS="--format av_mp4"', script)
+        self.assertIn('CONTAINER_OPTS="$CONTAINER_OPTS --optimize"', script)
+        self.assertIn('CONTAINER_OPTS="--format av_mkv"', script)
+        self.assertEqual(script.count("${CONTAINER_OPTS}"), 3)
+        self.assertIn('OUT="${DIR}/${NAME}-${SUFFIX}.${EXT}"', script)
         self.assertIn("bytesqueeze-qsv-preflight encode", script)
         self.assertIn('QSV_ADAPTER_OPTS="--qsv-adapter $QSV_ADAPTER"', script)
         self.assertIn('rm -f -- "$OUT"', script)

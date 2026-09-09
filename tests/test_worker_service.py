@@ -101,11 +101,21 @@ class HeadlessWorkerServiceTests(unittest.TestCase):
                     dispatch_mode="auto",
                     preset_selection="smart",
                     preset_adaptive=True,
+                    encoding_policy={
+                        "output_container": "mp4",
+                        "web_optimized": True,
+                    },
                 )
                 queued = jobs.get_job(job_id)
                 self.assertEqual(queued["mode"], "auto_node")
                 self.assertEqual(queued["phase"], "waiting_for_node")
                 self.assertEqual(queued["dispatch_node_name"], "Next available node")
+                self.assertEqual(queued["encoding_policy"]["output_container"], "mp4")
+                self.assertTrue(queued["encoding_policy"]["web_optimized"])
+                self.assertEqual(
+                    queued["dispatch_plan"]["encoding_policy"],
+                    queued["encoding_policy"],
+                )
                 self.assertEqual(
                     queued["queued_preset_name"],
                     "Smart Balanced · H.265 10-bit · Intel QSV · 1080p",
@@ -129,6 +139,10 @@ class HeadlessWorkerServiceTests(unittest.TestCase):
                 self.assertEqual(
                     queued["dispatch_plan"]["queued_preset_name"],
                     queued["queued_preset_name"],
+                )
+                self.assertEqual(
+                    queued["dispatch_plan"]["encoding_policy"]["output_container"],
+                    "mp4",
                 )
                 self.assertEqual(jobs.get_next_auto_dispatch_job()[0], job_id)
 
@@ -390,7 +404,11 @@ class HeadlessWorkerServiceTests(unittest.TestCase):
                 "protocol_version": 2,
             },
         ).get_json()
-        policy = {"hardware_transcode_concurrency": 3}
+        policy = {
+            "hardware_transcode_concurrency": 3,
+            "output_container": "mp4",
+            "web_optimized": True,
+        }
         body = json.dumps(policy).encode("utf-8")
         headers = node_linking.hmac_headers(
             "POST",
@@ -409,6 +427,8 @@ class HeadlessWorkerServiceTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
         applied = response.get_json()["encoding_policy"]
         self.assertEqual(applied["hardware_transcode_concurrency"], 3)
+        self.assertEqual(applied["output_container"], "mp4")
+        self.assertTrue(applied["web_optimized"])
         self.assertTrue(applied["controller_managed"])
         stale_job = {
             "mode": "remote_transfer",
@@ -417,8 +437,10 @@ class HeadlessWorkerServiceTests(unittest.TestCase):
         self.assertEqual(jobs._hardware_transcode_limit(job=stale_job), 3)
 
         health = self.client.get("/api/health").get_json()
-        self.assertEqual(health["release"], "2.7.1")
+        self.assertEqual(health["release"], "2.8.0")
         self.assertEqual(health["encoding_policy"]["hardware_transcode_concurrency"], 3)
+        self.assertEqual(health["encoding_policy"]["output_container"], "mp4")
+        self.assertTrue(health["encoding_policy"]["web_optimized"])
 
     def test_hardware_preset_and_concurrency_limit_are_detected_safely(self):
         preset = {

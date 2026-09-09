@@ -28,6 +28,7 @@ from webui.app import events as app_events  # noqa: E402
 from webui.app import jobs as app_jobs  # noqa: E402
 from webui.app import node_linking as app_node_linking  # noqa: E402
 from webui.app import routes as app_routes  # noqa: E402
+from webui.app import settings as app_settings  # noqa: E402
 from webui.app import storage_stats as app_storage_stats  # noqa: E402
 from webui.app import wizard_llm as app_wizard_llm  # noqa: E402
 from webui.app.media_metadata import _cache_sidecar, _choose_movie, _choose_show, _sidecar_directories  # noqa: E402
@@ -82,7 +83,7 @@ class ApiRouteSmokeTests(unittest.TestCase):
 
         status = self.client.get("/api/autopilot/status")
         self.assertEqual(status.status_code, 200)
-        self.assertEqual(status.get_json()["release"], "3.21.0")
+        self.assertEqual(status.get_json()["release"], "3.22.0")
         self.assertIn("continuous_learning", status.get_json())
         self.assertIn("onboarding", status.get_json())
 
@@ -980,9 +981,15 @@ class ApiRouteSmokeTests(unittest.TestCase):
             )
             body = dispatch_call.kwargs["body"]
             self.assertEqual(body["encoding_policy"]["hardware_transcode_concurrency"], 4)
+            self.assertEqual(body["encoding_policy"]["output_container"], "mkv")
+            self.assertFalse(body["encoding_policy"]["web_optimized"])
             self.assertEqual(
                 body["jobs"][0]["encoding_policy"]["hardware_transcode_concurrency"],
                 4,
+            )
+            self.assertEqual(
+                body["jobs"][0]["encoding_policy"]["output_container"],
+                "mkv",
             )
         finally:
             app_node_linking.delete_node(worker["id"])
@@ -1020,6 +1027,68 @@ class ApiRouteSmokeTests(unittest.TestCase):
         self.assertEqual(create.call_args.kwargs["dispatch_mode"], "auto")
         self.assertEqual(create.call_args.kwargs["encode_metadata"]["encoder"], "qsv_h265_10bit")
         wake.assert_called_once_with()
+
+    def test_output_container_and_mp4_fast_start_persist_and_validate(self):
+        original = self.client.get("/api/settings").get_json()["settings"]
+        try:
+            saved = self.client.post(
+                "/api/settings",
+                json={"output_container": "mp4", "web_optimized": True},
+            )
+            self.assertEqual(saved.status_code, 200)
+            self.assertEqual(saved.get_json()["settings"]["output_container"], "mp4")
+            self.assertTrue(saved.get_json()["settings"]["web_optimized"])
+
+            app_settings._settings_cache = None
+            reloaded = self.client.get("/api/settings").get_json()["settings"]
+            self.assertEqual(reloaded["output_container"], "mp4")
+            self.assertTrue(reloaded["web_optimized"])
+
+            settings_page = self.client.get("/settings")
+            self.assertIn(b'id="outputContainerSelect"', settings_page.data)
+            self.assertIn(b'id="webOptimizedToggle"', settings_page.data)
+            self.assertIn(
+                b"Moves MP4 metadata to the beginning of the file for faster streaming and playback startup.",
+                settings_page.data,
+            )
+
+            mkv = self.client.post(
+                "/api/settings",
+                json={"output_container": "mkv", "web_optimized": True},
+            ).get_json()["settings"]
+            self.assertEqual(mkv["output_container"], "mkv")
+            self.assertFalse(mkv["web_optimized"])
+
+            invalid = self.client.post(
+                "/api/settings",
+                json={"output_container": "avi", "web_optimized": True},
+            ).get_json()["settings"]
+            self.assertEqual(invalid["output_container"], "mkv")
+            self.assertFalse(invalid["web_optimized"])
+        finally:
+            self.client.post(
+                "/api/settings",
+                json={
+                    "output_container": original.get("output_container", "mkv"),
+                    "web_optimized": original.get("web_optimized", False),
+                },
+            )
+
+    def test_remote_transfer_output_extension_matches_container(self):
+        self.assertEqual(
+            app_routes._transfer_output_path_for_src(
+                os.path.join(TEST_MEDIA, "Source.Movie.mp4"),
+                "mkv",
+            ),
+            os.path.join(TEST_MEDIA, "Source.Movie-TSD.mkv"),
+        )
+        self.assertEqual(
+            app_routes._transfer_output_path_for_src(
+                os.path.join(TEST_MEDIA, "Source.Movie.mkv"),
+                "mp4",
+            ),
+            os.path.join(TEST_MEDIA, "Source.Movie-TSD.mp4"),
+        )
 
     def test_mobile_next_available_distributes_a_show_as_independent_jobs(self):
         paths = []
@@ -3374,7 +3443,7 @@ class ApiRouteSmokeTests(unittest.TestCase):
 
         self.assertEqual(dashboard.status_code, 200, dashboard.get_data(as_text=True))
         dashboard_payload = dashboard.get_json()
-        self.assertEqual(dashboard_payload["release"], "3.21.0")
+        self.assertEqual(dashboard_payload["release"], "3.22.0")
         self.assertEqual(dashboard_payload["library"]["movies"], 1)
         self.assertIn("automation", dashboard_payload)
         self.assertIn("storage", dashboard_payload)

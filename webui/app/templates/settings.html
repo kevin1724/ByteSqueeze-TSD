@@ -554,7 +554,27 @@
   <div id="encoding-settings" class="section-card main-settings-section">
     <h2>Encoding settings</h2>
 
-    <div class="row">
+    <section class="output-container-setting" aria-labelledby="outputContainerHeading">
+      <h3 id="outputContainerHeading">Output Container</h3>
+      <div class="row">
+        <label for="outputContainerSelect"><strong>Container Type</strong></label>
+        <select id="outputContainerSelect" style="min-width:180px;">
+          <option value="mkv">MKV</option>
+          <option value="mp4">MP4</option>
+        </select>
+        <span class="small">Sets the container and filename extension for all newly queued local and worker encodes.</span>
+      </div>
+
+      <div id="webOptimizedSetting" class="row" style="margin-top:10px;" hidden>
+        <label class="toggle-line" for="webOptimizedToggle">
+          <input id="webOptimizedToggle" type="checkbox">
+          Web Optimized / Fast Start
+        </label>
+        <span class="small">Moves MP4 metadata to the beginning of the file for faster streaming and playback startup.</span>
+      </div>
+    </section>
+
+    <div class="row" style="margin-top:14px;">
       <label for="hbThreadsInput"><strong>HandBrake threads</strong> (0 = auto):</label>
       <input id="hbThreadsInput" type="number" min="0" step="1" style="width:120px;">
     </div>
@@ -2062,6 +2082,15 @@
       const val = parseInt(initialSettings?.hb_threads || 0, 10) || 0;
       input.value = val > 0 ? val : "";
 
+      const outputContainerSelect = document.getElementById("outputContainerSelect");
+      if (outputContainerSelect) {
+        outputContainerSelect.value = initialSettings?.output_container === "mp4" ? "mp4" : "mkv";
+        outputContainerSelect.addEventListener("change", syncOutputContainerOptions);
+      }
+      const webOptimizedToggle = document.getElementById("webOptimizedToggle");
+      if (webOptimizedToggle) webOptimizedToggle.checked = Boolean(initialSettings?.web_optimized);
+      syncOutputContainerOptions();
+
       const queueUiModeSelect = document.getElementById("queueUiModeSelect");
       if (queueUiModeSelect) {
         queueUiModeSelect.value = initialSettings?.queue_ui_mode || "buttons";
@@ -2103,6 +2132,18 @@
       if (autoStopEnabled) autoStopEnabled.checked = Boolean(initialSettings?.auto_stop_large_output_enabled);
       const autoStopPercent = document.getElementById("autoStopLargeOutputPercent");
       if (autoStopPercent) autoStopPercent.value = Number(initialSettings?.auto_stop_large_output_percent || 90);
+    }
+
+    function syncOutputContainerOptions() {
+      const container = document.getElementById("outputContainerSelect")?.value || "mkv";
+      const row = document.getElementById("webOptimizedSetting");
+      const toggle = document.getElementById("webOptimizedToggle");
+      const supportsFastStart = container === "mp4";
+      if (row) row.hidden = !supportsFastStart;
+      if (toggle) {
+        toggle.disabled = !supportsFastStart;
+        if (!supportsFastStart) toggle.checked = false;
+      }
     }
 
     function updateHardwareConcurrencyLabel() {
@@ -2170,6 +2211,8 @@
       const hardwareTranscodeConcurrency = safeNumber(document.getElementById("hardwareTranscodeConcurrency")?.value, 1, 1, 8);
       const autoStopLargeOutputEnabled = Boolean(document.getElementById("autoStopLargeOutputEnabled")?.checked);
       const autoStopLargeOutputPercent = safeNumber(document.getElementById("autoStopLargeOutputPercent")?.value, 90, 1, 500);
+      const outputContainer = document.getElementById("outputContainerSelect")?.value === "mp4" ? "mp4" : "mkv";
+      const webOptimized = outputContainer === "mp4" && Boolean(document.getElementById("webOptimizedToggle")?.checked);
 
       let threads = parseInt(threadsRaw, 10);
       if (isNaN(threads) || threads < 0) threads = 0;
@@ -2187,6 +2230,8 @@
             hardware_transcode_concurrency: hardwareTranscodeConcurrency,
             auto_stop_large_output_enabled: autoStopLargeOutputEnabled,
             auto_stop_large_output_percent: autoStopLargeOutputPercent,
+            output_container: outputContainer,
+            web_optimized: webOptimized,
             queue_ui_mode: queueUiMode,
             ui_version: uiVersion,
             ui_density: uiDensity,

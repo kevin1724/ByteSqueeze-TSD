@@ -462,6 +462,14 @@ CPU job keeps its FIFO position instead of being bypassed by later GPU jobs.
 Lowering the limit does not stop work already running; it only prevents another
 job from starting until usage is below the new limit.
 
+### Output container
+
+**Settings → General → Encoding settings → Output Container** selects MKV or
+MP4 for newly queued jobs. MKV remains the default for existing installations.
+The choice is snapshotted with each job and is sent to linked workers, so the
+HandBrake muxer and final `.mkv` or `.mp4` filename stay aligned. MP4 also has
+an optional **Web Optimized / Fast Start** switch; it is disabled for MKV.
+
 ## Official Image
 
 Pull:
@@ -484,14 +492,14 @@ docker run -d \
 ```
 
 The `latest` and `main` images are published automatically from `main`. Stable
-controller releases also publish `3.20.0` and `3.20` tags.
+controller releases also publish `3.22.0` and `3.22` tags.
 
 The encoding-only worker has its own public Docker Hub image:
 
 [kevina1724/handbrake-tsd-worker on Docker Hub](https://hub.docker.com/r/kevina1724/handbrake-tsd-worker)
 
 `latest` and `main` follow the main branch. Stable worker releases also publish
-`2.7.1` and `2.7` tags:
+`2.8.0` and `2.8` tags:
 
 ```bash
 docker pull kevina1724/handbrake-tsd-worker:latest

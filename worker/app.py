@@ -49,15 +49,17 @@ from webui.app.node_linking import (
     verify_hmac,
 )
 from webui.app.presets import guess_preset_from_filename, load_preset_config
-from webui.app.settings import load_settings, save_settings
+from webui.app.settings import load_settings, normalize_output_container, save_settings
 
 
-WORKER_RELEASE = "2.7.1"
+WORKER_RELEASE = "2.8.0"
 
 
 def _public_encoding_policy() -> dict:
     settings = load_settings()
+    output_container = normalize_output_container(settings.get("output_container"))
     return {
+        "hb_threads": int(settings.get("hb_threads") or 0),
         "hardware_transcode_concurrency": int(
             settings.get("hardware_transcode_concurrency") or 1
         ),
@@ -73,6 +75,10 @@ def _public_encoding_policy() -> dict:
             "auto_stop_large_output_percent",
             90,
         ),
+        "output_container": output_container,
+        "web_optimized": bool(
+            output_container == "mp4" and settings.get("web_optimized", False)
+        ),
     }
 
 
@@ -83,6 +89,8 @@ def _apply_controller_encoding_policy(policy: dict | None) -> dict:
         "hardware_transcode_concurrency",
         "auto_stop_large_output_enabled",
         "auto_stop_large_output_percent",
+        "output_container",
+        "web_optimized",
     }
     updates = {key: policy[key] for key in allowed if key in policy}
     if "hardware_transcode_concurrency" in updates:
@@ -418,7 +426,11 @@ def create_worker_app(*, announce_pairing: bool = True) -> Flask:
                 extra_args=str(job.get("extra_args") or ""),
                 preset_bundle=job.get("preset_bundle"),
                 encode_metadata=job.get("encode_metadata") if isinstance(job.get("encode_metadata"), dict) else None,
-                encoding_policy=job.get("encoding_policy") if isinstance(job.get("encoding_policy"), dict) else None,
+                encoding_policy=(
+                    job.get("encoding_policy")
+                    if isinstance(job.get("encoding_policy"), dict)
+                    else applied_policy
+                ),
             )
             count += 1 if created else 0
 

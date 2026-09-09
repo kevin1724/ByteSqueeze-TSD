@@ -113,6 +113,7 @@ from .presets import (
 )
 from .settings import (
     load_settings,
+    normalize_output_container,
     save_settings,
 )
 from .mobile_linking import (
@@ -3640,7 +3641,7 @@ BETA_MEDIA_TAG_RE = re.compile(
 )
 
 
-APP_RELEASE = "3.21.0"
+APP_RELEASE = "3.22.0"
 BETA_DIMENSION_TAG_RE = re.compile(r"(?<!\d)(?:\d{3,4}x\d{3,4}|(?:8|10|12)bit)(?!\d)", re.IGNORECASE)
 HDR_PATH_RE = re.compile(
     r"(?:^|[ ._\-\[\(])(?:"
@@ -8067,16 +8068,31 @@ def _prepare_plan_for_node(plan: dict, node: dict) -> dict:
     return prepared
 
 
-def _worker_encoding_policy(selected: dict) -> dict:
+def _worker_encoding_policy(selected: dict, source_policy: dict | None = None) -> dict:
     controller_settings = load_settings()
+    source = source_policy if isinstance(source_policy, dict) else controller_settings
+    output_container = normalize_output_container(source.get("output_container"))
+    web_optimized = source.get("web_optimized", False)
+    if isinstance(web_optimized, str):
+        web_optimized = web_optimized.strip().lower() in {"1", "true", "yes", "on"}
     return {
-        "hb_threads": controller_settings.get("hb_threads", 0),
+        "hb_threads": source.get("hb_threads", controller_settings.get("hb_threads", 0)),
         "hardware_transcode_concurrency": normalize_hardware_transcode_concurrency(
             selected.get("hardware_transcode_concurrency"),
             controller_settings.get("hardware_transcode_concurrency", 1),
         ),
-        "auto_stop_large_output_enabled": controller_settings.get("auto_stop_large_output_enabled", False),
-        "auto_stop_large_output_percent": controller_settings.get("auto_stop_large_output_percent", 90),
+        "auto_stop_large_output_enabled": source.get(
+            "auto_stop_large_output_enabled",
+            controller_settings.get("auto_stop_large_output_enabled", False),
+        ),
+        "auto_stop_large_output_percent": source.get(
+            "auto_stop_large_output_percent",
+            controller_settings.get("auto_stop_large_output_percent", 90),
+        ),
+        "output_container": output_container,
+        "web_optimized": bool(
+            output_container == "mp4" and web_optimized
+        ),
     }
 
 
@@ -8107,7 +8123,7 @@ def _dispatch_plan_to_worker(
         selected["controller_url"] = controller_url
         save_node(selected)
 
-    policy = _worker_encoding_policy(selected)
+    policy = _worker_encoding_policy(selected, plan.get("encoding_policy"))
 
     def remote_payload() -> dict:
         source_size = int(os.path.getsize(src))
@@ -8119,6 +8135,8 @@ def _dispatch_plan_to_worker(
         transfer_row["controller_url"] = controller_url
         transfer_row["remote_temp_dir"] = str(selected.get("remote_temp_dir") or "").strip()
         transfer_row["encode_metadata"] = encode_metadata
+        transfer_row["output_container"] = policy["output_container"]
+        transfer_row["web_optimized"] = policy["web_optimized"]
         save_transfer(transfer_row)
         return {
             "src": src,
@@ -8492,11 +8510,12 @@ def _ensure_auto_node_dispatch_for_pending_jobs() -> bool:
     return True
 
 
-def _transfer_output_path_for_src(src: str) -> str:
+def _transfer_output_path_for_src(src: str, output_container: str | None = None) -> str:
     suffix = (os.environ.get("SUFFIX") or "TSD").strip() or "TSD"
     folder = os.path.dirname(src)
-    name, ext = os.path.splitext(os.path.basename(src))
-    return os.path.join(folder, f"{name}-{suffix}{ext}")
+    name = os.path.splitext(os.path.basename(src))[0]
+    extension = ".mp4" if normalize_output_container(output_container) == "mp4" else ".mkv"
+    return os.path.join(folder, f"{name}-{suffix}{extension}")
 
 
 def _authorize_transfer_request(transfer_id: str, kind: str) -> tuple[dict | None, str | None]:
@@ -8543,7 +8562,7 @@ def _finalize_transfer_output(row: dict, upload_tmp: str) -> dict:
     if not upload_ok:
         raise RuntimeError(f"uploaded output failed validation: {upload_reason}")
 
-    out_path = _transfer_output_path_for_src(src)
+    out_path = _transfer_output_path_for_src(src, row.get("output_container"))
     if os.path.exists(out_path):
         raise RuntimeError(f"output already exists: {out_path}")
 
@@ -9982,18 +10001,12 @@ def register_routes(app):
             )
             row["hardware_transcode_concurrency"] = limit
             save_node(row)
-            controller_settings = load_settings()
             try:
                 result = signed_json_request(
                     row,
                     "/api/node/config",
                     method="POST",
-                    body={
-                        "hb_threads": controller_settings.get("hb_threads", 0),
-                        "hardware_transcode_concurrency": limit,
-                        "auto_stop_large_output_enabled": controller_settings.get("auto_stop_large_output_enabled", False),
-                        "auto_stop_large_output_percent": controller_settings.get("auto_stop_large_output_percent", 90),
-                    },
+                    body=_worker_encoding_policy(row),
                     timeout=10,
                 )
                 if isinstance(result.get("encoding_policy"), dict):
@@ -10487,7 +10500,11 @@ def register_routes(app):
                 extra_args=str(job.get("extra_args") or ""),
                 preset_bundle=job.get("preset_bundle"),
                 encode_metadata=job.get("encode_metadata") if isinstance(job.get("encode_metadata"), dict) else None,
-                encoding_policy=job.get("encoding_policy") if isinstance(job.get("encoding_policy"), dict) else None,
+                encoding_policy=(
+                    job.get("encoding_policy")
+                    if isinstance(job.get("encoding_policy"), dict)
+                    else data.get("encoding_policy")
+                ),
             )
             count += 1 if created else 0
 
@@ -10520,6 +10537,11 @@ def register_routes(app):
                 extra_args=str(job.get("extra_args") or ""),
                 preset_bundle=job.get("preset_bundle"),
                 encode_metadata=job.get("encode_metadata") if isinstance(job.get("encode_metadata"), dict) else None,
+                encoding_policy=(
+                    job.get("encoding_policy")
+                    if isinstance(job.get("encoding_policy"), dict)
+                    else data.get("encoding_policy")
+                ),
             )
             after = len([j for j in list_jobs_for_api() if j.get("src") == src and j.get("status") in {"queued", "running"}])
             count += 1 if after > before else 0
@@ -10815,19 +10837,7 @@ def register_routes(app):
         row["hardware_transcode_concurrency"] = limit
         save_node(row)
 
-        controller_settings = load_settings()
-        policy = {
-            "hb_threads": controller_settings.get("hb_threads", 0),
-            "hardware_transcode_concurrency": limit,
-            "auto_stop_large_output_enabled": controller_settings.get(
-                "auto_stop_large_output_enabled",
-                False,
-            ),
-            "auto_stop_large_output_percent": controller_settings.get(
-                "auto_stop_large_output_percent",
-                90,
-            ),
-        }
+        policy = _worker_encoding_policy(row)
         applied_online = False
         warning = ""
         try:
@@ -11032,16 +11042,7 @@ def register_routes(app):
             save_node(selected)
         jobs_payload = []
         skipped = []
-        controller_settings = load_settings()
-        worker_encoding_policy = {
-            "hb_threads": controller_settings.get("hb_threads", 0),
-            "hardware_transcode_concurrency": normalize_hardware_transcode_concurrency(
-                selected.get("hardware_transcode_concurrency"),
-                controller_settings.get("hardware_transcode_concurrency", 1),
-            ),
-            "auto_stop_large_output_enabled": controller_settings.get("auto_stop_large_output_enabled", False),
-            "auto_stop_large_output_percent": controller_settings.get("auto_stop_large_output_percent", 90),
-        }
+        worker_encoding_policy = _worker_encoding_policy(selected)
 
         def build_remote_job_payload(src: str, plan: dict) -> tuple[dict | None, str | None]:
             try:
@@ -11054,6 +11055,8 @@ def register_routes(app):
                 transfer_row["controller_url"] = controller_url
                 transfer_row["remote_temp_dir"] = str(selected.get("remote_temp_dir") or "").strip()
                 transfer_row["encode_metadata"] = encode_metadata
+                transfer_row["output_container"] = worker_encoding_policy["output_container"]
+                transfer_row["web_optimized"] = worker_encoding_policy["web_optimized"]
                 save_transfer(transfer_row)
                 transfer_payload = {
                     "id": grant["id"],

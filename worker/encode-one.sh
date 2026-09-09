@@ -27,8 +27,30 @@ SUFFIX="${SUFFIX:-TSD}"
 
 DIR=$(dirname "$SRC")
 BASE=$(basename "$SRC")
-EXT="${BASE##*.}"
 NAME="${BASE%.*}"
+
+# The controller snapshots these global settings onto every queued job. Keep
+# MKV as the default because that is what all bundled presets used before the
+# setting existed. Container options are placed after preset/user arguments so
+# the global selection is authoritative.
+OUTPUT_CONTAINER=$(printf '%s\n' "${HB_OUTPUT_CONTAINER:-mkv}" | tr 'A-Z' 'a-z')
+WEB_OPTIMIZED="${HB_WEB_OPTIMIZED:-0}"
+case "$OUTPUT_CONTAINER" in
+  mp4)
+    EXT="mp4"
+    CONTAINER_OPTS="--format av_mp4"
+    case "$WEB_OPTIMIZED" in
+      1|true|TRUE|yes|YES|on|ON) CONTAINER_OPTS="$CONTAINER_OPTS --optimize" ;;
+      *) WEB_OPTIMIZED="0" ;;
+    esac
+    ;;
+  *)
+    OUTPUT_CONTAINER="mkv"
+    EXT="mkv"
+    WEB_OPTIMIZED="0"
+    CONTAINER_OPTS="--format av_mkv"
+    ;;
+esac
 
 # 🔒 Skip if this file already looks TSD-tagged
 LOWER_NAME=$(printf '%s\n' "$NAME" | tr 'A-Z' 'a-z')
@@ -86,6 +108,8 @@ echo "Target : $OUT"
 echo "Suffix : -$SUFFIX"
 echo "Preset file : $PRESET_FILE"
 echo "Preset name : $PRESET_NAME"
+echo "[ByteSqueeze] Output container: $(printf '%s' "$OUTPUT_CONTAINER" | tr 'a-z' 'A-Z')"
+echo "[ByteSqueeze] Web optimized: $([ "$WEB_OPTIMIZED" = "0" ] && printf 'off' || printf 'on')"
 echo "HandBrake : $(HandBrakeCLI --version 2>&1 | sed -n '1p')"
 echo "[ByteSqueeze] Hardware decode: ${HB_HW_DECODE_LABEL:-software fallback (not configured)}"
 echo "[ByteSqueeze] Video encoder: ${HB_VIDEO_ENCODER:-unknown}"
@@ -144,6 +168,7 @@ HandBrakeCLI \
   ${DIMENSION_OPTS} \
   ${QSV_ADAPTER_OPTS} \
   ${HW_DECODE_OPTS} \
+  ${CONTAINER_OPTS} \
   -i "$SRC" \
   -o "$OUT"
 ENCODE_STATUS=$?
@@ -163,6 +188,7 @@ if [ "$ENCODE_STATUS" -ne 0 ] && [ "$HW_DECODE_OPTS" = "--enable-hw-decoding qsv
     ${DIMENSION_OPTS} \
     ${QSV_ADAPTER_OPTS} \
     --disable-hw-decoding \
+    ${CONTAINER_OPTS} \
     -i "$SRC" \
     -o "$OUT"
 elif [ "$ENCODE_STATUS" -ne 0 ]; then
@@ -175,6 +201,7 @@ else
     ${HB_THREAD_OPTS} \
     ${DIMENSION_OPTS} \
     ${HW_DECODE_OPTS} \
+    ${CONTAINER_OPTS} \
     -i "$SRC" \
     -o "$OUT" \
     -e x264 -q 20 -B 160

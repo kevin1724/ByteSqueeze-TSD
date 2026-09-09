@@ -43,7 +43,7 @@ from .config import (
     ALLOWED_PREFIXES,
 )
 from .presets import load_preset_definition, resolve_preset_file_and_name
-from .settings import load_settings  # pull in global settings (hb_threads, etc.)
+from .settings import load_settings, normalize_output_container
 from .events import log_event
 from .storage_stats import get_summary as get_storage_summary, list_encodes, record_encode
 
@@ -635,12 +635,23 @@ def _normalize_encoding_policy(policy: dict | None = None) -> dict:
         hardware_concurrency = int(source.get("hardware_transcode_concurrency") or 1)
     except (TypeError, ValueError):
         hardware_concurrency = 1
+    output_container = normalize_output_container(source.get("output_container"))
+    web_optimized_value = source.get("web_optimized", False)
+    if isinstance(web_optimized_value, str):
+        web_optimized_value = web_optimized_value.strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
     return {
         "hb_threads": hb_threads,
         "hardware_transcode_concurrency": max(1, min(8, hardware_concurrency)),
         "auto_stop_large_output_enabled": bool(source.get("auto_stop_large_output_enabled", False)),
         "auto_stop_large_output_percent": round(max(1.0, min(500.0, stop_percent)), 1),
+        "output_container": output_container,
+        "web_optimized": bool(output_container == "mp4" and web_optimized_value),
     }
 
 
@@ -648,6 +659,29 @@ def _job_encoding_policy(job: dict | None) -> dict:
     job = job if isinstance(job, dict) else {}
     stored = job.get("encoding_policy")
     return _normalize_encoding_policy(stored if isinstance(stored, dict) else None)
+
+
+def _output_container_plan(policy: dict | None = None) -> dict:
+    """Build the controlled HandBrake muxer options and filename extension."""
+    normalized = _normalize_encoding_policy(policy)
+    container = normalized["output_container"]
+    web_optimized = bool(container == "mp4" and normalized.get("web_optimized"))
+    cli_args = ["--format", "av_mp4" if container == "mp4" else "av_mkv"]
+    if web_optimized:
+        cli_args.append("--optimize")
+    return {
+        "container": container,
+        "extension": ".mp4" if container == "mp4" else ".mkv",
+        "web_optimized": web_optimized,
+        "cli_args": cli_args,
+    }
+
+
+def _output_path_for_source(src: str, suffix: str, policy: dict | None = None) -> str:
+    plan = _output_container_plan(policy)
+    folder = os.path.dirname(src)
+    name = os.path.splitext(os.path.basename(src))[0]
+    return os.path.join(folder, f"{name}-{suffix}{plan['extension']}")
 
 
 def _estimated_output_stop_guard(job: dict) -> dict | None:
@@ -1780,6 +1814,10 @@ def load_jobs():
                     "preset_preferences",
                     j.get("preset_preferences") if isinstance(j.get("preset_preferences"), dict) else {},
                 )
+                loaded_dispatch_plan.setdefault(
+                    "encoding_policy",
+                    _normalize_encoding_policy(j.get("encoding_policy")),
+                )
                 # Repair stale Smart labels written by older releases.  A
                 # persisted base bundle name must not override the actual
                 # episode encoder selected in the immutable dispatch plan.
@@ -1905,6 +1943,7 @@ def create_job(
     preset_selection: str = "",
     preset_adaptive: bool = False,
     preset_preferences: dict | None = None,
+    encoding_policy: dict | None = None,
 ) -> str:
     """
     Create a single job and append it to the queue.
@@ -1944,6 +1983,7 @@ def create_job(
     preferences = preset_preferences if isinstance(preset_preferences, dict) else (
         metadata_source.get("preset_preferences") if isinstance(metadata_source.get("preset_preferences"), dict) else {}
     )
+    queued_encoding_policy = _normalize_encoding_policy(encoding_policy)
     method = _encode_metadata_from_extra_args(extra_args, preset, encode_metadata)
     normalized_bundle = _normalize_preset_bundle(preset_bundle) or snapshot_preset_bundle(preset)
     queued_preset_name = _queued_preset_display_name(
@@ -1966,6 +2006,7 @@ def create_job(
             "preset_preferences": preferences,
             "queued_preset_name": queued_preset_name,
             "preset_revision": 1,
+            "encoding_policy": queued_encoding_policy,
         }
     jobs[job_id] = {
         "status": "queued",
@@ -1993,6 +2034,7 @@ def create_job(
             if isinstance(metadata_source.get("preset_adaptation"), dict)
             else None
         ),
+        "encoding_policy": queued_encoding_policy,
         "encode_method": method.get("encode_method"),
         "encoder": method.get("encoder"),
         "video_codec": method.get("video_codec"),
@@ -2145,6 +2187,7 @@ def replace_queued_job_preset(job_id: str, plan: dict) -> tuple[bool, str | None
                 "preset_preferences": job.get("preset_preferences") if isinstance(job.get("preset_preferences"), dict) else {},
                 "queued_preset_name": job.get("queued_preset_name") or "",
                 "preset_revision": max(1, int(job.get("preset_revision") or 1)),
+                "encoding_policy": _job_encoding_policy(job),
             }
         job["dispatch_error"] = ""
         job["error_message"] = ""
@@ -2292,6 +2335,7 @@ def create_jobs_batch(files_and_presets: list[tuple[str, str]]) -> int:
     count = 0
     seen_in_batch: set[str] = set()
     preset_snapshots: dict[str, dict | None] = {}
+    queued_encoding_policy = _normalize_encoding_policy()
 
     for src, preset in files_and_presets:
         # Avoid duplicates within the same batch call
@@ -2322,6 +2366,7 @@ def create_jobs_batch(files_and_presets: list[tuple[str, str]]) -> int:
             "preset_revision": 1,
             "queued_preset_name": str((preset_bundle or {}).get("name") or preset),
             "preset_adaptation": None,
+            "encoding_policy": queued_encoding_policy,
             "encode_method": method.get("encode_method"),
             "encoder": method.get("encoder"),
             "video_codec": method.get("video_codec"),
@@ -2903,12 +2948,13 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
         suffix = (os.environ.get("SUFFIX") or "TSD").strip() or "TSD"
     except Exception:
         suffix = "TSD"
-    d = os.path.dirname(encode_src_path)
-    base = os.path.basename(encode_src_path)
-    name, ext = os.path.splitext(base)
-    out_path = os.path.join(d, f"{name}-{suffix}{ext}")
+    job_policy = _job_encoding_policy(job)
+    output_plan = _output_container_plan(job_policy)
+    out_path = _output_path_for_source(encode_src_path, suffix, job_policy)
     out_path_existed_before = os.path.exists(out_path)
     job["out_path"] = out_path
+    job["output_container"] = output_plan["container"]
+    job["web_optimized"] = output_plan["web_optimized"]
 
     log_event(
         "job_started",
@@ -2933,7 +2979,7 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
     # Settings page stores hb_threads in settings.json.
     # If hb_threads > 0, we pass it down as HB_THREADS so encode-one.sh
     # can include "--encopts threads=<N>" when calling HandBrakeCLI.
-    hb_threads = int(_job_encoding_policy(job).get("hb_threads") or 0)
+    hb_threads = int(job_policy.get("hb_threads") or 0)
 
     if hb_threads > 0:
         env["HB_THREADS"] = str(hb_threads)
@@ -3029,6 +3075,8 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
     env["HB_EXTRA_ARGS"] = launch_extra_args
     env["HB_DIMENSION_OPTS"] = shlex.join(resolution_plan["cli_args"])
     env["HB_HW_DECODE_OPTS"] = shlex.join(hardware_decode["cli_args"])
+    env["HB_OUTPUT_CONTAINER"] = output_plan["container"]
+    env["HB_WEB_OPTIMIZED"] = "1" if output_plan["web_optimized"] else "0"
     env["HB_HW_DECODE_LABEL"] = hardware_decode["label"]
     env["HB_VIDEO_ENCODER"] = selected_encoder or "unknown"
     env["HB_SOURCE_RESOLUTION"] = source_resolution_label
@@ -3092,6 +3140,8 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
             f"[ByteSqueeze] Source resolution: {source_resolution_label}\n"
             f"[ByteSqueeze] Target resolution: {target_resolution_label}\n"
             f"[ByteSqueeze] Selected preset: {preset_name}\n"
+            f"[ByteSqueeze] Output container: {output_plan['container'].upper()}\n"
+            f"[ByteSqueeze] Web optimized: {'on' if output_plan['web_optimized'] else 'off'}\n"
             f"{smart_episode_log}"
             f"{frame_rate_log}"
             f"{qsv_diagnostics_log}"

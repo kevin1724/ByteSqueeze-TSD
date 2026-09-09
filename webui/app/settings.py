@@ -31,6 +31,12 @@ DEFAULT_SETTINGS = {
     # HandBrake threads (0 = auto / HandBrake default)
     "hb_threads": 0,
 
+    # Global output muxer. All bundled presets currently use Matroska, so MKV
+    # remains the migration-safe default for existing installations. The
+    # setting is snapshotted onto a job when it is queued.
+    "output_container": "mkv",
+    "web_optimized": False,
+
     # Size Wizard / ETA estimation
     "cpu_profile": "i5-9500t",      # baseline CPU
     "cpu_speed_override": 1.0,       # multiplier (1.0 = no adjustment)
@@ -180,6 +186,35 @@ def _normalize_beta_media_folders(value) -> dict:
     }
 
 
+def normalize_output_container(value) -> str:
+    """Return the supported public container id for settings and job policy."""
+    normalized = str(value or "").strip().lower()
+    aliases = {
+        "mp4": "mp4",
+        "m4v": "mp4",
+        "av_mp4": "mp4",
+        "mkv": "mkv",
+        "matroska": "mkv",
+        "av_mkv": "mkv",
+    }
+    return aliases.get(normalized, DEFAULT_SETTINGS["output_container"])
+
+
+def _boolean_value(value, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return bool(default)
+    if isinstance(value, (int, float)):
+        return value != 0
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off", ""}:
+        return False
+    return bool(default)
+
+
 def load_settings() -> dict:
     """Load settings from disk (with in-memory caching)."""
     global _settings_cache
@@ -209,6 +244,13 @@ def load_settings() -> dict:
         merged["ui_density"] = str(merged.get("ui_density") or "comfortable").strip().lower()
         if merged["ui_density"] not in {"comfortable", "compact"}:
             merged["ui_density"] = "comfortable"
+        merged["output_container"] = normalize_output_container(
+            merged.get("output_container")
+        )
+        merged["web_optimized"] = bool(
+            merged["output_container"] == "mp4"
+            and _boolean_value(merged.get("web_optimized"), False)
+        )
         merged["hardware_transcode_concurrency"] = _bounded_number(
             merged.get("hardware_transcode_concurrency", 1),
             1,
@@ -264,6 +306,21 @@ def _save_settings_unlocked(new_values: dict) -> dict:
         hb_threads_int = 0
 
     base["hb_threads"] = hb_threads_int
+
+    # ------------------------------------------------------------------
+    # Global output muxer / MP4 fast start
+    # ------------------------------------------------------------------
+    output_container = normalize_output_container(
+        new_values.get("output_container", base.get("output_container"))
+    )
+    base["output_container"] = output_container
+    base["web_optimized"] = bool(
+        output_container == "mp4"
+        and _boolean_value(
+            new_values.get("web_optimized", base.get("web_optimized", False)),
+            False,
+        )
+    )
 
     # ------------------------------------------------------------------
     # CPU profile (Size Wizard ETA)
