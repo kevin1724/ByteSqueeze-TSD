@@ -973,7 +973,7 @@ WIZARD_PRESETS_FILE = os.path.join(DATA_DIR, "wizard_presets.json")
 WIZARD_PRESET_LIMIT = 100
 
 WIZARD_VIDEO_CODECS = {"h265", "h264", "av1"}
-WIZARD_ENCODER_FAMILIES = {"software", "qsv"}
+WIZARD_ENCODER_FAMILIES = {"software", "qsv", "nvenc"}
 WIZARD_BIT_DEPTHS = {"8", "10"}
 WIZARD_QUALITIES = {"high", "balanced", "small"}
 WIZARD_ENCODER_SPEEDS = {"auto", "fast", "medium", "slow"}
@@ -987,7 +987,7 @@ WIZARD_FRAMERATES = {"23.976", "24", "25", "29.97", "30", "50", "59.94", "60"}
 WIZARD_DEINTERLACE_MODES = {"off", "decomb", "yadif"}
 WIZARD_CROP_MODES = {"auto", "none"}
 WIZARD_AI_GOALS = {"balanced", "quality", "speed", "small", "archive"}
-WIZARD_AI_HARDWARE = {"auto", "software", "qsv"}
+WIZARD_AI_HARDWARE = {"auto", "software", "qsv", "nvenc"}
 WIZARD_AI_CODEC_PREFS = {"auto", "h264", "h265", "av1"}
 WIZARD_AI_TRACK_SCOPES = {"first", "all"}
 WIZARD_AI_SUBTITLE_SCOPES = {"none", "first", "all"}
@@ -1194,7 +1194,7 @@ def _wizard_size_preference_factor(options: dict) -> float:
     codec = {"h264": 1.24, "h265": 1.0, "av1": 0.84}.get(
         str(options.get("video_codec") or "h265"), 1.0
     )
-    family = 1.10 if str(options.get("encoder_family") or "software") == "qsv" else 1.0
+    family = 1.10 if str(options.get("encoder_family") or "software") in {"qsv", "nvenc"} else 1.0
     speed_name = str(options.get("encoder_speed") or options.get("speed") or "auto")
     speed = {"fast": 1.09, "medium": 1.0, "slow": 0.94, "auto": 1.0}.get(speed_name, 1.0)
     return quality * codec * family * speed
@@ -1229,7 +1229,7 @@ def _wizard_auto_target(
         "av1": {"high": 0.066, "balanced": 0.048, "small": 0.035},
     }
     target_bpp = bpp_table.get(codec, bpp_table["h265"]).get(quality, 0.057)
-    if str(options.get("encoder_family") or "software") == "qsv":
+    if str(options.get("encoder_family") or "software") in {"qsv", "nvenc"}:
         target_bpp *= 1.10
     speed = str(options.get("encoder_speed") or "auto")
     target_bpp *= {"fast": 1.08, "medium": 1.0, "slow": 0.95, "auto": 1.0}.get(speed, 1.0)
@@ -1303,7 +1303,7 @@ def _wizard_auto_target(
             "small": 0.62,
         }.get(quality, 0.80)
         ceiling_ratio *= {"h264": 1.08, "h265": 1.0, "av1": 0.92}.get(codec, 1.0)
-        if str(options.get("encoder_family") or "software") == "qsv":
+        if str(options.get("encoder_family") or "software") in {"qsv", "nvenc"}:
             ceiling_ratio *= 1.03
         if learned_adjusted_ratio > 0:
             ceiling_ratio = max(ceiling_ratio, min(0.97, learned_adjusted_ratio))
@@ -1360,6 +1360,13 @@ def _wizard_encoder_label(encoder_name: str) -> str:
         "qsv_h264": "H.264 Intel QSV",
         "qsv_h265": "H.265 Intel QSV",
         "qsv_h265_10bit": "H.265 10-bit Intel QSV",
+        "qsv_av1": "AV1 Intel QSV",
+        "qsv_av1_10bit": "AV1 10-bit Intel QSV",
+        "nvenc_h264": "H.264 NVIDIA NVENC",
+        "nvenc_h265": "H.265 NVIDIA NVENC",
+        "nvenc_h265_10bit": "H.265 10-bit NVIDIA NVENC",
+        "nvenc_av1": "AV1 NVIDIA NVENC",
+        "nvenc_av1_10bit": "AV1 10-bit NVIDIA NVENC",
     }
     return labels.get(encoder_name, encoder_name)
 
@@ -1369,13 +1376,22 @@ def _wizard_encoder_name(options: dict) -> str:
     family = options["encoder_family"]
     bit_depth = options["bit_depth"]
 
-    if codec == "av1":
-        return "svt_av1_10bit" if bit_depth == "10" else "svt_av1"
-
     if family == "qsv":
         if codec == "h264":
             return "qsv_h264"
+        if codec == "av1":
+            return "qsv_av1_10bit" if bit_depth == "10" else "qsv_av1"
         return "qsv_h265_10bit" if bit_depth == "10" else "qsv_h265"
+
+    if family == "nvenc":
+        if codec == "h264":
+            return "nvenc_h264"
+        if codec == "av1":
+            return "nvenc_av1_10bit" if bit_depth == "10" else "nvenc_av1"
+        return "nvenc_h265_10bit" if bit_depth == "10" else "nvenc_h265"
+
+    if codec == "av1":
+        return "svt_av1_10bit" if bit_depth == "10" else "svt_av1"
 
     if codec == "h264":
         return "x264"
@@ -1391,10 +1407,12 @@ def _wizard_encoder_preset(options: dict) -> str:
     if speed == "auto":
         speed = "slow" if quality == "high" else ("fast" if quality == "small" else "medium")
 
-    if codec == "av1":
-        return {"fast": "8", "medium": "6", "slow": "4"}.get(speed, "6")
     if family == "qsv":
         return {"fast": "speed", "medium": "balanced", "slow": "quality"}.get(speed, "balanced")
+    if family == "nvenc":
+        return {"fast": "fast", "medium": "medium", "slow": "slow"}.get(speed, "medium")
+    if codec == "av1":
+        return {"fast": "8", "medium": "6", "slow": "4"}.get(speed, "6")
     return {"fast": "fast", "medium": "medium", "slow": "slow"}.get(speed, "medium")
 
 
@@ -1513,6 +1531,7 @@ def _wizard_ai_choices(
     cpu_score = max(0.1, float(getattr(cpu, "speed_index", 1.0)) * float(cpu_override or 1.0))
     cpu_qsv_capable = _wizard_likely_qsv(getattr(cpu, "label", ""))
     qsv_ok = bool(qsv_device_available) and (hw == "qsv" or (hw == "auto" and cpu_qsv_capable))
+    nvenc_requested = hw == "nvenc"
     weak_cpu = cpu_score < 0.75
     strong_cpu = cpu_score >= 1.35
     very_strong_cpu = cpu_score >= 2.0
@@ -1569,6 +1588,9 @@ def _wizard_ai_choices(
     elif hw == "qsv":
         out["encoder_family"] = "qsv"
         decisions.append("Intel QSV is enabled in Settings and was requested.")
+    elif hw == "nvenc":
+        out["encoder_family"] = "nvenc"
+        decisions.append("NVIDIA NVENC was requested; the queue will select a node that advertises the matching encoder.")
     elif goal == "speed" and qsv_ok:
         out["encoder_family"] = "qsv"
         decisions.append("Using Intel QSV because speed is the goal and /dev/dri is enabled.")
@@ -1583,7 +1605,7 @@ def _wizard_ai_choices(
 
     if goal == "speed":
         out["quality"] = "small"
-        out["video_codec"] = "h265" if (is_hdr or out["encoder_family"] == "qsv" or not weak_cpu) else "h264"
+        out["video_codec"] = "h265" if (is_hdr or out["encoder_family"] in {"qsv", "nvenc"} or not weak_cpu) else "h264"
         out["encoder_speed"] = "fast"
         decisions.append("Speed profile selected fast encoder settings.")
     elif goal == "small":
@@ -1616,9 +1638,12 @@ def _wizard_ai_choices(
             ("x264", "h264", "software", "8", 1.15),
             ("x265_10bit", "h265", "software", "10", 1.0),
             ("qsv_h265_10bit", "h265", "qsv", "10", 0.35),
+            ("nvenc_h265_10bit", "h265", "nvenc", "10", 0.30),
             ("svt_av1_10bit", "av1", "software", "10", 2.8),
         ):
             if family == "qsv" and not qsv_ok:
+                continue
+            if family == "nvenc" and not nvenc_requested:
                 continue
             if codec == "av1" and goal == "speed" and codec_pref != "av1":
                 continue
@@ -1668,7 +1693,7 @@ def _wizard_ai_choices(
         out["bit_depth"] = candidate["bit_depth"]
         if candidate["codec"] == "av1":
             out["encoder_speed"] = "slow" if very_strong_cpu and goal in {"quality", "archive"} else "medium"
-        elif candidate["family"] == "qsv":
+        elif candidate["family"] in {"qsv", "nvenc"}:
             out["encoder_speed"] = "fast" if goal == "speed" else "auto"
         history_choice = {
             "method": candidate["method"],
@@ -1684,12 +1709,14 @@ def _wizard_ai_choices(
     if codec_pref in {"h264", "h265", "av1"}:
         out["video_codec"] = codec_pref
         if codec_pref == "av1":
-            out["encoder_family"] = "software"
+            if out["encoder_family"] not in {"qsv", "nvenc"}:
+                out["encoder_family"] = "software"
             out["bit_depth"] = "10"
             if goal == "speed":
                 warnings.append("AV1 was requested, but AV1 is usually not a fast encode. Expect longer runtimes.")
         elif codec_pref == "h264":
-            out["encoder_family"] = "software" if out["encoder_family"] != "qsv" else out["encoder_family"]
+            if out["encoder_family"] not in {"qsv", "nvenc"}:
+                out["encoder_family"] = "software"
             out["bit_depth"] = "8"
         decisions.append(f"AI codec preference forced {codec_pref.upper()}.")
     elif history_candidates:
@@ -1697,13 +1724,13 @@ def _wizard_ai_choices(
             speed_candidates = [c for c in history_candidates if c["codec"] != "av1"]
             if speed_candidates:
                 best = min(speed_candidates, key=lambda c: c["seconds_per_gb"] if c["seconds_per_gb"] else c["runtime_weight"] * 9999)
-                if best["family"] == "qsv" or best["sample_count"] >= 3:
+                if best["family"] in {"qsv", "nvenc"} or best["sample_count"] >= 3:
                     apply_history_candidate(best, "it has been the fastest matching method in past history")
         else:
             efficient_candidates = [c for c in history_candidates if c["codec"] in {"h265", "av1"}]
             if efficient_candidates:
                 best = min(efficient_candidates, key=lambda c: c["out_ratio"])
-                current_method = "svt_av1_10bit" if out["video_codec"] == "av1" else ("qsv_h265_10bit" if out["encoder_family"] == "qsv" else "x265_10bit")
+                current_method = _wizard_encoder_name(out)
                 current = next((c for c in efficient_candidates if c["method"] == current_method), None)
                 improvement = (current["out_ratio"] - best["out_ratio"]) if current else 0.0
                 av1_reasonable = best["codec"] != "av1" or (
@@ -1721,19 +1748,22 @@ def _wizard_ai_choices(
         av1_cpu_ok = cpu_score >= (0.85 if risk_score >= 3 else (1.0 if risk_score >= 2 else 1.35))
         if goal in {"quality", "archive"} and target_ratio < av1_quality_ratio and av1_cpu_ok and duration_sec <= (4 * 60 * 60 if risk_score >= 2 else 3 * 60 * 60):
             out["video_codec"] = "av1"
-            out["encoder_family"] = "software"
+            if out["encoder_family"] not in {"qsv", "nvenc"}:
+                out["encoder_family"] = "software"
             out["bit_depth"] = "10"
             out["encoder_speed"] = "medium" if goal == "quality" else "slow"
             decisions.append("Target is tight and CPU profile is strong, so AI selected AV1 for better compression efficiency.")
         elif goal == "balanced" and target_ratio < av1_balanced_ratio and av1_cpu_ok and duration_sec <= (3.5 * 60 * 60 if risk_score >= 2 else 2.5 * 60 * 60):
             out["video_codec"] = "av1"
-            out["encoder_family"] = "software"
+            if out["encoder_family"] not in {"qsv", "nvenc"}:
+                out["encoder_family"] = "software"
             out["bit_depth"] = "10"
             out["encoder_speed"] = "medium"
             warnings.append("Balanced target is very aggressive; AI selected AV1, which may be much slower but can preserve quality at smaller sizes.")
         elif risk_score >= 3 and goal == "small" and target_ratio < 0.42 and cpu_score >= 0.85:
             out["video_codec"] = "av1"
-            out["encoder_family"] = "software"
+            if out["encoder_family"] not in {"qsv", "nvenc"}:
+                out["encoder_family"] = "software"
             out["bit_depth"] = "10"
             out["encoder_speed"] = "medium"
             warnings.append("Bold AI chose AV1 for small-file exploration. It may be slow, but it can win on difficult size targets.")
@@ -1776,10 +1806,11 @@ def _wizard_ai_choices(
         out["bit_depth"] = "8" if out["video_codec"] == "h264" else "10"
 
     if out["video_codec"] == "av1":
-        out["encoder_family"] = "software"
+        if out["encoder_family"] not in {"qsv", "nvenc"}:
+            out["encoder_family"] = "software"
         out["bit_depth"] = "10" if out.get("bit_depth") != "8" else "8"
 
-    if out["encoder_family"] == "qsv" and out["video_codec"] == "h264" and is_hdr:
+    if out["encoder_family"] in {"qsv", "nvenc"} and out["video_codec"] == "h264" and is_hdr:
         out["video_codec"] = "h265"
         out["bit_depth"] = "10"
 
@@ -2085,11 +2116,11 @@ def _wizard_ai_plan_insights(
             "info",
         )
 
-    if options.get("encoder_family") == "qsv":
+    if options.get("encoder_family") in {"qsv", "nvenc"}:
         _wizard_ai_add_recommendation(
             recommendations,
             "Fast worker",
-            "QSV should keep CPU use lower and finish faster when the worker has Intel media hardware exposed.",
+            f"{_wizard_encoder_label(_wizard_encoder_name(options))} should keep CPU use lower and finish faster on a compatible worker.",
             "info",
         )
     elif options.get("two_pass"):
@@ -2279,7 +2310,6 @@ def _wizard_normalize_options(data: dict) -> dict:
     options["resolution_mode"] = _choice(resolution_mode, WIZARD_RESOLUTION_MODES, options["resolution_mode"])
 
     if options["video_codec"] == "av1":
-        options["encoder_family"] = "software"
         if options["bit_depth"] not in {"8", "10"}:
             options["bit_depth"] = "10"
 
@@ -2618,6 +2648,8 @@ def _wizard_plan(
     base_est_fps = _estimate_encode_fps(out_w, out_h, encoder_preset)
     if options["encoder_family"] == "qsv":
         base_est_fps *= 3.0
+    elif options["encoder_family"] == "nvenc":
+        base_est_fps *= 3.4
     if encoder_name.startswith("svt_av1"):
         base_est_fps *= 0.38
     if info.get("is_hdr"):
@@ -2728,7 +2760,9 @@ def _wizard_ai_chat_updates(question: str) -> dict:
     elif any(codec in text for codec in ("h.264", "h264", "avc")):
         updates["ai_codec_preference"] = "h264"
 
-    if any(phrase in text for phrase in ("qsv", "hardware encode", "intel gpu")):
+    if any(phrase in text for phrase in ("nvenc", "nvidia encode", "nvidia gpu")):
+        updates["ai_hardware"] = "nvenc"
+    elif any(phrase in text for phrase in ("qsv", "intel quick sync", "intel gpu")):
         updates["ai_hardware"] = "qsv"
     elif any(phrase in text for phrase in ("cpu encode", "software encode", "use cpu")):
         updates["ai_hardware"] = "software"
@@ -3189,7 +3223,7 @@ def _smart_recommendation(data: dict, *, require_automation_ready: bool = False)
     if learned_defaults.get("sample_count"):
         if learned_defaults.get("goal") and not tuning.get("goal"):
             profile["goal"] = learned_defaults["goal"]
-        if learned_defaults.get("encoder_family") in {"qsv", "software"} and not tuning.get("hardware"):
+        if learned_defaults.get("encoder_family") in WIZARD_ENCODER_FAMILIES and not tuning.get("hardware"):
             profile["hardware"] = learned_defaults["encoder_family"]
         learned_profile_audio = str(learned_defaults.get("audio_strategy") or "")
         if learned_profile_audio == "eac3":
@@ -3517,6 +3551,8 @@ def _queue_wizard_job(data: dict) -> dict:
         in {"queued", "dispatching", "running", "waiting_to_upload"}
     }
     requested_mode = str(data.get("mode") or "local").strip().lower()
+    requested_node_id = str(data.get("node_id") or "").strip()
+    selected_node = None
     if requested_mode in {"best", "auto", "available", "next_available"}:
         dispatch_mode = "auto"
         response_mode = (
@@ -3527,43 +3563,84 @@ def _queue_wizard_job(data: dict) -> dict:
     elif requested_mode == "local":
         dispatch_mode = "local"
         response_mode = "local"
+    elif requested_mode == "node":
+        if not requested_node_id:
+            raise ValueError("Select a worker node or choose Next available node")
+        selected_node = get_node_private(requested_node_id)
+        if not selected_node:
+            raise ValueError("Selected worker node was not found")
+        dispatch_mode = "node"
+        response_mode = "node"
     else:
-        raise ValueError("Size Wizard destination must be local or best available")
+        raise ValueError("Size Wizard destination must be local, next available, or a linked worker")
 
     preset_preferences = dict(plan.get("options") or {})
-    job_id = create_job(
-        plan["src"],
-        plan["preset"],
-        extra_args=" ".join(plan["extra_args"]),
-        encode_metadata={
-            "encode_method": plan["estimates"].get("encoder"),
-            "encoder": plan["estimates"].get("encoder"),
-            "video_codec": plan["options"].get("video_codec"),
-            "encoder_family": plan["options"].get("encoder_family"),
-            "bit_depth": plan["options"].get("bit_depth"),
-            "audio_strategy": plan["options"].get("smart_audio_strategy")
-            or plan["options"].get("audio_mode"),
-            "audio_languages": plan["options"].get("audio_languages"),
-            "subtitle_languages": plan["options"].get("subtitle_languages"),
-            "smart_preset": True,
-            "smart_profile_id": str(data.get("smart_profile_id") or "default"),
-            "smart_candidate_id": str(data.get("smart_candidate_id") or "manual"),
-            "smart_feedback_context": learning_context,
-            "automation_source": "size_wizard",
+    encode_metadata = {
+        "encode_method": plan["estimates"].get("encoder"),
+        "encoder": plan["estimates"].get("encoder"),
+        "video_codec": plan["options"].get("video_codec"),
+        "encoder_family": plan["options"].get("encoder_family"),
+        "bit_depth": plan["options"].get("bit_depth"),
+        "audio_strategy": plan["options"].get("smart_audio_strategy")
+        or plan["options"].get("audio_mode"),
+        "audio_languages": plan["options"].get("audio_languages"),
+        "subtitle_languages": plan["options"].get("subtitle_languages"),
+        "smart_preset": True,
+        "smart_profile_id": str(data.get("smart_profile_id") or "default"),
+        "smart_candidate_id": str(data.get("smart_candidate_id") or "manual"),
+        "smart_feedback_context": learning_context,
+        "automation_source": "size_wizard",
+        "preset_selection": "wizard",
+        "preset_adaptive": False,
+        "preset_preferences": preset_preferences,
+    }
+    operations = data.get("operations") if isinstance(data.get("operations"), dict) else None
+    transfer_mode = ""
+    if dispatch_mode == "node":
+        # Explicit node selection uses the same direct dispatch path as the
+        # Queue screen, preserving remote-transfer and path-mapping support
+        # while keeping the Wizard's exact, approved recipe intact.
+        dispatch_plan = {
+            "src": plan["src"],
+            "preset": plan["preset"],
+            "preset_bundle": None,
+            "extra_args": " ".join(str(arg) for arg in plan.get("extra_args") or []),
+            "encode_metadata": encode_metadata,
             "preset_selection": "wizard",
             "preset_adaptive": False,
             "preset_preferences": preset_preferences,
-        },
-        dispatch_mode=dispatch_mode,
-        preset_selection="wizard",
-        preset_adaptive=False,
-        preset_preferences=preset_preferences,
-        operations=data.get("operations") if isinstance(data.get("operations"), dict) else None,
-    )
+            "operations": operations or {},
+            "job_type": str((operations or {}).get("job_type") or "video_preserve_audio"),
+        }
+        selected_node, dispatch_result, transfer_mode = _dispatch_plan_to_worker(
+            selected_node,
+            plan["src"],
+            dispatch_plan,
+        )
+        dispatched_ids = dispatch_result.get("job_ids") if isinstance(dispatch_result, dict) else None
+        job_id = str(dispatched_ids[0]) if isinstance(dispatched_ids, list) and dispatched_ids and dispatched_ids[0] else ""
+    else:
+        job_id = create_job(
+            plan["src"],
+            plan["preset"],
+            extra_args=" ".join(plan["extra_args"]),
+            encode_metadata=encode_metadata,
+            dispatch_mode=dispatch_mode,
+            preset_selection="wizard",
+            preset_adaptive=False,
+            preset_preferences=preset_preferences,
+            operations=operations,
+        )
     if dispatch_mode == "auto":
         _wake_auto_node_dispatch()
     learning_result = None
-    learning_recorded = bool(job_id and str(job_id) not in active_before)
+    # Older workers acknowledge a direct dispatch without returning an id. The
+    # user's approval is still valuable to Smart Presets, so record it anyway.
+    learning_recorded = (
+        True
+        if dispatch_mode == "node"
+        else bool(job_id and str(job_id) not in active_before)
+    )
     if learning_recorded:
         try:
             learning_result = record_smart_preset_feedback(
@@ -3585,6 +3662,8 @@ def _queue_wizard_job(data: dict) -> dict:
                     "target_mb": round(float(plan.get("inputs", {}).get("target_mb") or 0.0), 1),
                     "queue_source": str(data.get("queue_source") or "web"),
                     "destination": response_mode,
+                    "node_id": str((selected_node or {}).get("id") or ""),
+                    "node_name": str((selected_node or {}).get("name") or ""),
                 },
             )
         except Exception as exc:
@@ -3599,6 +3678,9 @@ def _queue_wizard_job(data: dict) -> dict:
         "extra_args": plan["extra_args"],
         "estimates": plan["estimates"],
         "dispatch_mode": response_mode,
+        "node_id": str((selected_node or {}).get("id") or ""),
+        "node_name": str((selected_node or {}).get("name") or ""),
+        "transfer_mode": transfer_mode,
         "learning_recorded": learning_recorded,
         "learning": (learning_result or {}).get("learning") or smart_learning_status(),
     }
@@ -10651,6 +10733,7 @@ def register_routes(app):
 
         seen = []
         skipped = []
+        job_ids = []
         count = 0
         for job in remote_jobs:
             transfer = job.get("transfer") if isinstance(job.get("transfer"), dict) else {}
@@ -10682,6 +10765,8 @@ def register_routes(app):
                 parent_job_id=str(job.get("parent_job_id") or ""),
             )
             count += 1 if created else 0
+            if created and _job_id:
+                job_ids.append(str(_job_id))
 
         for job in local_jobs:
             src = str(job.get("src") or "").strip()
@@ -10708,7 +10793,7 @@ def register_routes(app):
                 preset = "auto"
             effective = guess_preset_from_filename(os.path.basename(src)) if preset == "auto" else preset
             before = len([j for j in list_jobs_for_api() if j.get("src") == src and j.get("status") in {"queued", "running"}])
-            create_job(
+            created_id = create_job(
                 src,
                 effective,
                 extra_args=str(job.get("extra_args") or ""),
@@ -10723,9 +10808,12 @@ def register_routes(app):
                 parent_job_id=str(job.get("parent_job_id") or ""),
             )
             after = len([j for j in list_jobs_for_api() if j.get("src") == src and j.get("status") in {"queued", "running"}])
-            count += 1 if after > before else 0
+            created = after > before
+            count += 1 if created else 0
+            if created and created_id:
+                job_ids.append(str(created_id))
         log_event("node_jobs_received", f"Received {count} node job(s).", level="info")
-        return jsonify(ok=True, count=count, skipped=skipped, summary=get_job_summary())
+        return jsonify(ok=True, count=count, job_ids=job_ids, skipped=skipped, summary=get_job_summary())
 
     @app.route("/api/node/jobs/<job_id>/log")
     def node_worker_job_log_api(job_id):

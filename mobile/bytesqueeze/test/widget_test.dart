@@ -348,9 +348,14 @@ void main() {
         .first;
     await tester.scrollUntilVisible(find.text('Queue destination'), 300,
         scrollable: wizardScroll);
-    await tester.tap(find.text('Main controller'));
+    await tester.tap(find.text('Queue destination'));
     await tester.pumpAndSettle();
     expect(find.text('Next available node'), findsOneWidget);
+    expect(find.text('Living Room Mini PC'), findsOneWidget);
+    expect(find.text('Office Encoder'), findsOneWidget);
+    await tester.tap(find.text('Living Room Mini PC'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Living Room Mini PC'), findsWidgets);
   });
 
   testWidgets('V3 stays usable across phone, foldable, tablet, and landscape',

@@ -69,6 +69,37 @@ void main() {
     expect(api.lastPostBody.containsKey('node_id'), isFalse);
   });
 
+  test('Size Wizard forwards a pinned linked worker destination', () async {
+    final controller = AppController();
+    final api = _RecordingApi(controller.store);
+    controller.api = api;
+    controller.session = const ServerSession(
+      baseUrl: 'http://bytesqueeze.test',
+      deviceId: 'wizard-phone',
+      deviceName: 'Wizard phone',
+      scope: 'control',
+      accessToken: 'access',
+      refreshToken: 'refresh',
+    );
+
+    await controller.queueSizeWizard(
+      '/movies/Example.mkv',
+      const {
+        'preset': '1080',
+        'encoder_family': 'nvenc',
+        'video_codec': 'h265',
+        'bit_depth': '10',
+      },
+      mode: 'node',
+      nodeId: 'gaming-rig',
+    );
+
+    expect(api.lastPostPath, '/size_wizard/queue');
+    expect(api.lastPostBody['mode'], 'node');
+    expect(api.lastPostBody['node_id'], 'gaming-rig');
+    expect(api.lastPostBody['encoder_family'], 'nvenc');
+  });
+
   test('audio-only queue preserves the stream plan and uses next available',
       () async {
     final controller = AppController();

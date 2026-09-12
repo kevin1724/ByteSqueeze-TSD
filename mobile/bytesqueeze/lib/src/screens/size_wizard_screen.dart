@@ -53,12 +53,205 @@ class _SizeWizardScreenState extends State<SizeWizardScreen> {
   bool _queueing = false;
   bool _dirty = false;
   String _error = '';
-  String _destination = 'local';
+  String _destination = 'local:';
   String _candidateId = 'manual';
   Timer? _estimateDebounce;
   int _editRevision = 0;
 
   AppController get controller => widget.controller;
+
+  String get _destinationMode {
+    final separator = _destination.indexOf(':');
+    return separator < 0 ? _destination : _destination.substring(0, separator);
+  }
+
+  String get _destinationNodeId {
+    final separator = _destination.indexOf(':');
+    return separator < 0 ? '' : _destination.substring(separator + 1);
+  }
+
+  Map<String, dynamic> _linkedNode(String nodeId) {
+    for (final node in asList(controller.nodes['nodes']).map(asMap)) {
+      if ('${node['id'] ?? ''}' == nodeId) return node;
+    }
+    return <String, dynamic>{};
+  }
+
+  String _nodeHost(Map<String, dynamic> node) {
+    final uri = Uri.tryParse('${node['url'] ?? ''}'.trim());
+    return uri?.host ?? '';
+  }
+
+  String _destinationLabel() {
+    if (_destinationMode == 'next_available' ||
+        _destinationMode == 'available' ||
+        _destinationMode == 'best') {
+      return 'Next available node';
+    }
+    if (_destinationMode == 'node') {
+      final node = _linkedNode(_destinationNodeId);
+      final name = '${node['name'] ?? 'Linked worker'}'.trim();
+      final host = _nodeHost(node);
+      return host.isEmpty ? name : '$name · $host';
+    }
+    final local = asMap(controller.nodes['local']);
+    final name = '${local['name'] ?? ''}'.trim();
+    return name.isEmpty || name.toLowerCase() == 'main controller'
+        ? 'Main controller'
+        : 'Main controller · $name';
+  }
+
+  String _destinationHint() {
+    if (_destinationMode == 'next_available' ||
+        _destinationMode == 'available' ||
+        _destinationMode == 'best') {
+      return 'Starts on the first compatible node with capacity';
+    }
+    if (_destinationMode == 'node') {
+      final node = _linkedNode(_destinationNodeId);
+      return node['online'] == true
+          ? 'Pinned to this linked worker'
+          : 'Worker is offline; choose another destination';
+    }
+    return 'Runs on this ByteSqueeze server';
+  }
+
+  String _workerStatus(Map<String, dynamic> node) {
+    final online = node['online'] == true;
+    final summary = asMap(node['summary']);
+    final counts = asMap(summary['counts']);
+    final running = (counts['running'] as num?)?.toInt() ?? 0;
+    final queued = (counts['queued'] as num?)?.toInt() ?? 0;
+    final capacity =
+        (node['hardware_transcode_concurrency'] as num?)?.toInt() ?? 1;
+    final parts = <String>[
+      if (_nodeHost(node).isNotEmpty) _nodeHost(node),
+      online ? 'Online' : 'Offline',
+      '${running + queued} active',
+      '$capacity GPU ${capacity == 1 ? 'slot' : 'slots'}',
+    ];
+    return parts.join(' · ');
+  }
+
+  Future<void> _chooseDestination() async {
+    if (_queueing || _loading) return;
+    final linkedNodes = asList(controller.nodes['nodes'])
+        .map(asMap)
+        .where((node) => '${node['id'] ?? ''}'.trim().isNotEmpty)
+        .toList();
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      backgroundColor: ByteSqueezeColors.navy,
+      builder: (sheetContext) {
+        Widget destinationTile({
+          required String value,
+          required IconData icon,
+          required String title,
+          required String subtitle,
+          bool enabled = true,
+        }) {
+          final current = value == _destination;
+          return ListTile(
+            enabled: enabled,
+            minTileHeight: 60,
+            leading: Icon(
+              icon,
+              color: current ? ByteSqueezeColors.cyan : ByteSqueezeColors.muted,
+            ),
+            title: Text(
+              title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+            subtitle: Text(
+              subtitle,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            trailing: current
+                ? const Icon(
+                    Icons.check_circle_rounded,
+                    color: ByteSqueezeColors.cyan,
+                  )
+                : !enabled
+                    ? const Text(
+                        'Offline',
+                        style: TextStyle(color: ByteSqueezeColors.muted),
+                      )
+                    : null,
+            onTap: enabled ? () => Navigator.pop(sheetContext, value) : null,
+          );
+        }
+
+        final desiredHeight = (220.0 + linkedNodes.length * 66.0).clamp(
+          280.0,
+          MediaQuery.sizeOf(sheetContext).height * .72,
+        );
+        return SizedBox(
+          height: desiredHeight,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(20, 0, 20, 10),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Choose an encoding node',
+                      style:
+                          TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
+                    ),
+                    SizedBox(height: 3),
+                    Text(
+                      'Automatic distribution uses the first compatible node with free capacity.',
+                      style: TextStyle(color: ByteSqueezeColors.muted),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: ListView(
+                  padding: const EdgeInsets.fromLTRB(8, 0, 8, 12),
+                  children: [
+                    destinationTile(
+                      value: 'local:',
+                      icon: Icons.dns_outlined,
+                      title: 'Main controller',
+                      subtitle: 'Run this encode on the ByteSqueeze server',
+                    ),
+                    destinationTile(
+                      value: 'next_available:',
+                      icon: Icons.route_rounded,
+                      title: 'Next available node',
+                      subtitle:
+                          'Automatically use the first compatible free node',
+                    ),
+                    if (linkedNodes.isNotEmpty) const Divider(height: 18),
+                    for (final node in linkedNodes)
+                      destinationTile(
+                        value: 'node:${node['id']}',
+                        icon: Icons.computer_rounded,
+                        title: '${node['name'] ?? 'Linked worker'}',
+                        subtitle: _workerStatus(node),
+                        enabled: node['online'] == true,
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    if (selected != null && mounted) {
+      setState(() => _destination = selected);
+    }
+  }
 
   @override
   void initState() {
@@ -161,7 +354,8 @@ class _SizeWizardScreenState extends State<SizeWizardScreen> {
         widget.path,
         _queueOptions(),
         smartCandidateId: _candidateId,
-        mode: _destination,
+        mode: _destinationMode,
+        nodeId: _destinationNodeId,
       );
       if (!mounted) return;
       final learned = value['learning_recorded'] == true;
@@ -241,27 +435,52 @@ class _SizeWizardScreenState extends State<SizeWizardScreen> {
                 Material(
                   color: ByteSqueezeColors.surface,
                   borderRadius: BorderRadius.circular(12),
-                  child: ListTile(
-                    dense: true,
-                    leading: const Icon(
-                      Icons.auto_awesome_rounded,
-                      color: ByteSqueezeColors.cyan,
-                    ),
-                    title: Text(
-                      '${_response['smart_candidate_name'] ?? 'Smart starting point'}',
-                      style: const TextStyle(fontWeight: FontWeight.w700),
-                    ),
-                    subtitle: Text(
-                      learned['sample_count'] == null
-                          ? 'Uses saved Smart Preset guardrails'
-                          : '${learned['sample_count']} similar choices considered',
-                    ),
-                    trailing: IconButton(
-                      tooltip: 'Restore Smart starting point',
-                      onPressed:
-                          _loading ? null : () => _load(smartStart: true),
-                      icon: const Icon(Icons.restore_rounded),
-                    ),
+                  clipBehavior: Clip.antiAlias,
+                  child: Column(
+                    children: [
+                      ListTile(
+                        dense: true,
+                        leading: const Icon(
+                          Icons.auto_awesome_rounded,
+                          color: ByteSqueezeColors.cyan,
+                        ),
+                        title: Text(
+                          '${_response['smart_candidate_name'] ?? 'Smart starting point'}',
+                          style: const TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                        subtitle: Text(
+                          learned['sample_count'] == null
+                              ? 'Uses saved Smart Preset guardrails'
+                              : '${learned['sample_count']} similar choices considered',
+                        ),
+                        trailing: IconButton(
+                          tooltip: 'Restore Smart starting point',
+                          onPressed:
+                              _loading ? null : () => _load(smartStart: true),
+                          icon: const Icon(Icons.restore_rounded),
+                        ),
+                      ),
+                      const Divider(height: 1),
+                      ListTile(
+                        dense: true,
+                        onTap:
+                            _queueing || _loading ? null : _chooseDestination,
+                        leading: const Icon(
+                          Icons.hub_outlined,
+                          color: ByteSqueezeColors.cyan,
+                        ),
+                        title: const Text(
+                          'Queue destination',
+                          style: TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                        subtitle: Text(
+                          '${_destinationLabel()} · ${_destinationHint()}',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        trailing: const Icon(Icons.chevron_right_rounded),
+                      ),
+                    ],
                   ),
                 ),
                 const SectionHeader(title: 'Size and picture'),
@@ -383,10 +602,11 @@ class _SizeWizardScreenState extends State<SizeWizardScreen> {
                       _dropdown(
                         label: 'Encoder',
                         value: '${_options['encoder_family'] ?? 'software'}',
-                        values: const ['software', 'qsv'],
+                        values: const ['software', 'qsv', 'nvenc'],
                         labels: const {
                           'software': 'Software / CPU',
                           'qsv': 'Intel Quick Sync',
+                          'nvenc': 'NVIDIA NVENC',
                         },
                         onChanged: (value) =>
                             _setOption('encoder_family', value),
@@ -524,17 +744,6 @@ class _SizeWizardScreenState extends State<SizeWizardScreen> {
                     style: const TextStyle(color: ByteSqueezeColors.danger),
                   ),
                 ],
-                const SectionHeader(title: 'Queue destination'),
-                _dropdown(
-                  label: 'Run on',
-                  value: _destination,
-                  values: const ['local', 'available'],
-                  labels: const {
-                    'local': 'Main controller',
-                    'available': 'Next available node',
-                  },
-                  onChanged: (value) => setState(() => _destination = value),
-                ),
               ],
             ),
       bottomNavigationBar: SafeArea(
@@ -546,7 +755,7 @@ class _SizeWizardScreenState extends State<SizeWizardScreen> {
             Padding(
               padding: const EdgeInsets.only(left: 4, right: 4, bottom: 7),
               child: Text(
-                '${_destination == 'available' ? 'Next available node' : 'Main controller'} · $encoderLabel',
+                '${_destinationLabel()} · $encoderLabel',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 textAlign: TextAlign.center,

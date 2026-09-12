@@ -37,6 +37,7 @@ from webui.app.smart_presets import (  # noqa: E402
     candidate_learning,
     feedback_context,
     learned_plan_defaults,
+    normalize_profile,
     record_feedback,
 )
 
@@ -354,8 +355,13 @@ class ApiRouteSmokeTests(unittest.TestCase):
         wizard_page = self.client.get("/size_wizard?ui=v3")
         self.assertEqual(wizard_page.status_code, 200)
         self.assertIn(b'href="/size_wizard"', wizard_page.data)
+        self.assertIn(b'NVIDIA NVENC', wizard_page.data)
         self.assertIn(b"Automatic source-aware estimate", wizard_page.data)
         self.assertIn(b"Automatic estimate for this title", wizard_page.data)
+        self.assertIn(b'id="queueDestination"', wizard_page.data)
+        self.assertIn(b'value="next_available"', wizard_page.data)
+        self.assertIn(b'id="smartPresetToggleBtn"', wizard_page.data)
+        self.assertIn(b'id="aiAssistantDetails"', wizard_page.data)
         self.assertNotIn(b'target_size_value: 5,', wizard_page.data)
 
     def test_size_wizard_queue_records_an_approved_learning_plan(self):
@@ -444,6 +450,43 @@ class ApiRouteSmokeTests(unittest.TestCase):
         self.assertEqual(duplicate.status_code, 200)
         self.assertFalse(duplicate.get_json()["learning_recorded"])
         duplicate_record.assert_not_called()
+
+    def test_size_wizard_can_pin_an_approved_plan_to_a_linked_worker(self):
+        media_path = os.path.join(TEST_MEDIA, "Wizard.Pinned.Movie.2026.mkv")
+        plan = {
+            "src": media_path,
+            "preset": "1080",
+            "extra_args": ["--encoder", "qsv_h265_10bit"],
+            "probe": {"source_type": "movie", "source_size_bytes": 4 * 1024**3, "width": 1920, "height": 1080, "is_hdr": False},
+            "options": {"video_codec": "h265", "encoder_family": "qsv", "bit_depth": "10", "quality": "balanced", "encoder_speed": "auto", "resolution_mode": "keep", "audio_mode": "copy", "subtitle_mode": "all"},
+            "inputs": {"target_mb": 2048},
+            "estimates": {"encoder": "qsv_h265_10bit", "video_bitrate_kbps": 5000, "output_resolution": {"width": 1920, "height": 1080}},
+        }
+        worker = {"id": "pinned-worker", "name": "Garage QSV", "url": "http://worker:8080", "transfer_mode": "remote"}
+        learned = {"feedback_count": 2, "automation_ready": False}
+        with (
+            patch.object(app_routes, "_wizard_plan", return_value=plan),
+            patch.object(app_routes, "list_jobs_for_api", return_value=[]),
+            patch.object(app_routes, "get_node_private", return_value=worker),
+            patch.object(app_routes, "_dispatch_plan_to_worker", return_value=(worker, {"ok": True, "count": 1, "job_ids": ["worker-job-id"]}, "remote")) as dispatch,
+            patch.object(app_routes, "record_smart_preset_feedback", return_value={"learning": learned, "feedback": {"id": "feedback-pinned"}}) as record,
+        ):
+            response = self.client.post(
+                "/encode_wizard",
+                json={"src": media_path, "mode": "node", "node_id": "pinned-worker", "smart_candidate_id": "detail"},
+            )
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        payload = response.get_json()
+        self.assertEqual(payload["job_id"], "worker-job-id")
+        self.assertEqual(payload["dispatch_mode"], "node")
+        self.assertEqual(payload["node_id"], "pinned-worker")
+        self.assertEqual(payload["node_name"], "Garage QSV")
+        self.assertTrue(payload["learning_recorded"])
+        dispatch.assert_called_once()
+        self.assertEqual(dispatch.call_args.args[1], media_path)
+        self.assertEqual(dispatch.call_args.args[2]["preset"], "1080")
+        self.assertEqual(dispatch.call_args.args[2]["encode_metadata"]["encoder"], "qsv_h265_10bit")
+        self.assertEqual(record.call_args.kwargs["job_id"], "worker-job-id")
 
     def test_size_wizard_auto_target_is_unique_and_reacts_to_choices(self):
         movie_path = os.path.join(TEST_MEDIA, "Auto.Target.Movie.2026.2160p.mkv")
@@ -534,6 +577,80 @@ class ApiRouteSmokeTests(unittest.TestCase):
         )
         self.assertEqual(manual["inputs"]["target_mb"], 2048.0)
         self.assertEqual(manual["estimates"]["auto_target"]["mode"], "manual")
+
+    def test_size_wizard_builds_native_nvenc_encoders_for_each_codec(self):
+        media_path = os.path.join(TEST_MEDIA, "Wizard.NVENC.Movie.2026.mkv")
+        with open(media_path, "wb") as handle:
+            handle.write(b"wizard-nvenc-source")
+        probe = {
+            "duration_sec": 5400.0,
+            "width": 3840,
+            "height": 2160,
+            "fps": 24000 / 1001,
+            "video_codec": "hevc",
+            "is_hdr": False,
+        }
+        cases = (
+            ("h264", "8", "nvenc_h264"),
+            ("h265", "8", "nvenc_h265"),
+            ("h265", "10", "nvenc_h265_10bit"),
+            ("av1", "8", "nvenc_av1"),
+            ("av1", "10", "nvenc_av1_10bit"),
+        )
+        with patch.object(
+            app_routes,
+            "load_settings",
+            return_value={"cpu_profile": "i5-9500t", "cpu_speed_override": 1.0},
+        ):
+            for codec, depth, expected in cases:
+                with self.subTest(codec=codec, depth=depth):
+                    plan = app_routes._wizard_plan(
+                        {
+                            "src": media_path,
+                            "preset": "4k",
+                            "target_size_auto": False,
+                            "target_size_value": 8,
+                            "target_size_unit": "GB",
+                            "video_codec": codec,
+                            "encoder_family": "nvenc",
+                            "bit_depth": depth,
+                            "encoder_speed": "medium",
+                        },
+                        probe_func=lambda _src: probe,
+                        learned_defaults={"sample_count": 0, "confidence": 0.0},
+                    )
+                    self.assertEqual(plan["options"]["encoder_family"], "nvenc")
+                    self.assertEqual(plan["estimates"]["encoder"], expected)
+                    self.assertEqual(plan["estimates"]["encoder_preset"], "medium")
+                    self.assertIn("--encoder", plan["extra_args"])
+                    self.assertIn(expected, plan["extra_args"])
+
+    def test_size_wizard_ai_keeps_explicit_nvenc_av1(self):
+        options = app_routes._wizard_normalize_options(
+            {
+                "ai_mode": True,
+                "ai_hardware": "nvenc",
+                "ai_codec_preference": "av1",
+                "video_codec": "av1",
+                "encoder_family": "nvenc",
+                "bit_depth": "10",
+            }
+        )
+        planned, _info = app_routes._wizard_ai_choices(
+            options,
+            app_routes.get_cpu_profile("i5-9500t"),
+            1.0,
+            {"width": 1920, "height": 1080, "duration_sec": 3600, "fps": 23.976},
+            {"kind": "movie"},
+            20 * 1024**3,
+            5 * 1024,
+            "1080",
+            False,
+        )
+        self.assertEqual(planned["encoder_family"], "nvenc")
+        self.assertEqual(planned["video_codec"], "av1")
+        self.assertEqual(app_routes._wizard_encoder_name(planned), "nvenc_av1_10bit")
+        self.assertEqual(normalize_profile({"hardware": "nvenc"})["hardware"], "nvenc")
 
     def test_size_wizard_keeps_an_explicit_manual_audio_choice(self):
         media_path = os.path.join(TEST_MEDIA, "Manual.Audio.Choice.2026.mkv")

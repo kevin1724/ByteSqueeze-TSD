@@ -1704,6 +1704,7 @@ class _SmartTuneSheetState extends State<_SmartTuneSheet> {
                     'auto': 'Best available',
                     'software': 'Software quality',
                     'qsv': 'Intel Quick Sync',
+                    'nvenc': 'NVIDIA NVENC',
                   },
                   onChanged: (value) => setState(() => _hardware = value),
                 ),

@@ -626,6 +626,38 @@ class AppController extends ChangeNotifier {
       demoOptions['target_size_value'] =
           double.parse(targetMb.toStringAsFixed(1));
       demoOptions['target_size_unit'] = 'MB';
+      final encoderKey =
+          '${demoOptions['encoder_family']}:${demoOptions['video_codec']}:${demoOptions['bit_depth']}';
+      final demoEncoder = const <String, String>{
+            'qsv:h264:8': 'qsv_h264',
+            'qsv:h265:8': 'qsv_h265',
+            'qsv:h265:10': 'qsv_h265_10bit',
+            'qsv:av1:8': 'qsv_av1',
+            'qsv:av1:10': 'qsv_av1_10bit',
+            'nvenc:h264:8': 'nvenc_h264',
+            'nvenc:h265:8': 'nvenc_h265',
+            'nvenc:h265:10': 'nvenc_h265_10bit',
+            'nvenc:av1:8': 'nvenc_av1',
+            'nvenc:av1:10': 'nvenc_av1_10bit',
+            'software:h264:8': 'x264',
+            'software:h265:8': 'x265',
+            'software:h265:10': 'x265_10bit',
+            'software:av1:8': 'svt_av1',
+            'software:av1:10': 'svt_av1_10bit',
+          }[encoderKey] ??
+          'x265_10bit';
+      final familyLabel = const <String, String>{
+            'qsv': 'Intel QSV',
+            'nvenc': 'NVIDIA NVENC',
+            'software': 'CPU',
+          }['${demoOptions['encoder_family']}'] ??
+          'CPU';
+      final codecLabel = const <String, String>{
+            'h264': 'H.264',
+            'h265': 'H.265',
+            'av1': 'AV1',
+          }['${demoOptions['video_codec']}'] ??
+          'H.265';
       return <String, dynamic>{
         'ok': true,
         'smart_start': smartStart,
@@ -648,8 +680,9 @@ class AppController extends ChangeNotifier {
           'options': demoOptions,
           'inputs': {'target_mb': double.parse(targetMb.toStringAsFixed(1))},
           'estimates': {
-            'encoder': 'qsv_h265_10bit',
-            'encoder_label': 'Intel QSV H.265 10-bit',
+            'encoder': demoEncoder,
+            'encoder_label':
+                '$familyLabel $codecLabel ${demoOptions['bit_depth']}-bit',
             'video_bitrate_kbps': double.parse(
                 ((targetMb * 8 * 1024 * 1024 / 6480) / 1000)
                     .toStringAsFixed(1)),
@@ -688,6 +721,7 @@ class AppController extends ChangeNotifier {
     Map<String, dynamic> options, {
     String smartCandidateId = 'manual',
     String mode = 'local',
+    String? nodeId,
   }) async {
     _requireControl();
     if (path.isEmpty) {
@@ -705,6 +739,7 @@ class AppController extends ChangeNotifier {
         'learning_recorded': true,
         'learning': learning,
         'dispatch_mode': mode,
+        if (nodeId != null && nodeId.isNotEmpty) 'node_id': nodeId,
       };
     }
     final value = await api.post(
@@ -715,6 +750,7 @@ class AppController extends ChangeNotifier {
         'preset': '${options['preset'] ?? 'auto'}',
         'smart_candidate_id': smartCandidateId,
         'mode': mode,
+        if (nodeId != null && nodeId.isNotEmpty) 'node_id': nodeId,
       },
       timeout: const Duration(minutes: 2),
     );

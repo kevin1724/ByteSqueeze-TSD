@@ -26,7 +26,7 @@ SMART_LOCK = threading.RLock()
 
 GOALS = {"balanced", "quality", "small", "speed", "archive"}
 COMPATIBILITY = {"broad", "modern", "maximum"}
-HARDWARE = {"auto", "software", "qsv"}
+HARDWARE = {"auto", "software", "qsv", "nvenc"}
 AUDIO_STRATEGIES = {"copy", "eac3_surround"}
 SMART_LANGUAGES = ["eng", "spa"]
 

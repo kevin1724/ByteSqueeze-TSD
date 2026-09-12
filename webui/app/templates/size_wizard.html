@@ -45,22 +45,125 @@
       margin-bottom: 14px;
     }
 
+    /* The destination is a compact control, not another full-size wizard
+       card. Keep it visible in both Simple and Advanced modes. */
+    .wizard-destination {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(240px, 360px);
+      gap: 12px;
+      align-items: center;
+      margin: 0 0 14px;
+      padding: 10px 12px;
+      border: 1px solid rgba(22, 199, 214, .2);
+      border-radius: 10px;
+      background: rgba(22, 199, 214, .045);
+    }
+
+    .wizard-destination-copy {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+    }
+
+    .wizard-destination-copy strong {
+      color: #fff;
+      font-size: 14px;
+    }
+
+    .wizard-destination-select {
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+    }
+
+    .wizard-destination-select label {
+      color: rgba(229, 229, 229, .58);
+      font-size: 11px;
+      font-weight: 750;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+
+    .wizard-destination select {
+      width: 100%;
+      min-height: 40px;
+    }
+
+    .wizard-destination-status {
+      grid-column: 1 / -1;
+      margin-top: -2px;
+    }
+
     .wizard-quickstart {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 10px;
+      gap: 8px;
       margin-bottom: 14px;
     }
 
     .wizard-quickstart > div {
       display: grid;
-      grid-template-columns: 30px 1fr;
+      grid-template-columns: 26px 1fr;
       gap: 10px;
       align-items: start;
-      padding: 13px;
+      padding: 9px 10px;
       border: 1px solid rgba(255,255,255,.08);
       border-radius: 13px;
       background: rgba(255,255,255,.025);
+    }
+
+    .wizard-quickstart small {
+      display: none;
+    }
+
+    .smart-preset-card.is-collapsed > :not(.smart-preset-head) {
+      display: none;
+    }
+
+    .smart-preset-head-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .smart-preset-toggle {
+      min-height: 34px;
+      padding: 6px 10px;
+      font-size: 12px;
+    }
+
+    .ai-assistant {
+      overflow: hidden;
+    }
+
+    .ai-assistant > .ai-assistant-header {
+      list-style: none;
+    }
+
+    .ai-assistant > .ai-assistant-header::-webkit-details-marker {
+      display: none;
+    }
+
+    .ai-assistant > .ai-assistant-header {
+      cursor: pointer;
+      padding: 2px 0;
+    }
+
+    .ai-assistant > .ai-assistant-header::after {
+      content: "▾";
+      margin-left: auto;
+      color: rgba(229, 229, 229, .58);
+      font-size: 16px;
+    }
+
+    .ai-assistant[open] > .ai-assistant-header::after {
+      content: "▴";
+    }
+
+    .ai-assistant > .ai-assistant-header + * {
+      margin-top: 10px;
     }
 
     .wizard-quickstart b {
@@ -88,7 +191,7 @@
       align-items: center;
       margin-bottom: 14px;
       border-color: rgba(22, 199, 214, .22);
-      background: linear-gradient(120deg, rgba(22, 199, 214, .08), rgba(52, 118, 255, .045));
+      background: rgba(22, 199, 214, .045);
     }
 
     .wizard-ai-setup-copy {
@@ -111,12 +214,17 @@
 
     .wizard-ai-setup-card[data-state="ready"] {
       border-color: rgba(56, 211, 159, .34);
-      background: linear-gradient(120deg, rgba(56, 211, 159, .08), rgba(22, 199, 214, .045));
+      background: rgba(56, 211, 159, .045);
     }
 
     .wizard-ai-setup-card[data-state="needs-setup"] {
       border-color: rgba(255, 190, 74, .32);
-      background: linear-gradient(120deg, rgba(255, 190, 74, .08), rgba(52, 118, 255, .035));
+      background: rgba(255, 190, 74, .05);
+    }
+
+    .wizard-ai-setup-card[data-state="ready"] .wizard-ai-setup-copy .small,
+    .wizard-ai-setup-card[data-state="ready"] .wizard-ai-guide-link {
+      display: none;
     }
 
     @media (max-width: 760px) {
@@ -845,7 +953,7 @@
       gap: 14px;
       margin-bottom: 14px;
       border-color: rgba(52, 211, 153, 0.3);
-      background: linear-gradient(135deg, rgba(52, 211, 153, 0.07), rgba(22, 199, 214, 0.035));
+      background: rgba(52, 211, 153, 0.035);
     }
 
     .smart-preset-head,
@@ -963,6 +1071,15 @@
     }
 
     @media (max-width: 860px) {
+      .wizard-destination {
+        grid-template-columns: 1fr;
+        gap: 8px;
+      }
+
+      .wizard-destination-status {
+        grid-column: auto;
+      }
+
       .wizard-mode-card {
         grid-template-columns: 1fr;
       }
@@ -1018,6 +1135,20 @@
 
       .preview-options {
         grid-template-columns: 1fr;
+      }
+
+      .wizard-quickstart {
+        grid-template-columns: repeat(3, minmax(145px, 1fr));
+        overflow-x: auto;
+      }
+
+      .wizard-quickstart > div {
+        min-width: 145px;
+      }
+
+      .smart-preset-head-actions {
+        width: 100%;
+        justify-content: flex-start;
       }
     }
   </style>
@@ -1079,13 +1210,32 @@
       </div>
     </section>
 
-    <section class="section-card smart-preset-card" aria-labelledby="smartPresetHeading">
+    <section class="wizard-destination" aria-labelledby="wizardDestinationHeading">
+      <div class="wizard-destination-copy">
+        <span class="eyebrow">Queue destination</span>
+        <strong id="wizardDestinationHeading">Choose where this encode runs</strong>
+        <span class="small">Next available distributes work as nodes free up. A named worker pins this job to that node.</span>
+      </div>
+      <div class="wizard-destination-select">
+        <label for="queueDestination">Run on</label>
+        <select id="queueDestination" aria-describedby="queueDestinationStatus">
+          <option value="local">Main controller</option>
+          <option value="next_available">Next available node</option>
+        </select>
+      </div>
+      <div id="queueDestinationStatus" class="wizard-destination-status small status-text" role="status" aria-live="polite">Checking linked workers…</div>
+    </section>
+
+    <section class="section-card smart-preset-card is-collapsed" aria-labelledby="smartPresetHeading">
       <div class="smart-preset-head">
         <div>
           <h2 id="smartPresetHeading">Smart Presets</h2>
           <div class="small">Tell it what matters, compare a real preview, and it will learn the plans you accept.</div>
         </div>
-        <span id="smartReadyPill" class="ai-model-chip">Learning</span>
+        <div class="smart-preset-head-actions">
+          <span id="smartReadyPill" class="ai-model-chip">Learning</span>
+          <button id="smartPresetToggleBtn" type="button" class="ghost-btn smart-preset-toggle" aria-expanded="false">Customize</button>
+        </div>
       </div>
 
       <div class="smart-preset-grid">
@@ -1113,6 +1263,7 @@
             <option value="auto">Choose automatically</option>
             <option value="software">CPU quality / efficiency</option>
             <option value="qsv">Intel QSV speed</option>
+            <option value="nvenc">NVIDIA NVENC speed</option>
           </select>
         </div>
         <div class="wizard-field">
@@ -1241,11 +1392,12 @@
               <label for="simpleDevice">Encoding style</label>
               <select id="simpleDevice">
                 <option value="auto" selected>Auto recommended</option>
-                <option value="fast">Faster encode</option>
+                <option value="fast">Intel Quick Sync</option>
+                <option value="nvenc">NVIDIA NVENC</option>
                 <option value="efficient">Better compression</option>
                 <option value="compat">Best compatibility</option>
               </select>
-              <div class="help-text">Faster uses QSV only when Settings says /dev/dri is available. Better compression may take longer.</div>
+              <div class="help-text">Choose Intel QSV or NVIDIA NVENC for a fast hardware encode. The selected node must advertise that encoder.</div>
             </div>
 
             <div class="wizard-field">
@@ -1375,8 +1527,9 @@
                 <option value="auto" selected>Auto from CPU</option>
                 <option value="software">CPU only</option>
                 <option value="qsv">Intel QSV</option>
+                <option value="nvenc">NVIDIA NVENC</option>
               </select>
-              <div class="help-text">QSV can be much faster when the worker/container has Intel media hardware available.</div>
+              <div class="help-text">Hardware choices are matched to a worker that advertises the requested codec and encoder.</div>
             </div>
 
             <div class="wizard-field">
@@ -1512,7 +1665,7 @@
               <label for="videoCodec">Codec</label>
               <select id="videoCodec">
                 <option value="h265" selected>H.265 / HEVC</option>
-                <option value="av1">AV1 / SVT-AV1</option>
+                <option value="av1">AV1</option>
                 <option value="h264">H.264 / AVC</option>
               </select>
               <div class="help-text">AV1 can save more space but is much slower. H.265 is the safer everyday choice. H.264 is usually most compatible.</div>
@@ -1523,8 +1676,9 @@
               <select id="encoderFamily">
                 <option value="software" selected>CPU software</option>
                 <option value="qsv">Intel QSV</option>
+                <option value="nvenc">NVIDIA NVENC</option>
               </select>
-              <div class="help-text">CPU usually gives better compression. QSV usually finishes faster.</div>
+              <div class="help-text">CPU usually gives better compression. QSV and NVENC finish faster on compatible nodes.</div>
             </div>
 
             <div class="wizard-field">
@@ -1754,14 +1908,14 @@
         <div id="planWarning" class="plan-warning small"></div>
         <div id="decisionNote" class="small plan-note"></div>
 
-        <section class="ai-assistant" aria-labelledby="aiAssistantHeading">
-          <div class="ai-assistant-header">
+        <details id="aiAssistantDetails" class="ai-assistant">
+          <summary class="ai-assistant-header">
             <div class="ai-assistant-title">
               <strong id="aiAssistantHeading">Plan Assistant</strong>
               <span>Grounded in this file, your hardware, encode history, and track policy</span>
             </div>
             <span id="aiModelChip" class="ai-model-chip" title="The local model loads only while answering">Checking model</span>
-          </div>
+          </summary>
           <div class="small" style="margin:0 0 10px">Need a key? Open <a href="/settings/ai">Settings &rarr; AI &amp; API Keys</a>, paste it, then use <em>Save &amp; test selected provider</em>. Video and audio are never sent to a cloud model.</div>
           <div id="aiChatLog" class="ai-chat-log" aria-live="polite">
             <div class="ai-chat-message assistant">Select a file and I will explain the plan, compare tradeoffs, or safely change wizard settings.</div>
@@ -1776,7 +1930,7 @@
             <input id="aiChatInput" type="text" maxlength="500" placeholder="Ask why, or say: prioritize quality and keep 4K">
             <button id="aiChatSend" type="button">Ask AI</button>
           </div>
-        </section>
+        </details>
 
         <div class="wizard-actions ai-plan-actions">
           <button id="saveAiPlanBtn" type="button" class="ghost-btn" disabled>Save AI Preset</button>
@@ -1792,7 +1946,7 @@
     </div>
 
     <section class="section-card">
-      <details class="advanced-section" open>
+      <details class="advanced-section">
         <summary>
           <span class="advanced-summary-copy">
             <strong>Preview</strong>
@@ -1933,6 +2087,8 @@
 
     const PREVIEW_ID_KEY = "hbwiz_preview_id";
     const WIZARD_MODE_KEY = "hbwiz_mode";
+    const WIZARD_DESTINATION_KEY = "hbwiz_destination";
+    const SMART_PRESET_COLLAPSED_KEY = "hbwiz_smart_presets_collapsed";
     const simpleControlIds = [
       "simpleGoal",
       "simpleCodecPreference",
@@ -2107,6 +2263,88 @@
         return await res.json();
       } catch (e) {
         return { error: "Invalid server response" };
+      }
+    }
+
+    function nodeHost(url) {
+      try {
+        return new URL(String(url || "")).hostname || "";
+      } catch (e) {
+        return "";
+      }
+    }
+
+    function setSmartPresetCollapsed(collapsed, { persist = true } = {}) {
+      const card = document.querySelector(".smart-preset-card");
+      const button = el("smartPresetToggleBtn");
+      if (!card) return;
+      const next = !!collapsed;
+      card.classList.toggle("is-collapsed", next);
+      if (button) {
+        button.textContent = next ? "Customize" : "Hide options";
+        button.setAttribute("aria-expanded", next ? "false" : "true");
+      }
+      if (persist) safeSetStorage(wizardLocalStorage, SMART_PRESET_COLLAPSED_KEY, next ? "1" : "0");
+    }
+
+    async function loadQueueDestinations() {
+      const select = el("queueDestination");
+      const status = el("queueDestinationStatus");
+      if (!select) return;
+      const previous = safeGetStorage(wizardLocalStorage, WIZARD_DESTINATION_KEY) || select.value || "local";
+      try {
+        const response = await fetchWithTimeout("/api/nodes", { cache: "no-store" }, 10000);
+        const data = await readJson(response);
+        if (!response.ok || data.error) throw new Error(data.error || "Unable to load linked workers");
+        const nodes = Array.isArray(data.nodes) ? data.nodes : [];
+        const local = data.local && typeof data.local === "object" ? data.local : {};
+        const fragment = document.createDocumentFragment();
+
+        const localOption = document.createElement("option");
+        localOption.value = "local";
+        const localName = String(local.name || "").trim();
+        localOption.textContent = localName && localName.toLowerCase() !== "main controller"
+          ? `Main controller · ${localName}`
+          : "Main controller";
+        fragment.appendChild(localOption);
+
+        const autoOption = document.createElement("option");
+        autoOption.value = "next_available";
+        autoOption.textContent = "Next available node · auto distribute";
+        fragment.appendChild(autoOption);
+
+        nodes.forEach((node) => {
+          const id = String(node?.id || "").trim();
+          if (!id) return;
+          const name = String(node?.name || "Worker").trim() || "Worker";
+          const host = nodeHost(node?.url);
+          const suffix = host || id.slice(0, 8);
+          const statusText = node?.online ? "online" : String(node?.status || "offline").replace(/_/g, " ");
+          const option = document.createElement("option");
+          option.value = `node:${id}`;
+          option.textContent = `${name} · ${suffix} · ${statusText}`;
+          option.disabled = node?.online !== true;
+          option.title = option.disabled ? "Worker is offline; refresh after it reconnects." : "Pin this encode to this worker.";
+          fragment.appendChild(option);
+        });
+        select.replaceChildren(fragment);
+        const canRestore = Array.from(select.options).some((option) => option.value === previous && !option.disabled);
+        select.value = canRestore ? previous : "local";
+        safeSetStorage(wizardLocalStorage, WIZARD_DESTINATION_KEY, select.value);
+        const online = nodes.filter((node) => node && node.online === true).length;
+        if (status) {
+          status.textContent = nodes.length
+            ? `${online}/${nodes.length} linked workers online · named workers are pinned for this encode.`
+            : "No linked workers yet · the encode will run on the main controller.";
+          status.classList.remove("error");
+          status.classList.add("ok");
+        }
+      } catch (e) {
+        if (status) {
+          status.textContent = "Linked workers could not be loaded · main controller is still available.";
+          status.classList.remove("ok");
+          status.classList.add("error");
+        }
       }
     }
 
@@ -2374,7 +2612,9 @@
         return `AI ${goal} ${payload.target_size_value}${payload.target_size_unit}`;
       }
       const codec = payload.video_codec === "h264" ? "H.264" : (payload.video_codec === "av1" ? "AV1" : "H.265");
-      const encoder = payload.encoder_family === "qsv" ? "QSV" : "CPU";
+      const encoder = payload.encoder_family === "qsv"
+        ? "QSV"
+        : (payload.encoder_family === "nvenc" ? "NVENC" : "CPU");
       return `${codec} ${encoder} ${payload.target_size_value}${payload.target_size_unit}`;
     }
 
@@ -2428,8 +2668,8 @@
       const ratio = sourceGb > 0 ? sizeGb / sourceGb : 0;
       const messages = [];
 
-      if (goal === "quality" && device === "fast") {
-        messages.push("Best quality and faster encode fight each other. AI will favor speed if QSV is available, but CPU H.265 or AV1 will usually look better.");
+      if (goal === "quality" && ["fast", "nvenc"].includes(device)) {
+        messages.push("Best quality and faster encode fight each other. Hardware encoding favors speed, while CPU H.265 or AV1 will usually compress more efficiently.");
       }
       if (goal === "quality" && ratio > 0 && ratio < 0.22) {
         messages.push(`That is a tight best-quality target. A more realistic target is about ${Math.max(sizeGb + 1, sourceGb * 0.25).toFixed(1)} GB, or let AI cap resolution.`);
@@ -2438,7 +2678,7 @@
         messages.push("Balanced at this size is very aggressive. AI may choose AV1 or lower resolution to avoid ugly artifacts.");
       }
       if (codec === "av1" && device === "fast") {
-        messages.push("AV1 is the wrong tool for fast encodes. It can be efficient, but expect much longer runtimes.");
+        messages.push("AV1 requires an Intel GPU with AV1 encode support; otherwise choose NVIDIA NVENC or CPU encoding.");
       }
       if (codec === "h264" && ratio > 0 && ratio < 0.25) {
         messages.push("H.264 is compatible but less efficient at small targets. H.265 is the safer recommendation here.");
@@ -2469,6 +2709,7 @@
       setSimpleSizeFromGb(simpleSizeGb(), { updateInput: false });
 
       if (el("videoCodec")?.value === "h264") setValue("simpleDevice", "compat");
+      else if (el("aiHardware")?.value === "nvenc" || el("encoderFamily")?.value === "nvenc") setValue("simpleDevice", "nvenc");
       else if (el("aiGoal")?.value === "speed" || el("aiHardware")?.value === "qsv") setValue("simpleDevice", "fast");
       else if (el("encoderSpeed")?.value === "slow" || el("aiGoal")?.value === "archive") setValue("simpleDevice", "efficient");
       else setValue("simpleDevice", "auto");
@@ -2508,7 +2749,7 @@
       setChecked("aiMode", device !== "compat");
       const aiGoal = device === "fast" ? "speed" : (device === "efficient" && goal === "balanced" ? "archive" : (goalToAi[goal] || "balanced"));
       setValue("aiGoal", aiGoal);
-      setValue("aiHardware", device === "fast" ? "qsv" : (device === "compat" ? "software" : "auto"));
+      setValue("aiHardware", device === "nvenc" ? "nvenc" : (device === "fast" ? "qsv" : (device === "compat" ? "software" : "auto")));
       const codecPref = el("simpleCodecPreference")?.value || "auto";
       setValue("aiCodecPreference", codecPref);
 
@@ -2521,7 +2762,10 @@
       } else {
         setValue("videoCodec", codecPref === "av1" ? "av1" : "h265");
         setValue("bitDepth", "10");
-        setValue("encoderFamily", device === "fast" && codecPref !== "av1" ? "qsv" : "software");
+        setValue(
+          "encoderFamily",
+          device === "nvenc" ? "nvenc" : (device === "fast" && codecPref !== "av1" ? "qsv" : "software")
+        );
         setValue("encoderSpeed", device === "efficient" || goal === "archive" ? "slow" : "auto");
         setValue("resolutionMode", el("simpleResolutionPreference")?.value || "auto");
       }
@@ -2684,11 +2928,9 @@
       }
 
       const isH264 = el("videoCodec").value === "h264";
-      const isAv1 = el("videoCodec").value === "av1";
-      if (isAv1) el("encoderFamily").value = "software";
       if (isH264) el("bitDepth").value = "8";
       el("bitDepth").disabled = isH264;
-      el("encoderFamily").disabled = isAv1;
+      el("encoderFamily").disabled = false;
 
       const audioMode = el("audioMode").value;
       el("audioBitrate").disabled = audioMode === "copy" || audioMode === "eac3";
@@ -2696,9 +2938,9 @@
       const sameRate = el("framerateMode").value === "same";
       el("framerate").disabled = sameRate;
 
-      const isQsv = el("encoderFamily").value === "qsv";
-      if (isQsv) el("twoPass").checked = false;
-      el("twoPass").disabled = isQsv;
+      const isHardware = ["qsv", "nvenc"].includes(el("encoderFamily").value);
+      if (isHardware) el("twoPass").checked = false;
+      el("twoPass").disabled = isHardware;
     }
 
     function smartProfileFromControls() {
@@ -3607,6 +3849,10 @@
 
     async function queueWizard() {
       const payload = currentPayload();
+      const destination = el("queueDestination")?.value || "local";
+      payload.mode = destination.startsWith("node:") ? "node" : destination;
+      payload.node_id = destination.startsWith("node:") ? destination.slice(5) : "";
+      payload.queue_source = "web_size_wizard";
       if (!payload.src) {
         window.alert("No file selected.");
         return;
@@ -3625,10 +3871,11 @@
         if (!res.ok) throw new Error(data.error || "Queue failed");
         if (data.learning) renderSmartLearning(data.learning);
         const learned = data.learning_recorded === true;
+        const targetLabel = data.node_name ? ` on ${data.node_name}` : (data.dispatch_mode === "next_available" ? " for the next available node" : "");
         setQueueStatus(
           learned
-            ? `Queued ${data.job_id || ""}. Smart Presets learned this approved plan.`
-            : `Queued ${data.job_id || ""}. This source was already active, so no duplicate learning was saved.`,
+            ? `Queued ${data.job_id || ""}${targetLabel}. Smart Presets learned this approved plan.`
+            : `Queued ${data.job_id || ""}${targetLabel}. This source was already active, so no duplicate learning was saved.`,
           "ok"
         );
         if (window.appToast) appToast(
@@ -3682,6 +3929,10 @@
       });
 
       el("videoCodec").addEventListener("change", updateControlStates);
+      el("encoderFamily").addEventListener("change", () => {
+        if (el("aiMode")?.checked) setValue("aiHardware", el("encoderFamily").value);
+        updateControlStates();
+      });
       el("audioMode").addEventListener("change", updateControlStates);
       el("framerateMode").addEventListener("change", updateControlStates);
       el("targetSizeAuto").addEventListener("change", () => {
@@ -3715,6 +3966,13 @@
       el("deletePresetBtn").addEventListener("click", deleteWizardPreset);
       el("queueBtn").addEventListener("click", queueWizard);
       el("simpleQueueBtn").addEventListener("click", queueWizard);
+      el("smartPresetToggleBtn").addEventListener("click", () => {
+        const card = document.querySelector(".smart-preset-card");
+        setSmartPresetCollapsed(!card?.classList.contains("is-collapsed"));
+      });
+      el("queueDestination").addEventListener("change", (event) => {
+        safeSetStorage(wizardLocalStorage, WIZARD_DESTINATION_KEY, event.target.value || "local");
+      });
       el("smartBuildBtn").addEventListener("click", () => buildSmartPresets());
       el("smartFeedbackPanel").addEventListener("click", (event) => {
         const button = event.target.closest("[data-smart-feedback]");
@@ -3776,6 +4034,8 @@
 
     function startWizardPage() {
       setWizardMode(getWizardMode(), { persist: false });
+      const savedSmartState = safeGetStorage(wizardLocalStorage, SMART_PRESET_COLLAPSED_KEY);
+      setSmartPresetCollapsed(savedSmartState !== "0", { persist: false });
       wireEvents();
       initFromQuery();
       if (getWizardMode() === "simple") {
@@ -3787,6 +4047,7 @@
       loadWizardPresets();
       loadSmartPresets();
       loadAiModelStatus();
+      loadQueueDestinations();
       schedulePreview();
     }
 
