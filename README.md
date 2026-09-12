@@ -475,6 +475,22 @@ per-file choice so the HandBrake muxer and final `.mkv` or `.mp4` filename stay
 aligned. MP4 also has an optional **Web Optimized / Fast Start** switch; it is
 disabled for MKV and Auto.
 
+### Audio optimization
+
+Every new encode inventories all audio streams before it starts. The default
+**Preserve / Passthrough** policy keeps every track, language, channel layout,
+and track metadata. **Optimize lossless audio** only proposes changes for
+eligible lossless tracks, while efficient AAC, AC3, E-AC3, MP3, and Opus tracks
+remain untouched. Atmos/DTS:X-capable tracks, commentary, removal, and channel
+downmixing require an explicit choice in the per-track review.
+
+The Queue can also create an **Audio optimization only** job. It remuxes with
+FFmpeg, copies video, subtitles, attachments, chapters, and metadata, and only
+encodes selected audio tracks. Completed jobs expose **Optimize Audio** so an
+existing AV1/H.265/H.264 output can be improved without re-encoding video.
+ByteSqueeze validates the temporary output before installing it and records
+measured video, audio, and total storage savings separately.
+
 ## Official Image
 
 Pull:
@@ -497,14 +513,14 @@ docker run -d \
 ```
 
 The `latest` and `main` images are published automatically from `main`. Stable
-controller releases also publish `3.23.0` and `3.23` tags.
+controller releases also publish `3.24.0` and `3.24` tags.
 
 The encoding-only worker has its own public Docker Hub image:
 
 [kevina1724/handbrake-tsd-worker on Docker Hub](https://hub.docker.com/r/kevina1724/handbrake-tsd-worker)
 
 `latest` and `main` follow the main branch. Stable worker releases also publish
-`2.9.0` and `2.9` tags:
+`2.10.0` and `2.10` tags:
 
 ```bash
 docker pull kevina1724/handbrake-tsd-worker:latest

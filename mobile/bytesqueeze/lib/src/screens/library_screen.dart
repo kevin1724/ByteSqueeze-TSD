@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 
 import '../app_controller.dart';
 import '../theme.dart';
+import '../widgets/audio_optimizer_sheet.dart';
 import '../widgets/common.dart';
 import 'size_wizard_screen.dart';
 
@@ -718,6 +719,26 @@ class _MediaDetailsState extends State<_MediaDetails> {
     );
   }
 
+  Future<void> _openAudioOptimization(Map<String, dynamic> file) async {
+    final path = '${file['path'] ?? ''}';
+    if (path.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('This library item has no source path.')),
+      );
+      return;
+    }
+    final queued = await showAudioOptimizerSheet(
+      context,
+      controller: widget.controller,
+      job: <String, dynamic>{'src': path, 'out_path': path},
+    );
+    if (queued == true && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Audio-only job queued. Video will be copied.')),
+      );
+    }
+  }
+
   Map<int, List<Map<String, dynamic>>> _seasonGroups(List<dynamic> values) {
     final groups = <int, List<Map<String, dynamic>>>{};
     for (final value in values) {
@@ -1006,6 +1027,22 @@ class _MediaDetailsState extends State<_MediaDetails> {
                 ),
                 const SizedBox(height: 9),
                 OutlinedButton.icon(
+                  onPressed: _paths.isEmpty
+                      ? null
+                      : () => _openAudioOptimization(
+                          files.isNotEmpty
+                              ? asMap(files.first)
+                              : <String, dynamic>{'path': _paths.first},
+                        ),
+                  icon: const Icon(Icons.graphic_eq_rounded),
+                  label: Text(
+                    widget.isShow
+                        ? 'Optimize audio for first episode'
+                        : 'Optimize audio only',
+                  ),
+                ),
+                const SizedBox(height: 9),
+                OutlinedButton.icon(
                   onPressed:
                       widget.controller.canControl &&
                           !_previewWorking &&
@@ -1213,10 +1250,19 @@ class _MediaDetailsState extends State<_MediaDetails> {
                             color: ByteSqueezeColors.muted,
                           ),
                         ),
-                        trailing: IconButton(
-                          tooltip: 'Open this episode in Size Wizard',
-                          onPressed: () => _openSizeWizard(file),
-                          icon: const Icon(Icons.straighten_rounded),
+                        trailing: Wrap(
+                          children: [
+                            IconButton(
+                              tooltip: 'Optimize episode audio only',
+                              onPressed: () => _openAudioOptimization(file),
+                              icon: const Icon(Icons.graphic_eq_rounded),
+                            ),
+                            IconButton(
+                              tooltip: 'Open this episode in Size Wizard',
+                              onPressed: () => _openSizeWizard(file),
+                              icon: const Icon(Icons.straighten_rounded),
+                            ),
+                          ],
                         ),
                       );
                     }).toList(),
@@ -1248,10 +1294,19 @@ class _MediaDetailsState extends State<_MediaDetails> {
                       formatBytes(file['size_bytes']),
                       style: const TextStyle(color: ByteSqueezeColors.muted),
                     ),
-                    trailing: IconButton(
-                      tooltip: 'Open in Size Wizard',
-                      onPressed: () => _openSizeWizard(file),
-                      icon: const Icon(Icons.straighten_rounded),
+                    trailing: Wrap(
+                      children: [
+                        IconButton(
+                          tooltip: 'Optimize audio only',
+                          onPressed: () => _openAudioOptimization(file),
+                          icon: const Icon(Icons.graphic_eq_rounded),
+                        ),
+                        IconButton(
+                          tooltip: 'Open in Size Wizard',
+                          onPressed: () => _openSizeWizard(file),
+                          icon: const Icon(Icons.straighten_rounded),
+                        ),
+                      ],
                     ),
                   );
                 }).toList(),

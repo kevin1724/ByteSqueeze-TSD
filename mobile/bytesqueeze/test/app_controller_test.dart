@@ -68,6 +68,48 @@ void main() {
     expect(api.lastPostBody['paths'], hasLength(2));
     expect(api.lastPostBody.containsKey('node_id'), isFalse);
   });
+
+  test('audio-only queue preserves the stream plan and uses next available',
+      () async {
+    final controller = AppController();
+    final api = _RecordingApi(controller.store);
+    controller.api = api;
+    controller.session = const ServerSession(
+      baseUrl: 'http://bytesqueeze.test',
+      deviceId: 'audio-phone',
+      deviceName: 'Audio phone',
+      scope: 'control',
+      accessToken: 'access',
+      refreshToken: 'refresh',
+    );
+    final operations = <String, dynamic>{
+      'job_type': 'audio_only',
+      'video_action': 'copy',
+      'audio_policy': 'custom',
+      'audio_actions': [
+        {
+          'stream_index': 1,
+          'action': 'encode',
+          'target_codec': 'aac',
+          'bitrate_kbps': 640,
+          'channels': 6,
+        }
+      ],
+    };
+
+    await controller.queueAudioOptimizationPath(
+      '/movies/Example-TSD.mkv',
+      operations,
+    );
+
+    expect(api.lastPostPath, '/audio/queue');
+    expect(api.lastPostBody['mode'], 'next_available');
+    expect(api.lastPostBody['src'], '/movies/Example-TSD.mkv');
+    final sentOperations =
+        Map<String, dynamic>.from(api.lastPostBody['operations'] as Map);
+    expect(sentOperations['video_action'], 'copy');
+    expect(sentOperations['audio_actions'], hasLength(1));
+  });
 }
 
 class _RecordingApi extends ByteSqueezeApi {

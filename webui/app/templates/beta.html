@@ -2275,6 +2275,10 @@
       window.location.assign("/size_wizard?src=" + encodeURIComponent(path) + "&preset=auto&from=library");
     }
 
+    function openAudioOptimization(path) {
+      window.location.assign("/jobs?audio_src=" + encodeURIComponent(path));
+    }
+
     function makeMovieCard(item) {
       const card = document.createElement("article");
       card.className = "beta-card";
@@ -2327,6 +2331,13 @@
       wizard.setAttribute("aria-label", `Open ${item.title || "movie"} in Size Wizard`);
       wizard.onclick = () => openInWizard(item.path);
       actions.appendChild(wizard);
+      const audio = document.createElement("button");
+      audio.type = "button";
+      audio.className = "wizard-open-button";
+      audio.textContent = "Audio";
+      audio.setAttribute("aria-label", `Optimize ${item.title || "movie"} audio without re-encoding video`);
+      audio.onclick = () => openAudioOptimization(item.path);
+      actions.appendChild(audio);
       const queue = document.createElement("button");
       queue.type = "button";
       queue.className = "smart-queue-button";
@@ -2392,6 +2403,13 @@
       wizard.setAttribute("aria-label", `Open ${episodeLabel(ep)} in Size Wizard`);
       wizard.onclick = () => openInWizard(ep.path);
       actions.appendChild(wizard);
+      const audio = document.createElement("button");
+      audio.type = "button";
+      audio.className = "wizard-open-button";
+      audio.textContent = "Audio";
+      audio.setAttribute("aria-label", `Optimize ${episodeLabel(ep)} audio without re-encoding video`);
+      audio.onclick = () => openAudioOptimization(ep.path);
+      actions.appendChild(audio);
       const queue = document.createElement("button");
       queue.type = "button";
       queue.className = "smart-queue-button";

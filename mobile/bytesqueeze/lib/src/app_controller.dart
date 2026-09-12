@@ -40,8 +40,9 @@ class AppController extends ChangeNotifier {
   bool get canControl => demoMode || session?.canControl == true;
   bool get useV3 => interfaceVersion == 'v3';
   bool get compactInterface => interfaceDensity == 'compact';
-  String get serverLabel =>
-      demoMode ? 'Demo server' : (api.activeBaseUrl.isEmpty ? 'Not connected' : api.activeBaseUrl);
+  String get serverLabel => demoMode
+      ? 'Demo server'
+      : (api.activeBaseUrl.isEmpty ? 'Not connected' : api.activeBaseUrl);
 
   Future<void> bootstrap() async {
     booting = true;
@@ -72,8 +73,11 @@ class AppController extends ChangeNotifier {
     error = null;
     notifyListeners();
     try {
-      session =
-          await api.pair(baseUrl: baseUrl, fallbackBaseUrl: fallbackBaseUrl, code: code, deviceName: deviceName);
+      session = await api.pair(
+          baseUrl: baseUrl,
+          fallbackBaseUrl: fallbackBaseUrl,
+          code: code,
+          deviceName: deviceName);
       demoMode = false;
       await refreshAll(notifyBusy: false);
     } catch (failure) {
@@ -183,6 +187,10 @@ class AppController extends ChangeNotifier {
         'qsv_device_available': summary['qsv_device_available'] == true,
         'auto_stop_large_output_enabled': false,
         'auto_stop_large_output_percent': 90,
+        'audio_policy_default': 'preserve',
+        'audio_optimize_codec': 'aac',
+        'audio_allow_downmix': false,
+        'audio_allow_object_metadata_loss': false,
       };
     }
     if (failures.isNotEmpty) error = failures.first;
@@ -282,8 +290,7 @@ class AppController extends ChangeNotifier {
     }
     await api.post('/jobs/$jobId/preset', {
       'preset': preset,
-      if (preset == 'smart' && smartTuning != null)
-        'smart_tuning': smartTuning,
+      if (preset == 'smart' && smartTuning != null) 'smart_tuning': smartTuning,
     });
     await refreshJobsAndDashboard();
   }
@@ -305,6 +312,155 @@ class AppController extends ChangeNotifier {
     }
     await api.post('/jobs/clear', {'target': target});
     await refreshJobsAndDashboard();
+  }
+
+  Future<Map<String, dynamic>> scanAudio({
+    String path = '',
+    String jobId = '',
+    String jobType = 'audio_only',
+    String audioPolicy = 'optimize_lossless',
+    Map<String, dynamic>? operations,
+  }) async {
+    if (path.isEmpty && jobId.isEmpty) {
+      throw const ApiFailure('Choose a media file or completed job first.');
+    }
+    if (demoMode) {
+      return {
+        'ok': true,
+        'path': path.isNotEmpty ? path : '/media/Demo Movie-TSD.mkv',
+        'inventory': {
+          'duration_seconds': 7200,
+          'audio_streams': [
+            {
+              'index': 1,
+              'type_ordinal': 0,
+              'language': 'eng',
+              'title': 'Main audio',
+              'codec': 'dts',
+              'codec_label': 'DTS-HD MA',
+              'channels': 8,
+              'channel_layout': '7.1',
+              'bitrate': 4800000,
+              'sample_rate': 48000,
+              'size_bytes': 4369051648,
+              'lossless': true,
+              'default': true,
+            },
+            {
+              'index': 2,
+              'type_ordinal': 1,
+              'language': 'spa',
+              'codec': 'ac3',
+              'codec_label': 'AC3',
+              'channels': 6,
+              'channel_layout': '5.1',
+              'bitrate': 640000,
+              'sample_rate': 48000,
+              'size_bytes': 547608330,
+              'lossless': false,
+            },
+          ],
+        },
+        'operations': {
+          'job_type': 'audio_only',
+          'audio_policy': 'optimize_lossless',
+          'replace_source': true,
+          'audio_actions': [
+            {
+              'stream_index': 1,
+              'audio_ordinal': 0,
+              'language': 'eng',
+              'source_codec_label': 'DTS-HD MA',
+              'source_channels': 8,
+              'source_size_bytes': 4369051648,
+              'action': 'encode',
+              'target_codec': 'aac',
+              'bitrate_kbps': 1024,
+              'channels': 8,
+              'sample_rate': 48000,
+              'gain_db': 0,
+              'preserve_metadata': true,
+              'allow_downmix': false,
+            },
+            {
+              'stream_index': 2,
+              'audio_ordinal': 1,
+              'language': 'spa',
+              'source_codec_label': 'AC3',
+              'source_channels': 6,
+              'source_size_bytes': 547608330,
+              'action': 'copy',
+              'target_codec': 'aac',
+              'bitrate_kbps': 640,
+              'channels': 6,
+              'sample_rate': 48000,
+              'gain_db': 0,
+              'preserve_metadata': true,
+              'allow_downmix': false,
+            },
+          ],
+          'estimate': {
+            'current_audio_bytes': 4916660000,
+            'output_audio_bytes': 1322608330,
+            'audio_savings_bytes': 3594051670,
+            'audio_savings_percent': 73.1,
+            'estimated': true,
+          },
+          'warnings': [
+            'DTS-HD MA conversion is lossy; review before queueing.'
+          ],
+        },
+      };
+    }
+    return api.post(
+      '/audio/scan',
+      {
+        if (path.isNotEmpty) 'src': path,
+        if (jobId.isNotEmpty) 'job_id': jobId,
+        'job_type': jobType,
+        'audio_policy': audioPolicy,
+        if (operations != null) 'operations': operations,
+      },
+      timeout: const Duration(minutes: 5),
+    );
+  }
+
+  Future<Map<String, dynamic>> queueAudioOptimization(
+    String completedJobId,
+    Map<String, dynamic> operations, {
+    String mode = 'next_available',
+  }) async {
+    _requireControl();
+    if (completedJobId.isEmpty) {
+      throw const ApiFailure('The completed job is missing its identifier.');
+    }
+    if (demoMode) return {'ok': true, 'job_id': 'demo-audio-only'};
+    final result = await api.post(
+      '/jobs/$completedJobId/optimize-audio',
+      {'operations': operations, 'mode': mode},
+      timeout: const Duration(minutes: 5),
+    );
+    await refreshJobsAndDashboard();
+    return result;
+  }
+
+  Future<Map<String, dynamic>> queueAudioOptimizationPath(
+    String path,
+    Map<String, dynamic> operations, {
+    String mode = 'next_available',
+  }) async {
+    _requireControl();
+    if (path.isEmpty) {
+      throw const ApiFailure('Choose a media file first.');
+    }
+    if (demoMode) return {'ok': true, 'job_id': 'demo-audio-only'};
+    final result = await api.post(
+      '/audio/queue',
+      {'src': path, 'operations': operations, 'mode': mode},
+      timeout: const Duration(minutes: 5),
+    );
+    await refreshJobsAndDashboard();
+    return result;
   }
 
   Future<void> refreshJobsAndDashboard() async {
@@ -457,14 +613,18 @@ class AppController extends ChangeNotifier {
             '2160': 1.0,
           }[resolutionMode] ??
           1.0;
-      final automaticMb = (3180.0 * qualityFactor * codecFactor * resolutionFactor)
-          .clamp(180.0, 7864.0)
-          .toDouble();
-      final manualValue = (demoOptions['target_size_value'] as num?)?.toDouble() ?? 1.0;
+      final automaticMb =
+          (3180.0 * qualityFactor * codecFactor * resolutionFactor)
+              .clamp(180.0, 7864.0)
+              .toDouble();
+      final manualValue =
+          (demoOptions['target_size_value'] as num?)?.toDouble() ?? 1.0;
       final targetMb = demoOptions['target_size_auto'] == false
-          ? manualValue * ('${demoOptions['target_size_unit']}' == 'GB' ? 1024.0 : 1.0)
+          ? manualValue *
+              ('${demoOptions['target_size_unit']}' == 'GB' ? 1024.0 : 1.0)
           : automaticMb;
-      demoOptions['target_size_value'] = double.parse(targetMb.toStringAsFixed(1));
+      demoOptions['target_size_value'] =
+          double.parse(targetMb.toStringAsFixed(1));
       demoOptions['target_size_unit'] = 'MB';
       return <String, dynamic>{
         'ok': true,
@@ -490,14 +650,17 @@ class AppController extends ChangeNotifier {
           'estimates': {
             'encoder': 'qsv_h265_10bit',
             'encoder_label': 'Intel QSV H.265 10-bit',
-            'video_bitrate_kbps':
-                double.parse(((targetMb * 8 * 1024 * 1024 / 6480) / 1000).toStringAsFixed(1)),
+            'video_bitrate_kbps': double.parse(
+                ((targetMb * 8 * 1024 * 1024 / 6480) / 1000)
+                    .toStringAsFixed(1)),
             'output_resolution': {'width': 1920, 'height': 1080},
             'eta_human': '28 minutes',
             'quality_label': 'Good',
             'estimated_output_mb': double.parse(targetMb.toStringAsFixed(1)),
             'auto_target': {
-              'mode': demoOptions['target_size_auto'] == false ? 'manual' : 'source_aware',
+              'mode': demoOptions['target_size_auto'] == false
+                  ? 'manual'
+                  : 'source_aware',
               'summary': demoOptions['target_size_auto'] == false
                   ? 'Manual target size.'
                   : 'Calculated for this source from title runtime, resolution, codec, quality, and approved similar plans.',
@@ -514,8 +677,7 @@ class AppController extends ChangeNotifier {
         'src': path,
         'preset': '${options?['preset'] ?? 'auto'}',
         'smart_start': smartStart,
-        if (smartCandidateId.isNotEmpty)
-          'smart_candidate_id': smartCandidateId,
+        if (smartCandidateId.isNotEmpty) 'smart_candidate_id': smartCandidateId,
       },
       timeout: const Duration(minutes: 2),
     );
@@ -804,7 +966,8 @@ class AppController extends ChangeNotifier {
 
   Future<void> updateServerAddresses(String primary, String fallback) async {
     if (demoMode) return;
-    session = await api.updateAddresses(baseUrl: primary, fallbackBaseUrl: fallback);
+    session =
+        await api.updateAddresses(baseUrl: primary, fallbackBaseUrl: fallback);
     notifyListeners();
     await refreshAll();
   }

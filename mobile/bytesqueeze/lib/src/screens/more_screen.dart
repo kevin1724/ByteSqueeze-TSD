@@ -505,6 +505,9 @@ class _OperationsSettingsPageState extends State<OperationsSettingsPage> {
   late int _hardwareSlots;
   late bool _autoStop;
   late double _stopPercent;
+  late String _audioPolicy;
+  late String _audioCodec;
+  late bool _allowObjectAudioLoss;
   bool _saving = false;
 
   AppController get controller => widget.controller;
@@ -526,6 +529,16 @@ class _OperationsSettingsPageState extends State<OperationsSettingsPage> {
                 90)
             .clamp(50, 150)
             .toDouble();
+    _audioPolicy = '${operations['audio_policy_default'] ?? 'preserve'}';
+    if (!{'preserve', 'optimize_lossless', 'custom'}.contains(_audioPolicy)) {
+      _audioPolicy = 'preserve';
+    }
+    _audioCodec = '${operations['audio_optimize_codec'] ?? 'aac'}';
+    if (!{'aac', 'eac3', 'ac3', 'opus', 'flac'}.contains(_audioCodec)) {
+      _audioCodec = 'aac';
+    }
+    _allowObjectAudioLoss =
+        operations['audio_allow_object_metadata_loss'] == true;
   }
 
   @override
@@ -721,6 +734,68 @@ class _OperationsSettingsPageState extends State<OperationsSettingsPage> {
               ],
             ),
           ),
+          const SectionHeader(
+            title: 'Audio optimization',
+            subtitle: 'Safe defaults for normal video jobs',
+          ),
+          SurfaceCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                DropdownButtonFormField<String>(
+                  initialValue: _audioPolicy,
+                  decoration:
+                      const InputDecoration(labelText: 'Default audio policy'),
+                  items: const [
+                    DropdownMenuItem(
+                        value: 'preserve',
+                        child: Text('Preserve / Passthrough')),
+                    DropdownMenuItem(
+                        value: 'optimize_lossless',
+                        child: Text('Optimize lossless audio')),
+                    DropdownMenuItem(
+                        value: 'custom', child: Text('Custom per job')),
+                  ],
+                  onChanged: controller.canControl && supported
+                      ? (value) =>
+                          setState(() => _audioPolicy = value ?? 'preserve')
+                      : null,
+                ),
+                const SizedBox(height: 10),
+                DropdownButtonFormField<String>(
+                  initialValue: _audioCodec,
+                  decoration:
+                      const InputDecoration(labelText: 'Optimization codec'),
+                  items: const [
+                    DropdownMenuItem(value: 'aac', child: Text('AAC')),
+                    DropdownMenuItem(value: 'eac3', child: Text('E-AC3')),
+                    DropdownMenuItem(value: 'ac3', child: Text('AC3')),
+                    DropdownMenuItem(value: 'opus', child: Text('Opus')),
+                    DropdownMenuItem(value: 'flac', child: Text('FLAC')),
+                  ],
+                  onChanged: controller.canControl && supported
+                      ? (value) => setState(() => _audioCodec = value ?? 'aac')
+                      : null,
+                ),
+                SwitchListTile.adaptive(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Allow object-audio conversion'),
+                  subtitle: const Text(
+                      'Off is safest. Encoding TrueHD/DTS-HD may remove Atmos or DTS:X metadata.',
+                      style: TextStyle(
+                          color: ByteSqueezeColors.muted, fontSize: 12)),
+                  value: _allowObjectAudioLoss,
+                  onChanged: controller.canControl && supported
+                      ? (value) => setState(() => _allowObjectAudioLoss = value)
+                      : null,
+                ),
+                const Text(
+                    'ByteSqueeze inventories every track. It never downmixes or removes audio without a per-track choice.',
+                    style: TextStyle(
+                        color: ByteSqueezeColors.muted, fontSize: 12)),
+              ],
+            ),
+          ),
           const SizedBox(height: 14),
           FilledButton.icon(
             onPressed:
@@ -757,6 +832,9 @@ class _OperationsSettingsPageState extends State<OperationsSettingsPage> {
         'hardware_transcode_concurrency': _hardwareSlots,
         'auto_stop_large_output_enabled': _autoStop,
         'auto_stop_large_output_percent': _stopPercent.round(),
+        'audio_policy_default': _audioPolicy,
+        'audio_optimize_codec': _audioCodec,
+        'audio_allow_object_metadata_loss': _allowObjectAudioLoss,
       });
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(

@@ -92,6 +92,10 @@
                 <div><span>Encode time</span><strong id="homeImpactRuntime">--</strong><small>tracked runtime</small></div>
               </div>
             </div>
+            <div id="homeMediaSavingsSplit" class="home-media-savings-split" hidden>
+              <div class="home-media-savings-track" aria-label="Video and audio savings breakdown"><i id="homeVideoSavingsBar"></i><b id="homeAudioSavingsBar"></b></div>
+              <div class="home-media-savings-labels"><span>Video saved <strong id="homeVideoSaved">--</strong></span><span>Audio saved <strong id="homeAudioSaved">--</strong></span></div>
+            </div>
             <div class="home-savings-chart-shell">
               <div class="home-savings-chart-head"><span>Daily space recovered</span><strong id="homeImpactRecent">--</strong></div>
               <svg id="homeSavingsChart" class="home-savings-chart" viewBox="0 0 720 170" preserveAspectRatio="none" role="img" aria-label="Storage savings over the last 30 days"></svg>
@@ -177,6 +181,17 @@
       homeText("homeImpactAverage", homeFormatBytes(analytics.average_saved_bytes || 0));
       homeText("homeImpactRuntime", homeFormatHours(runtimeSeconds || 0));
       homeText("homeImpactRecent", `${homeFormatBytes(analytics.recent_saved_bytes || 0)} · ${Number(analytics.recent_completed || 0)} encodes`);
+      const videoSaved = Math.max(0, Number(storage.video_saved_bytes || 0));
+      const audioSaved = Math.max(0, Number(storage.audio_saved_bytes || 0));
+      const measuredSaved = videoSaved + audioSaved;
+      const split = document.getElementById("homeMediaSavingsSplit");
+      if (split) split.hidden = measuredSaved <= 0;
+      homeText("homeVideoSaved", homeFormatBytes(videoSaved));
+      homeText("homeAudioSaved", homeFormatBytes(audioSaved));
+      const videoBar = document.getElementById("homeVideoSavingsBar");
+      const audioBar = document.getElementById("homeAudioSavingsBar");
+      if (videoBar) videoBar.style.width = `${measuredSaved ? videoSaved / measuredSaved * 100 : 0}%`;
+      if (audioBar) audioBar.style.width = `${measuredSaved ? audioSaved / measuredSaved * 100 : 0}%`;
 
       const points = Array.isArray(analytics.trend) ? analytics.trend : [];
       const svg = document.getElementById("homeSavingsChart");

@@ -83,7 +83,7 @@ class ApiRouteSmokeTests(unittest.TestCase):
 
         status = self.client.get("/api/autopilot/status")
         self.assertEqual(status.status_code, 200)
-        self.assertEqual(status.get_json()["release"], "3.23.0")
+        self.assertEqual(status.get_json()["release"], "3.24.0")
         self.assertIn("continuous_learning", status.get_json())
         self.assertIn("onboarding", status.get_json())
 
@@ -103,6 +103,8 @@ class ApiRouteSmokeTests(unittest.TestCase):
         jobs_page = self.client.get("/jobs")
         self.assertEqual(jobs_page.status_code, 200)
         self.assertIn(b"<h1>Queue</h1>", jobs_page.data)
+        self.assertIn(b"Audio optimization only", jobs_page.data)
+        self.assertIn(b"Scan audio &amp; review changes", jobs_page.data)
         self.assertIn(b"Next available node", jobs_page.data)
         self.assertIn(b"Edit preset", jobs_page.data)
         self.assertIn(b"Next available node", library_page.data)
@@ -131,6 +133,76 @@ class ApiRouteSmokeTests(unittest.TestCase):
             )
         finally:
             app_jobs.jobs.pop(job_id, None)
+
+    def test_audio_scan_and_queue_create_safe_stream_copy_plan(self):
+        path = os.path.join(TEST_MEDIA, "Audio.Plan.Movie.mkv")
+        with open(path, "wb") as stream:
+            stream.write(b"media")
+        inventory = {
+            "duration_seconds": 3600,
+            "total_bytes": 10 * 1024**3,
+            "audio_streams": [{
+                "index": 1,
+                "type": "audio",
+                "type_ordinal": 0,
+                "language": "eng",
+                "title": "Main",
+                "codec": "flac",
+                "codec_label": "FLAC",
+                "profile": "",
+                "channels": 6,
+                "channel_layout": "5.1",
+                "bitrate": 2000000,
+                "sample_rate": 48000,
+                "size_bytes": 900000000,
+                "lossless": True,
+                "object_audio": False,
+                "object_audio_capable": False,
+                "commentary": False,
+                "default": True,
+                "forced": False,
+            }],
+            "video_streams": [{"index": 0, "codec": "av1"}],
+            "subtitle_streams": [],
+            "attachment_streams": [],
+            "chapter_count": 0,
+            "aggregate": {"video_bytes": 8 * 1024**3, "audio_bytes": 900000000},
+        }
+        requested = {
+            "job_type": "audio_only",
+            "audio_policy": "custom",
+            "audio_actions": [{
+                "stream_index": 1,
+                "action": "encode",
+                "target_codec": "aac",
+                "bitrate_kbps": 640,
+                "channels": 6,
+            }],
+        }
+        with patch.object(app_routes, "scan_media", return_value=inventory):
+            scanned = self.client.post(
+                "/api/audio/scan",
+                json={"src": path, "operations": requested},
+            )
+        self.assertEqual(scanned.status_code, 200)
+        scan_payload = scanned.get_json()
+        self.assertEqual(scan_payload["operations"]["video_action"], "copy")
+        self.assertEqual(scan_payload["operations"]["audio_actions"][0]["channels"], 6)
+        with (
+            patch.object(app_routes, "scan_media", return_value=inventory),
+            patch.object(app_routes, "create_job", return_value="audio-child") as create,
+            patch.object(app_routes, "_wake_auto_node_dispatch"),
+        ):
+            queued = self.client.post(
+                "/api/audio/queue",
+                json={"src": path, "operations": requested, "mode": "next_available"},
+            )
+        self.assertEqual(queued.status_code, 200)
+        self.assertEqual(queued.get_json()["job_id"], "audio-child")
+        call = create.call_args
+        self.assertEqual(call.kwargs["dispatch_mode"], "auto")
+        self.assertEqual(call.kwargs["operations"]["video_action"], "copy")
+        self.assertTrue(call.kwargs["operations"]["replace_source"])
 
     def test_main_jobs_api_combines_worker_rows_and_clear_proxies_to_workers(self):
         worker_jobs = [
@@ -3461,7 +3533,7 @@ class ApiRouteSmokeTests(unittest.TestCase):
 
         self.assertEqual(dashboard.status_code, 200, dashboard.get_data(as_text=True))
         dashboard_payload = dashboard.get_json()
-        self.assertEqual(dashboard_payload["release"], "3.23.0")
+        self.assertEqual(dashboard_payload["release"], "3.24.0")
         self.assertEqual(dashboard_payload["library"]["movies"], 1)
         self.assertIn("automation", dashboard_payload)
         self.assertIn("storage", dashboard_payload)

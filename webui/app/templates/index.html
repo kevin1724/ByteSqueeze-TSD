@@ -146,6 +146,22 @@
               <option value="4k">Force 4K preset</option>
             </select>
           </div>
+          <div class="field-stack audio-job-controls">
+            <label for="jobTypeSelect">Job type</label>
+            <select id="jobTypeSelect">
+              <option value="video_preserve_audio" selected>Video encode · Preserve audio</option>
+              <option value="video_audio">Video + audio optimization</option>
+              <option value="audio_only">Audio optimization only · Copy video</option>
+            </select>
+            <label for="audioPolicySelect">Audio policy</label>
+            <select id="audioPolicySelect">
+              <option value="preserve" selected>Preserve / Passthrough</option>
+              <option value="optimize_lossless">Optimize lossless tracks</option>
+              <option value="custom">Custom per track</option>
+            </select>
+            <button id="previewAudioBtn" type="button" class="ghost-btn" disabled>Scan audio &amp; review changes</button>
+            <div id="audioPlanSummary" class="audio-plan-summary small">Audio is preserved by default.</div>
+          </div>
           <div class="field-stack">
             <label for="queueDispatchModeSelect">Run on</label>
             <select id="queueDispatchModeSelect">
@@ -294,6 +310,30 @@
     </section>
   </main>
 
+  <dialog id="audioPlannerDialog" class="audio-planner-dialog">
+    <form method="dialog" class="audio-planner-shell" onsubmit="return false;">
+      <div class="audio-planner-header">
+        <div>
+          <div class="eyebrow">Audio optimization</div>
+          <h2 id="audioPlannerTitle">Review every track</h2>
+          <p id="audioPlannerPath" class="small"></p>
+        </div>
+        <button id="audioPlannerClose" type="button" class="ghost-btn" aria-label="Close audio planner">Close</button>
+      </div>
+      <div id="audioPlannerStatus" class="audio-planner-status small">Scanning audio packets…</div>
+      <div id="audioPlannerTotals" class="audio-planner-totals"></div>
+      <div id="audioPlannerWarnings" class="audio-planner-warnings" role="status"></div>
+      <div id="audioPlannerTracks" class="audio-track-list"></div>
+      <div class="audio-planner-footer">
+        <label class="toggle-line"><input id="audioPlannerReplace" type="checkbox" checked> Safely replace the current file after validation</label>
+        <div class="button-row">
+          <button id="audioPlannerApply" type="button">Use this audio plan</button>
+          <button id="audioPlannerQueue" type="button" hidden>Queue audio-only job</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
 <script>
 const roots = {{ roots|default([], true)|tojson|safe }};
 const uiSettings = {{ settings|default({}, true)|tojson|safe }};
@@ -306,6 +346,9 @@ let linkedNodesTimer = null;
 let operationsTimer = null;
 let queueLinkedNodes = [];
 let currentJobAutoDispatch = false;
+let currentAudioOperations = null;
+let currentAudioPlanPath = '';
+let audioPlannerContext = null;
 
 // --------------------------
 // Jobs page view mode
@@ -362,10 +405,15 @@ function updateWizardBtn() {
   const src = document.getElementById('selectedFile').value;
   if (btn) btn.disabled = !src;
   if (startBtn) startBtn.disabled = !src;
+  const audioBtn = document.getElementById('previewAudioBtn');
+  if (audioBtn) audioBtn.disabled = !src;
 }
 
 function setSelectedFile(path) {
   document.getElementById('selectedFile').value = path || '';
+  currentAudioOperations = null;
+  currentAudioPlanPath = '';
+  setTextIfPresent('audioPlanSummary', 'Audio is preserved by default. Scan to review every track.');
   updateWizardBtn();
 }
 
@@ -682,7 +730,7 @@ function searchMedia() {
 // --------------------------
 function startEncode() {
   const src = document.getElementById('selectedFile').value;
-  const preset = document.getElementById('presetSelect').value;
+  const preset = selectedAudioJobType() === 'audio_only' ? 'auto' : document.getElementById('presetSelect').value;
   const dispatchMode = document.getElementById('queueDispatchModeSelect')?.value || 'available';
   const nodeId = document.getElementById('queueDispatchNodeSelect')?.value || '';
   if (!src) {
@@ -693,10 +741,24 @@ function startEncode() {
     alert('Pick a specific worker first.');
     return;
   }
+  const jobType = selectedAudioJobType();
+  const audioPolicy = selectedAudioPolicy();
+  if ((jobType === 'audio_only' || audioPolicy !== 'preserve') && (!currentAudioOperations || currentAudioPlanPath !== src)) {
+    alert('Scan the audio and review the proposed track changes before starting this job.');
+    return;
+  }
+  const operations = currentAudioOperations || {
+    job_type: jobType,
+    video_action: jobType === 'audio_only' ? 'copy' : 'encode',
+    audio_policy: audioPolicy,
+    audio_actions: [],
+    subtitle_action: 'copy',
+    replace_source: jobType === 'audio_only',
+  };
   const endpoint = dispatchMode === 'local' ? '/encode' : '/api/nodes/dispatch';
   const payload = dispatchMode === 'local'
-    ? {src, preset}
-    : {paths: [src], preset, mode: dispatchMode, node_id: nodeId};
+    ? {src, preset, operations}
+    : {paths: [src], preset, mode: dispatchMode, node_id: nodeId, operations};
   fetch(endpoint, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -1331,7 +1393,14 @@ function refreshJobs() {
           tr.appendChild(tdEstimate);
 
           const tdSaved = document.createElement('td');
+          const split = job.storage_breakdown || {};
           tdSaved.textContent = formatSavedGb(job.saved_gb);
+          if (job.status === 'done' && (split.video_saved_bytes != null || split.audio_saved_bytes != null)) {
+            const savedSplit = document.createElement('div');
+            savedSplit.className = 'job-savings-split small';
+            savedSplit.textContent = `Video ${formatFileBytes(split.video_saved_bytes) || '0 B'} · Audio ${formatFileBytes(split.audio_saved_bytes) || '0 B'}`;
+            tdSaved.appendChild(savedSplit);
+          }
           tr.appendChild(tdSaved);
 
           const tdLog = document.createElement('td');
@@ -1431,6 +1500,14 @@ function refreshJobs() {
             tdActions.appendChild(cancelBtn);
           }
 
+          if (job.status === 'done' && (!job.is_worker_job || job.history_source === 'encode_ledger')) {
+            const optimizeAudioBtn = document.createElement('button');
+            optimizeAudioBtn.textContent = 'Optimize Audio';
+            optimizeAudioBtn.className = 'ghost-btn';
+            optimizeAudioBtn.onclick = () => openAudioPlanner({jobId: job.id, src: job.out_path || ''});
+            tdActions.appendChild(optimizeAudioBtn);
+          }
+
           if (job.is_worker_job) {
             const workerNote = document.createElement('div');
             workerNote.className = 'queue-meta small';
@@ -1457,6 +1534,170 @@ function refreshJobs() {
       }
       if (window.setAppStatus) setAppStatus('Jobs unavailable', 'error');
     });
+}
+
+function audioTrackLabel(track) {
+  const language = String(track.language || 'und').toUpperCase();
+  const channels = track.channel_layout || (track.channels ? `${track.channels} ch` : 'unknown layout');
+  const rate = Number(track.bitrate || 0) > 0 ? `${Math.round(Number(track.bitrate) / 1000)} kbps` : '';
+  return [language, track.title || '', track.codec_label || track.codec || 'Unknown', channels, rate, formatFileBytes(track.size_bytes)].filter(Boolean).join(' · ');
+}
+
+function selectedAudioJobType() {
+  return document.getElementById('jobTypeSelect')?.value || 'video_preserve_audio';
+}
+
+function selectedAudioPolicy() {
+  return selectedAudioJobType() === 'video_preserve_audio'
+    ? 'preserve'
+    : (document.getElementById('audioPolicySelect')?.value || 'optimize_lossless');
+}
+
+function resetAudioPlan() {
+  currentAudioOperations = null;
+  currentAudioPlanPath = '';
+  setTextIfPresent('audioPlanSummary', selectedAudioPolicy() === 'preserve'
+    ? 'Every audio track will be copied without downmixing.'
+    : 'Scan audio before queueing to review track-by-track changes.');
+}
+
+function syncAudioJobControls() {
+  const jobType = selectedAudioJobType();
+  const policy = document.getElementById('audioPolicySelect');
+  const preset = document.getElementById('presetSelect');
+  if (policy) {
+    policy.disabled = jobType === 'video_preserve_audio';
+    if (jobType === 'video_preserve_audio') policy.value = 'preserve';
+    else if (policy.value === 'preserve') policy.value = 'optimize_lossless';
+  }
+  if (preset) preset.disabled = jobType === 'audio_only';
+  resetAudioPlan();
+}
+
+function refreshAudioPlannerEstimate() {
+  const operations = audioPlannerContext?.operations;
+  const inventory = audioPlannerContext?.inventory;
+  if (!operations || !inventory) return;
+  const duration = Number(inventory.duration_seconds || 0);
+  let current = 0;
+  let output = 0;
+  (operations.audio_actions || []).forEach(action => {
+    const source = Number(action.source_size_bytes || 0);
+    current += source;
+    if (action.action === 'copy') action.estimated_output_bytes = source;
+    else if (action.action === 'remove') action.estimated_output_bytes = 0;
+    else if (action.target_codec === 'flac') action.estimated_output_bytes = Math.round(source * .72);
+    else action.estimated_output_bytes = Math.round(Number(action.bitrate_kbps || 256) * 1000 * duration / 8);
+    output += Number(action.estimated_output_bytes || 0);
+  });
+  const saved = current - output;
+  operations.estimate = {
+    current_audio_bytes: current,
+    output_audio_bytes: Math.max(0, output),
+    audio_savings_bytes: saved,
+    audio_savings_percent: current ? (saved / current * 100) : 0,
+    estimated: true,
+  };
+  const totals = document.getElementById('audioPlannerTotals');
+  if (totals) {
+    totals.innerHTML = '';
+    [['Current audio', formatFileBytes(current) || 'Unknown'], ['Estimated output', formatFileBytes(output) || '0 B'], ['Potential savings', `${formatFileBytes(saved) || '0 B'} (${operations.estimate.audio_savings_percent.toFixed(1)}%)`]].forEach(([label, value]) => {
+      const item = document.createElement('div');
+      const small = document.createElement('span'); small.textContent = label;
+      const strong = document.createElement('strong'); strong.textContent = value;
+      item.append(small, strong); totals.appendChild(item);
+    });
+  }
+}
+
+function renderAudioPlanner(data) {
+  audioPlannerContext.inventory = data.inventory || {};
+  audioPlannerContext.operations = data.operations || {};
+  const operations = audioPlannerContext.operations;
+  const tracks = document.getElementById('audioPlannerTracks');
+  const warnings = document.getElementById('audioPlannerWarnings');
+  tracks.innerHTML = '';
+  warnings.innerHTML = '';
+  (operations.warnings || []).forEach(message => {
+    const note = document.createElement('div'); note.className = 'audio-warning'; note.textContent = `Warning: ${message}`; warnings.appendChild(note);
+  });
+  (operations.audio_actions || []).forEach((action, index) => {
+    const sourceTrack = (data.inventory?.audio_streams || []).find(row => Number(row.index) === Number(action.stream_index)) || action;
+    const card = document.createElement('article'); card.className = 'audio-track-card';
+    const heading = document.createElement('div'); heading.className = 'audio-track-heading';
+    const title = document.createElement('strong'); title.textContent = audioTrackLabel(sourceTrack);
+    const flags = document.createElement('span'); flags.className = 'small'; flags.textContent = [sourceTrack.lossless ? 'Lossless' : 'Lossy', sourceTrack.default ? 'Default' : '', sourceTrack.forced ? 'Forced' : '', sourceTrack.object_audio ? 'Atmos / DTS:X risk' : '', sourceTrack.commentary ? 'Commentary' : ''].filter(Boolean).join(' · ');
+    heading.append(title, flags); card.appendChild(heading);
+    const controls = document.createElement('div'); controls.className = 'audio-track-controls';
+    const makeSelect = (labelText, values, value, onChange) => {
+      const label = document.createElement('label'); label.textContent = labelText;
+      const select = document.createElement('select');
+      values.forEach(([id, text]) => { const option = document.createElement('option'); option.value = id; option.textContent = text; select.appendChild(option); });
+      select.value = String(value); select.onchange = () => onChange(select.value, select); label.appendChild(select); controls.appendChild(label); return select;
+    };
+    const actionSelect = makeSelect('Action', [['copy','COPY'],['encode','ENCODE'],['remove','REMOVE']], action.action, value => { action.action = value; syncTrack(); refreshAudioPlannerEstimate(); });
+    const codecSelect = makeSelect('Codec', [['aac','AAC'],['eac3','E-AC3'],['ac3','AC3'],['opus','Opus'],['flac','FLAC']], action.target_codec, value => { action.target_codec = value; refreshAudioPlannerEstimate(); });
+    const bitrate = document.createElement('label'); bitrate.textContent = 'Bitrate kbps'; const bitrateInput = document.createElement('input'); bitrateInput.type = 'number'; bitrateInput.min = '64'; bitrateInput.max = '2048'; bitrateInput.value = action.bitrate_kbps || 256; bitrateInput.oninput = () => { action.bitrate_kbps = Number(bitrateInput.value || 256); refreshAudioPlannerEstimate(); }; bitrate.appendChild(bitrateInput); controls.appendChild(bitrate);
+    const channels = document.createElement('label'); channels.textContent = 'Channels'; const channelInput = document.createElement('input'); channelInput.type = 'number'; channelInput.min = '1'; channelInput.max = '8'; channelInput.value = action.channels || action.source_channels || 2; channelInput.oninput = () => { action.channels = Number(channelInput.value || action.source_channels || 2); action.allow_downmix = action.channels < Number(action.source_channels || 0); refreshAudioPlannerEstimate(); }; channels.appendChild(channelInput); controls.appendChild(channels);
+    const sample = document.createElement('label'); sample.textContent = 'Sample rate'; const sampleInput = document.createElement('input'); sampleInput.type = 'number'; sampleInput.min = '0'; sampleInput.max = '192000'; sampleInput.step = '1000'; sampleInput.value = action.sample_rate || ''; sampleInput.placeholder = 'Auto'; sampleInput.oninput = () => { action.sample_rate = Number(sampleInput.value || 0); }; sample.appendChild(sampleInput); controls.appendChild(sample);
+    const gain = document.createElement('label'); gain.textContent = 'Gain dB'; const gainInput = document.createElement('input'); gainInput.type = 'number'; gainInput.min = '-20'; gainInput.max = '20'; gainInput.step = '.5'; gainInput.value = action.gain_db || 0; gainInput.oninput = () => { action.gain_db = Number(gainInput.value || 0); }; gain.appendChild(gainInput); controls.appendChild(gain);
+    const metadata = document.createElement('label'); metadata.className = 'toggle-line audio-metadata-toggle'; const metadataInput = document.createElement('input'); metadataInput.type = 'checkbox'; metadataInput.checked = action.preserve_metadata !== false; metadataInput.onchange = () => { action.preserve_metadata = metadataInput.checked; }; metadata.append(metadataInput, document.createTextNode(' Preserve language, title & metadata')); controls.appendChild(metadata);
+    const syncTrack = () => { const encode = actionSelect.value === 'encode'; [codecSelect, bitrateInput, channelInput, sampleInput, gainInput].forEach(input => input.disabled = !encode); metadataInput.disabled = actionSelect.value === 'remove'; };
+    syncTrack(); card.appendChild(controls); tracks.appendChild(card);
+  });
+  document.getElementById('audioPlannerStatus').textContent = `${(operations.audio_actions || []).length} audio track(s) inventoried. Packet sizes are cached for future plans.`;
+  refreshAudioPlannerEstimate();
+}
+
+async function openAudioPlanner(options = {}) {
+  const dialog = document.getElementById('audioPlannerDialog');
+  const src = options.src || document.getElementById('selectedFile')?.value || '';
+  const jobId = options.jobId || '';
+  const completed = Boolean(jobId);
+  const jobType = completed ? 'audio_only' : selectedAudioJobType();
+  const policy = completed ? 'optimize_lossless' : selectedAudioPolicy();
+  audioPlannerContext = { src, jobId, completed, inventory: null, operations: null };
+  document.getElementById('audioPlannerTitle').textContent = completed ? 'Create Audio Optimization Job' : 'Review proposed audio changes';
+  document.getElementById('audioPlannerPath').textContent = src || `Completed job ${jobId}`;
+  document.getElementById('audioPlannerStatus').textContent = 'Scanning every audio packet…';
+  document.getElementById('audioPlannerTracks').innerHTML = '';
+  document.getElementById('audioPlannerWarnings').innerHTML = '';
+  document.getElementById('audioPlannerApply').hidden = completed;
+  document.getElementById('audioPlannerQueue').hidden = !completed;
+  document.getElementById('audioPlannerReplace').closest('label').hidden = !completed && jobType !== 'audio_only';
+  if (dialog.showModal) dialog.showModal(); else dialog.setAttribute('open', '');
+  try {
+    const response = await fetch('/api/audio/scan', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({src, job_id: jobId, job_type: jobType, audio_policy: policy, operations: {job_type: jobType, audio_policy: policy, default_target_codec: uiSettings.audio_optimize_codec || 'aac', replace_source: jobType === 'audio_only'}}) });
+    const data = await response.json();
+    if (!response.ok || data.error) throw new Error(data.error || 'Audio scan failed');
+    audioPlannerContext.src = data.path || src;
+    document.getElementById('audioPlannerPath').textContent = data.path || src || `Completed job ${jobId}`;
+    renderAudioPlanner(data);
+  } catch (error) {
+    document.getElementById('audioPlannerStatus').textContent = error.message || 'Audio scan failed';
+  }
+}
+
+async function finalizeAudioPlan(queueCompletedJob = false) {
+  if (!audioPlannerContext?.operations) return;
+  audioPlannerContext.operations.replace_source = Boolean(document.getElementById('audioPlannerReplace')?.checked);
+  const response = await fetch('/api/audio/scan', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({src: audioPlannerContext.src, operations: audioPlannerContext.operations}) });
+  const data = await response.json();
+  if (!response.ok || data.error) throw new Error(data.error || 'Audio plan validation failed');
+  if (queueCompletedJob) {
+    const queued = await fetch(`/api/jobs/${encodeURIComponent(audioPlannerContext.jobId)}/optimize-audio`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({operations:data.operations, mode:'next_available'}) });
+    const result = await queued.json();
+    if (!queued.ok || result.error) throw new Error(result.error || 'Audio optimization could not be queued');
+    document.getElementById('audioPlannerDialog').close();
+    if (window.appToast) appToast('Audio-only child job queued. Video will be copied.', 'success');
+    refreshJobs();
+    return;
+  }
+  currentAudioOperations = data.operations;
+  currentAudioPlanPath = audioPlannerContext.src;
+  const estimate = data.operations.estimate || {};
+  setTextIfPresent('audioPlanSummary', `${(data.operations.audio_actions || []).length} tracks · estimated audio ${formatFileBytes(estimate.current_audio_bytes) || 'unknown'} → ${formatFileBytes(estimate.output_audio_bytes) || 'unknown'} · save ${formatFileBytes(estimate.audio_savings_bytes) || '0 B'}`);
+  document.getElementById('audioPlannerDialog').close();
 }
 
 async function editQueuedPreset(job) {
@@ -1854,7 +2095,8 @@ document.addEventListener('DOMContentLoaded', () => {
   // Start the critical Jobs request first. File browsing, optional controls,
   // or node-status initialization must never prevent queue/history data from
   // appearing on this page.
-  const requestedStatus = new URLSearchParams(window.location.search).get('status');
+  const pageParams = new URLSearchParams(window.location.search);
+  const requestedStatus = pageParams.get('status');
   const statusFilter = document.getElementById('jobStatusFilter');
   if (statusFilter && ['queued', 'running', 'done', 'error', 'canceled'].includes(requestedStatus)) {
     statusFilter.value = requestedStatus;
@@ -1879,6 +2121,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('upBtn').onclick = goUp;
   document.getElementById('startBtn').onclick = startEncode;
+  document.getElementById('previewAudioBtn').onclick = () => openAudioPlanner();
+  document.getElementById('jobTypeSelect').onchange = syncAudioJobControls;
+  document.getElementById('audioPolicySelect').onchange = resetAudioPlan;
+  document.getElementById('audioPlannerClose').onclick = () => document.getElementById('audioPlannerDialog').close();
+  document.getElementById('audioPlannerApply').onclick = () => finalizeAudioPlan(false).catch(error => alert(error.message || 'Audio plan could not be applied'));
+  document.getElementById('audioPlannerQueue').onclick = () => finalizeAudioPlan(true).catch(error => alert(error.message || 'Audio optimization could not be queued'));
   document.getElementById('queueDispatchModeSelect').onchange = updateQueueDispatchControls;
   document.getElementById('openWizardBtn').onclick = openSizeWizard;
   document.getElementById('cancelBtn').onclick = cancelEncode;
@@ -1916,6 +2164,18 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   updateWizardBtn();
+  const configuredAudioPolicy = ['preserve','optimize_lossless','custom'].includes(uiSettings.audio_policy_default) ? uiSettings.audio_policy_default : 'preserve';
+  document.getElementById('audioPolicySelect').value = configuredAudioPolicy;
+  document.getElementById('jobTypeSelect').value = configuredAudioPolicy === 'preserve' ? 'video_preserve_audio' : 'video_audio';
+  syncAudioJobControls();
+  const audioSource = pageParams.get('audio_src') || '';
+  if (audioSource) {
+    setSelectedFile(audioSource);
+    document.getElementById('jobTypeSelect').value = 'audio_only';
+    document.getElementById('audioPolicySelect').value = 'optimize_lossless';
+    syncAudioJobControls();
+    window.setTimeout(() => openAudioPlanner({src: audioSource}), 50);
+  }
   refreshQueueState();
   refreshLinkedNodesStatus();
   const operationsStatusLine = document.getElementById('operationsStatusLine');

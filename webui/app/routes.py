@@ -149,7 +149,8 @@ from .smart_presets import (
 )
 
 from .events import load_event_summaries, load_events, clear_events, log_event
-from .storage_stats import get_summary as get_storage_summary, get_dashboard_analytics as get_storage_dashboard_analytics, list_encodes as list_storage_encodes, clear_stats as clear_storage_stats, record_encode
+from .storage_stats import get_summary as get_storage_summary, get_dashboard_analytics as get_storage_dashboard_analytics, list_encodes as list_storage_encodes, clear_stats as clear_storage_stats, record_encode, update_encode_output_inventory
+from .audio_optimization import normalize_operations, scan_media, storage_breakdown, validate_audio_only
 from .media_metadata import artwork_path as media_artwork_path, enrich_library as enrich_media_library
 from .node_linking import (
     accept_pairing,
@@ -3412,6 +3413,7 @@ def _create_smart_job(
     automation_source: str = "smart_preset",
     tuning: dict | None = None,
     recommendation: dict | None = None,
+    operations: dict | None = None,
 ) -> tuple[str, dict]:
     if isinstance(recommendation, dict):
         recommendation = deepcopy(recommendation)
@@ -3454,6 +3456,7 @@ def _create_smart_job(
         preset_selection="smart",
         preset_adaptive=True,
         preset_preferences=preset_preferences,
+        operations=operations,
     )
     scene = episode_plan.get("scene_analysis") if isinstance(episode_plan.get("scene_analysis"), dict) else {}
     log_event(
@@ -3534,6 +3537,7 @@ def _queue_wizard_job(data: dict) -> dict:
         preset_selection="wizard",
         preset_adaptive=False,
         preset_preferences=preset_preferences,
+        operations=data.get("operations") if isinstance(data.get("operations"), dict) else None,
     )
     if dispatch_mode == "auto":
         _wake_auto_node_dispatch()
@@ -3641,7 +3645,7 @@ BETA_MEDIA_TAG_RE = re.compile(
 )
 
 
-APP_RELEASE = "3.23.0"
+APP_RELEASE = "3.24.0"
 BETA_DIMENSION_TAG_RE = re.compile(r"(?<!\d)(?:\d{3,4}x\d{3,4}|(?:8|10|12)bit)(?!\d)", re.IGNORECASE)
 HDR_PATH_RE = re.compile(
     r"(?:^|[ ._\-\[\(])(?:"
@@ -8049,10 +8053,30 @@ def _plan_metadata_for_worker(plan: dict) -> dict:
     adaptation = plan.get("preset_adaptation") if isinstance(plan.get("preset_adaptation"), dict) else None
     if adaptation:
         metadata["preset_adaptation"] = adaptation
+    operations = plan.get("operations") if isinstance(plan.get("operations"), dict) else None
+    if operations is None:
+        settings = load_settings()
+        audio_policy = str(settings.get("audio_policy_default") or "preserve")
+        operations = {
+            "job_type": "video_audio" if audio_policy != "preserve" else "video_preserve_audio",
+            "audio_policy": audio_policy,
+            "default_target_codec": str(settings.get("audio_optimize_codec") or "aac"),
+            "allow_object_audio_loss": bool(settings.get("audio_allow_object_metadata_loss", False)),
+            "subtitle_action": "copy",
+        }
+    metadata["operations"] = operations
+    metadata["job_type"] = str(operations.get("job_type") or plan.get("job_type") or "video_preserve_audio")
+    if plan.get("parent_job_id"):
+        metadata["parent_job_id"] = str(plan.get("parent_job_id"))
     return metadata
 
 
 def _prepare_plan_for_node(plan: dict, node: dict) -> dict:
+    operations = plan.get("operations") if isinstance(plan.get("operations"), dict) else {}
+    if str(operations.get("job_type") or plan.get("job_type") or "").strip().lower() == "audio_only":
+        prepared = dict(plan)
+        prepared["encode_metadata"] = _plan_metadata_for_worker(prepared)
+        return prepared
     prepared = _adapt_smart_plan_for_node(plan, node)
     metadata = prepared.get("encode_metadata") if isinstance(prepared.get("encode_metadata"), dict) else {}
     adaptive = bool(prepared.get("preset_adaptive") or metadata.get("preset_adaptive") or metadata.get("smart_preset"))
@@ -8093,6 +8117,10 @@ def _worker_encoding_policy(selected: dict, source_policy: dict | None = None) -
         "web_optimized": bool(
             output_container == "mp4" and web_optimized
         ),
+        "audio_policy_default": str(source.get("audio_policy_default") or controller_settings.get("audio_policy_default") or "preserve"),
+        "audio_optimize_codec": str(source.get("audio_optimize_codec") or controller_settings.get("audio_optimize_codec") or "aac"),
+        "audio_allow_downmix": bool(source.get("audio_allow_downmix", controller_settings.get("audio_allow_downmix", False))),
+        "audio_allow_object_metadata_loss": bool(source.get("audio_allow_object_metadata_loss", controller_settings.get("audio_allow_object_metadata_loss", False))),
     }
 
 
@@ -8137,6 +8165,9 @@ def _dispatch_plan_to_worker(
         transfer_row["encode_metadata"] = encode_metadata
         transfer_row["output_container"] = policy["output_container"]
         transfer_row["web_optimized"] = policy["web_optimized"]
+        transfer_row["operations"] = plan.get("operations") if isinstance(plan.get("operations"), dict) else encode_metadata.get("operations", {})
+        transfer_row["job_type"] = str(plan.get("job_type") or (transfer_row["operations"].get("job_type") if transfer_row["operations"] else "") or "video_preserve_audio")
+        transfer_row["parent_job_id"] = str(plan.get("parent_job_id") or "")
         save_transfer(transfer_row)
         return {
             "src": src,
@@ -8145,6 +8176,8 @@ def _dispatch_plan_to_worker(
             "extra_args": str(plan.get("extra_args") or ""),
             "encode_metadata": encode_metadata,
             "encoding_policy": policy,
+            "operations": transfer_row["operations"],
+            "parent_job_id": transfer_row["parent_job_id"],
             "transfer": {
                 "id": grant["id"],
                 "controller_id": str(local_node_overview().get("id") or ""),
@@ -8177,6 +8210,8 @@ def _dispatch_plan_to_worker(
             "extra_args": plan.get("extra_args") or "",
             "encode_metadata": _plan_metadata_for_worker(plan),
             "encoding_policy": policy,
+            "operations": plan.get("operations") if isinstance(plan.get("operations"), dict) else {},
+            "parent_job_id": str(plan.get("parent_job_id") or ""),
         }
 
     result = signed_json_request(
@@ -8209,6 +8244,9 @@ def _dispatch_plan_to_worker(
 
 
 def _plan_uses_hardware_encoder(job: dict) -> bool:
+    operations = job.get("operations") if isinstance(job.get("operations"), dict) else {}
+    if str(job.get("job_type") or operations.get("job_type") or "").strip().lower() == "audio_only":
+        return False
     if bool(job.get("uses_hardware_encoder")):
         return True
     family = str(job.get("encoder_family") or "").strip().lower()
@@ -8562,10 +8600,25 @@ def _stream_upload_to_file(path: str) -> int:
 def _finalize_transfer_output(row: dict, upload_tmp: str) -> dict:
     transfer_id = str(row.get("id") or "")
     src = str(row.get("src") or "")
+    operations = row.get("operations") if isinstance(row.get("operations"), dict) else {}
+    job_type = str(row.get("job_type") or operations.get("job_type") or "video_preserve_audio").strip().lower()
+    audio_only = job_type == "audio_only"
     if not src or not is_allowed_path(src) or not os.path.isfile(src):
         raise RuntimeError("original source is missing or not allowed")
-    if os.path.splitext(os.path.basename(src))[0].lower().endswith("-tsd"):
+    if os.path.splitext(os.path.basename(src))[0].lower().endswith("-tsd") and not audio_only:
         raise RuntimeError("refusing to replace an already tagged -TSD source")
+
+    input_inventory = scan_media(src, exact=True)
+    normalized_operations = normalize_operations(operations, input_inventory)
+    output_inventory = scan_media(upload_tmp, exact=True, force=True)
+    if audio_only:
+        valid_copy, validation_errors = validate_audio_only(
+            input_inventory,
+            output_inventory,
+            normalized_operations,
+        )
+        if not valid_copy:
+            raise RuntimeError("audio-only safeguards failed: " + "; ".join(validation_errors))
 
     upload_ok, upload_reason = _encoded_output_is_valid(upload_tmp)
     if not upload_ok:
@@ -8575,12 +8628,15 @@ def _finalize_transfer_output(row: dict, upload_tmp: str) -> dict:
         row.get("output_container"),
         request.headers.get("X-Output-Container"),
     )
+    if audio_only:
+        selected_container = "mp4" if os.path.splitext(src)[1].lower() in {".mp4", ".m4v"} else "mkv"
     container_reason = str(request.headers.get("X-Output-Container-Reason") or "").strip()[:240]
-    out_path = _transfer_output_path_for_src(src, selected_container)
-    if os.path.exists(out_path):
+    out_path = src if audio_only else _transfer_output_path_for_src(src, selected_container)
+    if not audio_only and os.path.exists(out_path):
         raise RuntimeError(f"output already exists: {out_path}")
 
     final_part = f"{out_path}.transfer-{transfer_id}.part"
+    backup_path = f"{src}.bytesqueeze-audio-backup-{transfer_id}" if audio_only else ""
     try:
         if os.path.exists(final_part):
             os.remove(final_part)
@@ -8588,18 +8644,47 @@ def _finalize_transfer_output(row: dict, upload_tmp: str) -> dict:
         part_ok, part_reason = _encoded_output_is_valid(final_part)
         if not part_ok:
             raise RuntimeError(f"copied output failed validation: {part_reason}")
-        if os.path.exists(out_path):
+        if not audio_only and os.path.exists(out_path):
             raise RuntimeError(f"output already exists: {out_path}")
-        os.replace(final_part, out_path)
+        if audio_only:
+            if os.path.exists(backup_path):
+                raise RuntimeError("an audio optimization backup already exists; refusing unsafe replacement")
+            os.replace(src, backup_path)
+            try:
+                os.replace(final_part, src)
+            except Exception:
+                os.replace(backup_path, src)
+                raise
+        else:
+            os.replace(final_part, out_path)
         final_ok, final_reason = _encoded_output_is_valid(out_path)
         if not final_ok:
             raise RuntimeError(f"final output failed validation: {final_reason}")
+        final_inventory = scan_media(out_path, exact=True, force=True)
+        if audio_only:
+            valid_final, final_errors = validate_audio_only(
+                input_inventory,
+                final_inventory,
+                normalized_operations,
+            )
+            if not valid_final:
+                raise RuntimeError("installed audio output failed safeguards: " + "; ".join(final_errors))
+        output_inventory = final_inventory
+        if audio_only and os.path.exists(backup_path):
+            os.remove(backup_path)
     except Exception:
         try:
             if os.path.isfile(final_part):
                 os.remove(final_part)
         except Exception:
             pass
+        if audio_only and backup_path and os.path.isfile(backup_path):
+            try:
+                if os.path.isfile(src):
+                    os.remove(src)
+                os.replace(backup_path, src)
+            except Exception:
+                pass
         raise
 
     try:
@@ -8608,6 +8693,7 @@ def _finalize_transfer_output(row: dict, upload_tmp: str) -> dict:
         src_bytes = 0
     out_bytes = int(os.path.getsize(out_path))
     saved_bytes = max(0, src_bytes - out_bytes)
+    actual_breakdown = storage_breakdown(input_inventory, output_inventory, src_bytes, out_bytes)
     worker_job_id = request.headers.get("X-Worker-Job-Id") or ""
     try:
         duration_seconds = float(request.headers.get("X-Encode-Duration-Seconds") or 0.0)
@@ -8637,12 +8723,18 @@ def _finalize_transfer_output(row: dict, upload_tmp: str) -> dict:
         video_codec=video_codec,
         encoder_family=encoder_family,
         bit_depth=bit_depth,
+        job_type=job_type,
+        operations=normalized_operations,
+        parent_job_id=str(row.get("parent_job_id") or ""),
+        input_inventory=input_inventory,
+        output_inventory=output_inventory,
+        storage_breakdown=actual_breakdown,
     )
 
     source_deleted = False
     warning = ""
     try:
-        if os.path.isfile(src):
+        if not audio_only and os.path.isfile(src):
             os.remove(src)
             source_deleted = True
     except Exception as e:
@@ -8665,6 +8757,11 @@ def _finalize_transfer_output(row: dict, upload_tmp: str) -> dict:
         "saved_bytes": saved_bytes,
         "source_deleted": source_deleted,
         "warning": warning,
+        "job_type": job_type,
+        "operations": normalized_operations,
+        "input_inventory": input_inventory,
+        "output_inventory": output_inventory,
+        "storage_breakdown": actual_breakdown,
     })
     save_transfer(row)
     log_event(
@@ -8684,6 +8781,8 @@ def _finalize_transfer_output(row: dict, upload_tmp: str) -> dict:
         "saved_bytes": saved_bytes,
         "source_deleted": source_deleted,
         "warning": warning,
+        "output_inventory": output_inventory,
+        "storage_breakdown": actual_breakdown,
     }
 
 
@@ -10084,6 +10183,10 @@ def register_routes(app):
             "hardware_transcode_concurrency",
             "auto_stop_large_output_enabled",
             "auto_stop_large_output_percent",
+            "audio_policy_default",
+            "audio_optimize_codec",
+            "audio_allow_downmix",
+            "audio_allow_object_metadata_loss",
         }
         if request.method == "POST":
             data = request.get_json(silent=True) or {}
@@ -10103,6 +10206,10 @@ def register_routes(app):
             "qsv_device_available": bool(settings.get("qsv_device_available")),
             "auto_stop_large_output_enabled": bool(settings.get("auto_stop_large_output_enabled")),
             "auto_stop_large_output_percent": settings.get("auto_stop_large_output_percent", 90),
+            "audio_policy_default": settings.get("audio_policy_default", "preserve"),
+            "audio_optimize_codec": settings.get("audio_optimize_codec", "aac"),
+            "audio_allow_downmix": bool(settings.get("audio_allow_downmix")),
+            "audio_allow_object_metadata_loss": bool(settings.get("audio_allow_object_metadata_loss")),
         }
         return jsonify(
             ok=True,
@@ -10522,12 +10629,16 @@ def register_routes(app):
                     if isinstance(job.get("encoding_policy"), dict)
                     else data.get("encoding_policy")
                 ),
+                operations=job.get("operations") if isinstance(job.get("operations"), dict) else None,
+                parent_job_id=str(job.get("parent_job_id") or ""),
             )
             count += 1 if created else 0
 
         for job in local_jobs:
             src = str(job.get("src") or "").strip()
             original_path = str(job.get("original_path") or src).strip()
+            operations = job.get("operations") if isinstance(job.get("operations"), dict) else {}
+            audio_only = str(operations.get("job_type") or job.get("job_type") or "").strip().lower() == "audio_only"
             if src in seen:
                 continue
             seen.append(src)
@@ -10538,7 +10649,7 @@ def register_routes(app):
                 reason = "path not allowed"
             elif not src.lower().endswith(VIDEO_EXTS):
                 reason = "not a video"
-            elif os.path.splitext(os.path.basename(src))[0].lower().endswith("-tsd"):
+            elif os.path.splitext(os.path.basename(src))[0].lower().endswith("-tsd") and not audio_only:
                 reason = "already tagged -TSD"
             if reason:
                 skipped.append({"path": original_path or src, "worker_path": src, "reason": reason})
@@ -10559,6 +10670,8 @@ def register_routes(app):
                     if isinstance(job.get("encoding_policy"), dict)
                     else data.get("encoding_policy")
                 ),
+                operations=job.get("operations") if isinstance(job.get("operations"), dict) else None,
+                parent_job_id=str(job.get("parent_job_id") or ""),
             )
             after = len([j for j in list_jobs_for_api() if j.get("src") == src and j.get("status") in {"queued", "running"}])
             count += 1 if after > before else 0
@@ -10929,6 +11042,8 @@ def register_routes(app):
     @app.route("/api/nodes/dispatch", methods=["POST"])
     def nodes_dispatch_api():
         data = request.get_json(force=True) or {}
+        request_operations = data.get("operations") if isinstance(data.get("operations"), dict) else {}
+        request_audio_only = str(request_operations.get("job_type") or "").strip().lower() == "audio_only"
         mode = str(data.get("mode") or "local").strip().lower()
         preset = str(data.get("preset") or "auto").strip().lower()
         paths = data.get("paths")
@@ -10985,13 +11100,16 @@ def register_routes(app):
                     reason = "path not allowed"
                 elif not src.lower().endswith(VIDEO_EXTS):
                     reason = "not a video"
-                elif os.path.splitext(os.path.basename(src))[0].lower().endswith("-tsd"):
+                elif os.path.splitext(os.path.basename(src))[0].lower().endswith("-tsd") and not request_audio_only:
                     reason = "already tagged -TSD"
                 if reason:
                     skipped.append({"path": src, "reason": reason})
                     continue
                 try:
                     plan = planned_node_queue(src)
+                    if isinstance(data.get("operations"), dict):
+                        plan["operations"] = data["operations"]
+                        plan["job_type"] = str(data["operations"].get("job_type") or "video_preserve_audio")
                     job_id = create_job(
                         src,
                         plan.get("preset") or "1080",
@@ -11002,6 +11120,7 @@ def register_routes(app):
                         preset_selection=plan.get("preset_selection") or preset,
                         preset_adaptive=bool(plan.get("preset_adaptive")),
                         preset_preferences=plan.get("preset_preferences") if isinstance(plan.get("preset_preferences"), dict) else None,
+                        operations=plan.get("operations") if isinstance(plan.get("operations"), dict) else None,
                     )
                     if job_id not in job_ids:
                         job_ids.append(job_id)
@@ -11074,6 +11193,9 @@ def register_routes(app):
                 transfer_row["encode_metadata"] = encode_metadata
                 transfer_row["output_container"] = worker_encoding_policy["output_container"]
                 transfer_row["web_optimized"] = worker_encoding_policy["web_optimized"]
+                transfer_row["operations"] = plan.get("operations") if isinstance(plan.get("operations"), dict) else encode_metadata.get("operations", {})
+                transfer_row["job_type"] = str(plan.get("job_type") or transfer_row["operations"].get("job_type") or "video_preserve_audio")
+                transfer_row["parent_job_id"] = str(plan.get("parent_job_id") or "")
                 save_transfer(transfer_row)
                 transfer_payload = {
                     "id": grant["id"],
@@ -11097,6 +11219,8 @@ def register_routes(app):
                     "extra_args": str(plan.get("extra_args") or ""),
                     "encode_metadata": encode_metadata,
                     "encoding_policy": worker_encoding_policy,
+                    "operations": transfer_row["operations"],
+                    "parent_job_id": transfer_row["parent_job_id"],
                     "transfer": transfer_payload,
                 }, None
             except Exception as e:
@@ -11115,12 +11239,15 @@ def register_routes(app):
             if not src.lower().endswith(VIDEO_EXTS):
                 skipped.append({"path": src, "reason": "not a video"})
                 continue
-            if os.path.splitext(os.path.basename(src))[0].lower().endswith("-tsd"):
+            if os.path.splitext(os.path.basename(src))[0].lower().endswith("-tsd") and not request_audio_only:
                 skipped.append({"path": src, "reason": "already tagged -TSD"})
                 continue
 
             try:
                 plan = planned_node_queue(src)
+                if isinstance(data.get("operations"), dict):
+                    plan["operations"] = data["operations"]
+                    plan["job_type"] = str(data["operations"].get("job_type") or "video_preserve_audio")
                 plan = _prepare_plan_for_node(plan, selected)
             except Exception as exc:
                 skipped.append({"path": src, "reason": f"preset planning failed: {str(exc)[:180]}"})
@@ -11147,6 +11274,8 @@ def register_routes(app):
                 "extra_args": plan.get("extra_args") or "",
                 "encode_metadata": _plan_metadata_for_worker(plan),
                 "encoding_policy": worker_encoding_policy,
+                "operations": plan.get("operations") if isinstance(plan.get("operations"), dict) else _plan_metadata_for_worker(plan).get("operations", {}),
+                "parent_job_id": str(plan.get("parent_job_id") or ""),
             })
 
         if not jobs_payload:
@@ -11185,6 +11314,9 @@ def register_routes(app):
                     continue
                 try:
                     retry_plan = planned_node_queue(original_path)
+                    if isinstance(data.get("operations"), dict):
+                        retry_plan["operations"] = data["operations"]
+                        retry_plan["job_type"] = str(data["operations"].get("job_type") or "video_preserve_audio")
                     retry_plan = _prepare_plan_for_node(retry_plan, selected)
                 except Exception as exc:
                     remaining_result_skipped.append({"path": original_path, "reason": f"preset planning failed: {str(exc)[:180]}"})
@@ -11262,6 +11394,175 @@ def register_routes(app):
         clear_storage_stats()
         return jsonify(ok=True)
 
+    # ------------- Audio inventory / optimization -------------
+
+    def _audio_job_source(job_id: str) -> tuple[dict | None, str]:
+        for row in list_job_history_for_api(limit=5000):
+            if str(row.get("id") or "") != str(job_id or ""):
+                continue
+            candidates = [row.get("out_path"), row.get("src")]
+            for candidate in candidates:
+                path = str(candidate or "").strip()
+                if path and os.path.isfile(path) and is_allowed_path(path):
+                    return row, path
+            return row, ""
+        return None, ""
+
+    def _audio_scan_response(path: str, payload: dict | None = None) -> dict:
+        payload = payload if isinstance(payload, dict) else {}
+        inventory = scan_media(path, exact=True, force=_truthy(payload.get("force"), False))
+        operations = payload.get("operations") if isinstance(payload.get("operations"), dict) else {}
+        operations = dict(operations)
+        if payload.get("audio_policy"):
+            operations["audio_policy"] = payload.get("audio_policy")
+        if payload.get("job_type"):
+            operations["job_type"] = payload.get("job_type")
+        operations.setdefault("default_target_codec", load_settings().get("audio_optimize_codec") or "aac")
+        return {
+            "ok": True,
+            "path": path,
+            "inventory": inventory,
+            "operations": normalize_operations(operations, inventory),
+        }
+
+    @app.route("/api/audio/scan", methods=["POST"])
+    def audio_scan_api():
+        data = request.get_json(silent=True) or {}
+        path = str(data.get("src") or "").strip()
+        if data.get("job_id") and not path:
+            _row, path = _audio_job_source(str(data.get("job_id") or ""))
+        if not path or not os.path.isfile(path):
+            return jsonify(error="media file is missing"), 404
+        if not is_allowed_path(path):
+            return jsonify(error="path not allowed"), 400
+        try:
+            result = _audio_scan_response(path, data)
+            if data.get("job_id"):
+                update_encode_output_inventory(str(data.get("job_id")), result["inventory"])
+            return jsonify(**result)
+        except Exception as exc:
+            return jsonify(error=f"audio scan failed: {str(exc)[:300]}"), 500
+
+    def _queue_audio_path(path: str, data: dict, *, parent_job_id: str = "") -> dict:
+        if not path or not os.path.isfile(path):
+            raise ValueError("the media file no longer exists")
+        if not is_allowed_path(path):
+            raise ValueError("path not allowed")
+        inventory = scan_media(path, exact=True)
+        requested = data.get("operations") if isinstance(data.get("operations"), dict) else {}
+        requested = dict(requested)
+        requested.update({
+            "job_type": "audio_only",
+            "video_action": "copy",
+            "subtitle_action": "copy",
+            "replace_source": True,
+        })
+        requested.setdefault("audio_policy", "optimize_lossless")
+        requested.setdefault("default_target_codec", load_settings().get("audio_optimize_codec") or "aac")
+        operations = normalize_operations(requested, inventory)
+        if not any(row.get("action") != "copy" for row in operations.get("audio_actions") or []):
+            raise ValueError("no audio tracks are selected for optimization or removal")
+        mode = str(data.get("mode") or "local").strip().lower()
+        dispatch_mode = "auto" if mode in {"auto", "best", "available", "next_available"} else "local"
+        preset = guess_preset_from_filename(os.path.basename(path))
+        child_id = create_job(
+            path,
+            preset,
+            encode_metadata={
+                "job_type": "audio_only",
+                "parent_job_id": str(parent_job_id),
+                "encode_method": "ffmpeg_audio_only",
+                "encoder": "copy",
+                "encoder_family": "stream_copy",
+                "video_codec": str(((inventory.get("video_streams") or [{}])[0]).get("codec") or "copy"),
+            },
+            dispatch_mode=dispatch_mode,
+            preset_selection="audio-only",
+            preset_adaptive=False,
+            operations=operations,
+            parent_job_id=str(parent_job_id),
+        )
+        if dispatch_mode == "auto":
+            _wake_auto_node_dispatch()
+        return {
+            "ok": True,
+            "job_id": child_id,
+            "parent_job_id": str(parent_job_id),
+            "path": path,
+            "operations": operations,
+            "dispatch_mode": dispatch_mode,
+        }
+
+    def _queue_audio_child(job_id: str, data: dict) -> dict:
+        parent, path = _audio_job_source(job_id)
+        if not parent:
+            raise ValueError("completed job was not found")
+        if not path:
+            raise ValueError("the completed output file no longer exists")
+        if str(parent.get("status") or "") not in {"done", "complete", "completed"}:
+            raise ValueError("audio optimization is available after the original job completes")
+        return _queue_audio_path(path, data, parent_job_id=str(job_id))
+
+    @app.route("/api/jobs/<job_id>/optimize-audio", methods=["POST"])
+    def job_optimize_audio_api(job_id):
+        try:
+            return jsonify(**_queue_audio_child(job_id, request.get_json(silent=True) or {}))
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 400
+        except Exception as exc:
+            return jsonify(error=f"audio optimization could not be queued: {str(exc)[:300]}"), 500
+
+    @app.route("/api/audio/queue", methods=["POST"])
+    def audio_queue_api():
+        data = request.get_json(silent=True) or {}
+        try:
+            return jsonify(**_queue_audio_path(str(data.get("src") or "").strip(), data))
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 400
+        except Exception as exc:
+            return jsonify(error=f"audio optimization could not be queued: {str(exc)[:300]}"), 500
+
+    @app.route("/api/mobile/v1/audio/scan", methods=["POST"])
+    def mobile_audio_scan_api():
+        if not _authenticated_mobile("read"):
+            return jsonify(error="unauthorized mobile device"), 401
+        data = request.get_json(silent=True) or {}
+        path = str(data.get("src") or "").strip()
+        if data.get("job_id") and not path:
+            _row, path = _audio_job_source(str(data.get("job_id") or ""))
+        if not path or not os.path.isfile(path) or not is_allowed_path(path):
+            return jsonify(error="media file is missing or not allowed"), 404
+        try:
+            result = _audio_scan_response(path, data)
+            if data.get("job_id"):
+                update_encode_output_inventory(str(data.get("job_id")), result["inventory"])
+            return jsonify(**result)
+        except Exception as exc:
+            return jsonify(error=f"audio scan failed: {str(exc)[:300]}"), 500
+
+    @app.route("/api/mobile/v1/jobs/<job_id>/optimize-audio", methods=["POST"])
+    def mobile_job_optimize_audio_api(job_id):
+        if not _authenticated_mobile("control"):
+            return jsonify(error="control permission required"), 403
+        try:
+            return jsonify(**_queue_audio_child(job_id, request.get_json(silent=True) or {}))
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 400
+        except Exception as exc:
+            return jsonify(error=f"audio optimization could not be queued: {str(exc)[:300]}"), 500
+
+    @app.route("/api/mobile/v1/audio/queue", methods=["POST"])
+    def mobile_audio_queue_api():
+        if not _authenticated_mobile("control"):
+            return jsonify(error="control permission required"), 403
+        data = request.get_json(silent=True) or {}
+        try:
+            return jsonify(**_queue_audio_path(str(data.get("src") or "").strip(), data))
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 400
+        except Exception as exc:
+            return jsonify(error=f"audio optimization could not be queued: {str(exc)[:300]}"), 500
+
 
     # ------------- Directory listing -------------
 
@@ -11329,12 +11630,17 @@ def register_routes(app):
 
         base = os.path.basename(src)
         name_only, _ext = os.path.splitext(base)
-        if name_only.lower().endswith("-tsd"):
+        requested_operations = data.get("operations") if isinstance(data.get("operations"), dict) else {}
+        audio_only = str(requested_operations.get("job_type") or "").strip().lower() == "audio_only"
+        if name_only.lower().endswith("-tsd") and not audio_only:
             return jsonify(error="file already tagged -TSD, not queuing"), 400
 
         if preset == "smart":
             try:
-                job_id, recommendation = _create_smart_job(src)
+                job_id, recommendation = _create_smart_job(
+                    src,
+                    operations=data.get("operations") if isinstance(data.get("operations"), dict) else None,
+                )
             except ValueError as exc:
                 return jsonify(error=str(exc)), 400
             except Exception as exc:
@@ -11349,7 +11655,11 @@ def register_routes(app):
         if preset == "auto":
             preset = guess_preset_from_filename(base)
 
-        job_id = create_job(src, preset)
+        job_id = create_job(
+            src,
+            preset,
+            operations=data.get("operations") if isinstance(data.get("operations"), dict) else None,
+        )
         return jsonify(job_id=job_id)
 
     @app.route("/encode_wizard", methods=["POST"])

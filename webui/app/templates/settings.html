@@ -575,6 +575,37 @@
       </div>
     </section>
 
+    <section class="audio-policy-setting" aria-labelledby="audioPolicyHeading">
+      <h3 id="audioPolicyHeading">Audio Optimization</h3>
+      <p class="small">Preserve / Passthrough is the safe default. ByteSqueeze inventories every track before encoding and never downmixes or removes one unless the job explicitly says to.</p>
+      <div class="row">
+        <label for="audioPolicyDefault"><strong>Default audio policy</strong></label>
+        <select id="audioPolicyDefault" style="min-width:220px;">
+          <option value="preserve">Preserve / Passthrough</option>
+          <option value="optimize_lossless">Optimize lossless audio</option>
+          <option value="custom">Custom per job</option>
+        </select>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <label for="audioOptimizeCodec"><strong>Lossless optimization codec</strong></label>
+        <select id="audioOptimizeCodec" style="min-width:180px;">
+          <option value="aac">AAC</option>
+          <option value="eac3">E-AC3</option>
+          <option value="ac3">AC3</option>
+          <option value="opus">Opus</option>
+          <option value="flac">FLAC</option>
+        </select>
+        <span class="small">Applied only to tracks selected for encoding. AAC defaults preserve the source channel count.</span>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <label class="toggle-line" for="audioAllowObjectMetadataLoss">
+          <input id="audioAllowObjectMetadataLoss" type="checkbox">
+          Allow automatic conversion of Atmos / DTS:X-capable lossless tracks
+        </label>
+        <span class="small">Off by default. Converting object audio can permanently remove Atmos or DTS:X metadata.</span>
+      </div>
+    </section>
+
     <div class="row" style="margin-top:14px;">
       <label for="hbThreadsInput"><strong>HandBrake threads</strong> (0 = auto):</label>
       <input id="hbThreadsInput" type="number" min="0" step="1" style="width:120px;">
@@ -2093,6 +2124,13 @@
       if (webOptimizedToggle) webOptimizedToggle.checked = Boolean(initialSettings?.web_optimized);
       syncOutputContainerOptions();
 
+      const audioPolicyDefault = document.getElementById("audioPolicyDefault");
+      if (audioPolicyDefault) audioPolicyDefault.value = ["preserve", "optimize_lossless", "custom"].includes(initialSettings?.audio_policy_default) ? initialSettings.audio_policy_default : "preserve";
+      const audioOptimizeCodec = document.getElementById("audioOptimizeCodec");
+      if (audioOptimizeCodec) audioOptimizeCodec.value = ["aac", "eac3", "ac3", "opus", "flac"].includes(initialSettings?.audio_optimize_codec) ? initialSettings.audio_optimize_codec : "aac";
+      const audioAllowObjectMetadataLoss = document.getElementById("audioAllowObjectMetadataLoss");
+      if (audioAllowObjectMetadataLoss) audioAllowObjectMetadataLoss.checked = Boolean(initialSettings?.audio_allow_object_metadata_loss);
+
       const queueUiModeSelect = document.getElementById("queueUiModeSelect");
       if (queueUiModeSelect) {
         queueUiModeSelect.value = initialSettings?.queue_ui_mode || "buttons";
@@ -2216,6 +2254,9 @@
       const selectedOutputContainer = document.getElementById("outputContainerSelect")?.value || "mkv";
       const outputContainer = ["mkv", "mp4", "auto"].includes(selectedOutputContainer) ? selectedOutputContainer : "mkv";
       const webOptimized = outputContainer === "mp4" && Boolean(document.getElementById("webOptimizedToggle")?.checked);
+      const audioPolicyDefault = document.getElementById("audioPolicyDefault")?.value || "preserve";
+      const audioOptimizeCodec = document.getElementById("audioOptimizeCodec")?.value || "aac";
+      const audioAllowObjectMetadataLoss = Boolean(document.getElementById("audioAllowObjectMetadataLoss")?.checked);
 
       let threads = parseInt(threadsRaw, 10);
       if (isNaN(threads) || threads < 0) threads = 0;
@@ -2235,6 +2276,9 @@
             auto_stop_large_output_percent: autoStopLargeOutputPercent,
             output_container: outputContainer,
             web_optimized: webOptimized,
+            audio_policy_default: audioPolicyDefault,
+            audio_optimize_codec: audioOptimizeCodec,
+            audio_allow_object_metadata_loss: audioAllowObjectMetadataLoss,
             queue_ui_mode: queueUiMode,
             ui_version: uiVersion,
             ui_density: uiDensity,

@@ -36,6 +36,13 @@ DEFAULT_SETTINGS = {
     # The requested setting is snapshotted onto a job when it is queued.
     "output_container": "mkv",
     "web_optimized": False,
+    # Safe default for every normal video job.  Optimization is opt-in and
+    # track-specific; channel downmixing and object-audio loss are never
+    # enabled implicitly.
+    "audio_policy_default": "preserve",
+    "audio_optimize_codec": "aac",
+    "audio_allow_downmix": False,
+    "audio_allow_object_metadata_loss": False,
 
     # Size Wizard / ETA estimation
     "cpu_profile": "i5-9500t",      # baseline CPU
@@ -253,6 +260,20 @@ def load_settings() -> dict:
             merged["output_container"] == "mp4"
             and _boolean_value(merged.get("web_optimized"), False)
         )
+        merged["audio_policy_default"] = str(
+            merged.get("audio_policy_default") or "preserve"
+        ).strip().lower()
+        if merged["audio_policy_default"] not in {"preserve", "optimize_lossless", "custom"}:
+            merged["audio_policy_default"] = "preserve"
+        merged["audio_optimize_codec"] = str(
+            merged.get("audio_optimize_codec") or "aac"
+        ).strip().lower()
+        if merged["audio_optimize_codec"] not in {"aac", "eac3", "ac3", "opus", "flac"}:
+            merged["audio_optimize_codec"] = "aac"
+        merged["audio_allow_downmix"] = _boolean_value(merged.get("audio_allow_downmix"), False)
+        merged["audio_allow_object_metadata_loss"] = _boolean_value(
+            merged.get("audio_allow_object_metadata_loss"), False
+        )
         merged["hardware_transcode_concurrency"] = _bounded_number(
             merged.get("hardware_transcode_concurrency", 1),
             1,
@@ -322,6 +343,30 @@ def _save_settings_unlocked(new_values: dict) -> dict:
             new_values.get("web_optimized", base.get("web_optimized", False)),
             False,
         )
+    )
+    audio_policy = str(
+        new_values.get("audio_policy_default", base.get("audio_policy_default", "preserve"))
+        or "preserve"
+    ).strip().lower()
+    base["audio_policy_default"] = audio_policy if audio_policy in {
+        "preserve", "optimize_lossless", "custom"
+    } else "preserve"
+    audio_codec = str(
+        new_values.get("audio_optimize_codec", base.get("audio_optimize_codec", "aac"))
+        or "aac"
+    ).strip().lower()
+    base["audio_optimize_codec"] = audio_codec if audio_codec in {
+        "aac", "eac3", "ac3", "opus", "flac"
+    } else "aac"
+    base["audio_allow_downmix"] = _boolean_value(
+        new_values.get("audio_allow_downmix", base.get("audio_allow_downmix", False)), False
+    )
+    base["audio_allow_object_metadata_loss"] = _boolean_value(
+        new_values.get(
+            "audio_allow_object_metadata_loss",
+            base.get("audio_allow_object_metadata_loss", False),
+        ),
+        False,
     )
 
     # ------------------------------------------------------------------

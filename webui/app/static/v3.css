@@ -212,3 +212,114 @@ body.ui-v3 .settings-details{border-color:var(--v3-border);border-radius:8px;bac
   body.ui-v3 .beta-grid,body.ui-v3 #showsGrid.beta-grid{grid-template-columns:repeat(2,minmax(0,1fr))}body.ui-v3 .beta-show-card.beta-show-expanded{display:block}body.ui-v3 .beta-show-expanded>.beta-poster{width:146px;height:219px;margin:12px auto 0}body.ui-v3 .library-filterbar{grid-template-columns:1fr 1fr}body.ui-v3 .library-filterbar .beta-field:first-child,body.ui-v3 .library-filterbar #betaStatus{grid-column:1/-1}body.ui-v3 .dashboard-metrics{grid-template-columns:repeat(2,1fr)}body.ui-v3 .stat-chip:nth-child(n){border-top:0;border-left:1px solid var(--v3-border)}body.ui-v3 .stat-chip:nth-child(odd){border-left:0}body.ui-v3 .stat-chip:nth-child(n+3){border-top:1px solid var(--v3-border)}body.ui-v3 .v3-ops-signal{display:none}body.ui-v3 .v3-ops-primary{grid-template-columns:minmax(0,1fr) auto}
   body.ui-v3 .policy-grid,body.ui-v3 .policy-profiles,body.ui-v3 .smart-preset-grid,body.ui-v3 .simple-grid,body.ui-v3 .wizard-form-grid,body.ui-v3 .v3-home-config-grid{grid-template-columns:1fr}body.ui-v3 .wizard-mode-copy{display:none}body.ui-v3 .wizard-mode-card{justify-content:stretch}body.ui-v3 .wizard-mode-toggle{display:grid;grid-template-columns:1fr 1fr;width:100%}body.ui-v3 .quality-row-head{display:block}body.ui-v3 .quality-actions>*{width:100%}
 }
+/* Audio operations ------------------------------------------------------- */
+.ui-v3 .audio-job-controls {
+  min-width: min(100%, 250px);
+}
+
+.ui-v3 .audio-plan-summary {
+  color: var(--text-muted, #99a8b7);
+  line-height: 1.45;
+}
+
+.audio-planner-dialog {
+  width: min(980px, calc(100vw - 24px));
+  max-height: min(860px, calc(100vh - 24px));
+  padding: 0;
+  border: 1px solid #273541;
+  border-radius: 14px;
+  background: #0d141c;
+  color: #edf7fa;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, .55);
+}
+
+.audio-planner-dialog::backdrop {
+  background: rgba(1, 6, 10, .78);
+  backdrop-filter: blur(3px);
+}
+
+.audio-planner-shell {
+  display: grid;
+  gap: 14px;
+  padding: clamp(16px, 2.5vw, 20px);
+  overflow: auto;
+  max-height: calc(100vh - 28px);
+}
+
+.audio-planner-header,
+.audio-planner-footer,
+.audio-track-heading {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.audio-planner-header h2 { margin: 3px 0 0; }
+.audio-planner-header p { margin: 5px 0 0; overflow-wrap: anywhere; }
+
+.audio-planner-totals {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid #25323d;
+  border-radius: 12px;
+  background: #25323d;
+}
+
+.audio-planner-totals > div {
+  display: grid;
+  gap: 4px;
+  padding: 13px 15px;
+  background: #101923;
+}
+
+.audio-planner-totals span { color: #91a1af; font-size: .78rem; }
+.audio-planner-totals strong { font-size: 1.05rem; }
+
+.audio-planner-warnings { display: grid; gap: 6px; }
+.audio-warning {
+  padding: 9px 11px;
+  border-left: 3px solid #e6ad42;
+  background: rgba(230, 173, 66, .08);
+  color: #f0cf8d;
+  font-size: .84rem;
+}
+
+.audio-track-list { display: grid; gap: 9px; }
+.audio-track-card {
+  padding: 13px;
+  border: 1px solid #263540;
+  border-radius: 12px;
+  background: #101923;
+}
+
+.audio-track-heading { margin-bottom: 11px; }
+.audio-track-heading > span { text-align: right; color: #93a5b2; }
+.audio-track-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 132px), 1fr));
+  gap: 9px;
+  align-items: end;
+}
+
+.audio-track-controls label { display: grid; gap: 5px; color: #9eacb8; font-size: .76rem; }
+.audio-track-controls select,
+.audio-track-controls input { width: 100%; min-height: 42px; }
+.audio-track-controls .audio-metadata-toggle { grid-column: 1 / -1; display: flex; }
+.audio-planner-footer { position: sticky; bottom: -20px; padding: 13px 0 0; background: #0d141c; }
+.audio-planner-footer { flex-wrap: wrap; align-items: stretch; }
+.audio-planner-footer .button-row { flex: 1 1 280px; }
+.audio-planner-footer .button-row > button { flex: 1 1 130px; }
+.job-savings-split { margin-top: 4px; white-space: nowrap; color: #91a6b2; }
+
+.ui-v3 .home-media-savings-split { display: grid; gap: 8px; }
+.ui-v3 .home-media-savings-split[hidden] { display: none; }
+.ui-v3 .home-media-savings-track { display: flex; height: 9px; overflow: hidden; border-radius: 99px; background: #1a2530; }
+.ui-v3 .home-media-savings-track i { display: block; background: #48d7e8; }
+.ui-v3 .home-media-savings-track b { display: block; background: #ac8cff; }
+.ui-v3 .home-media-savings-labels { display: flex; justify-content: space-between; gap: 12px; color: #91a1af; font-size: .78rem; }
+.ui-v3 .home-media-savings-labels span:first-child strong { color: #48d7e8; }
+.ui-v3 .home-media-savings-labels span:last-child strong { color: #ac8cff; }

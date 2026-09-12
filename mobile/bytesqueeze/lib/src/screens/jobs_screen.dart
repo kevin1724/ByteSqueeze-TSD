@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../app_controller.dart';
 import '../theme.dart';
+import '../widgets/audio_optimizer_sheet.dart';
 import '../widgets/common.dart';
 
 class JobsScreen extends StatefulWidget {
@@ -50,16 +51,16 @@ class _JobsScreenState extends State<JobsScreen> {
                   statusColor: paused
                       ? ByteSqueezeColors.amber
                       : (runningJobs.isEmpty
-                            ? ByteSqueezeColors.mint
-                            : ByteSqueezeColors.cyan),
+                          ? ByteSqueezeColors.mint
+                          : ByteSqueezeColors.cyan),
                   summary:
                       "${summaryCount(summary, 'queued')} queued · ${summaryCount(summary, 'done')} completed · ${summaryCount(summary, 'error')} errors",
                   trailing: IconButton(
                     tooltip: paused ? 'Resume queue' : 'Pause queue',
                     onPressed: widget.controller.canControl
                         ? () => _run(
-                            () => widget.controller.setQueuePaused(!paused),
-                          )
+                              () => widget.controller.setQueuePaused(!paused),
+                            )
                         : null,
                     icon: Icon(
                       paused ? Icons.play_arrow_rounded : Icons.pause_rounded,
@@ -71,8 +72,8 @@ class _JobsScreenState extends State<JobsScreen> {
                   subtitle: widget.controller.statsForNerds
                       ? _capacityLabel(summary, runningJobs.length)
                       : (runningJobs.isEmpty
-                            ? 'All encoders are available'
-                            : '${runningJobs.length} active encode${runningJobs.length == 1 ? '' : 's'}'),
+                          ? 'All encoders are available'
+                          : '${runningJobs.length} active encode${runningJobs.length == 1 ? '' : 's'}'),
                 ),
                 if (runningJobs.isEmpty)
                   Container(
@@ -145,26 +146,25 @@ class _JobsScreenState extends State<JobsScreen> {
                   SingleChildScrollView(
                     scrollDirection: Axis.horizontal,
                     child: Row(
-                      children:
-                          (_history
-                                  ? const ['all', 'done', 'error', 'canceled']
-                                  : const [
-                                      'all',
-                                      'queued',
-                                      'waiting_to_upload',
-                                    ])
-                              .map(
-                                (value) => Padding(
-                                  padding: const EdgeInsets.only(right: 8),
-                                  child: ChoiceChip(
-                                    selected: _filter == value,
-                                    onSelected: (_) =>
-                                        setState(() => _filter = value),
-                                    label: Text(_filterLabel(value)),
-                                  ),
-                                ),
-                              )
-                              .toList(),
+                      children: (_history
+                              ? const ['all', 'done', 'error', 'canceled']
+                              : const [
+                                  'all',
+                                  'queued',
+                                  'waiting_to_upload',
+                                ])
+                          .map(
+                            (value) => Padding(
+                              padding: const EdgeInsets.only(right: 8),
+                              child: ChoiceChip(
+                                selected: _filter == value,
+                                onSelected: (_) =>
+                                    setState(() => _filter = value),
+                                label: Text(_filterLabel(value)),
+                              ),
+                            ),
+                          )
+                          .toList(),
                     ),
                   ),
                 ],
@@ -362,16 +362,16 @@ class _JobCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final status = '${job['status'] ?? 'unknown'}'.toLowerCase();
     final color = statusColor(status);
-    final progress = ((job['progress'] as num?)?.toDouble() ?? 0)
-        .clamp(0, 100)
-        .toDouble();
+    final progress =
+        ((job['progress'] as num?)?.toDouble() ?? 0).clamp(0, 100).toDouble();
     final canMove = status == 'queued' && controller.canControl;
     final canEditPreset = status == 'queued' && controller.canControl;
     final canCancel =
         {'running', 'queued', 'waiting_to_upload'}.contains(status) &&
-        controller.canControl;
+            controller.canControl;
     final terminal = {'done', 'error', 'canceled'}.contains(status);
     if (terminal) {
+      final savings = asMap(job['storage_breakdown']);
       return Material(
         color: ByteSqueezeColors.surface,
         borderRadius: BorderRadius.circular(12),
@@ -383,8 +383,8 @@ class _JobCard extends StatelessWidget {
                 status == 'done'
                     ? Icons.check_circle_rounded
                     : (status == 'error'
-                          ? Icons.error_rounded
-                          : Icons.cancel_rounded),
+                        ? Icons.error_rounded
+                        : Icons.cancel_rounded),
                 color: color,
                 size: 20,
               ),
@@ -414,10 +414,35 @@ class _JobCard extends StatelessWidget {
                         fontSize: 10.5,
                       ),
                     ),
+                    if (status == 'done' && savings.isNotEmpty)
+                      Text(
+                        'Video ${formatBytes(savings['video_saved_bytes'])} · Audio ${formatBytes(savings['audio_saved_bytes'])}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            color: ByteSqueezeColors.muted, fontSize: 10.5),
+                      ),
                   ],
                 ),
               ),
               StatusPill(label: status.replaceAll('_', ' '), color: color),
+              if (status == 'done' &&
+                  controller.canControl &&
+                  job['is_worker_job'] != true)
+                IconButton(
+                  tooltip: 'Optimize audio without re-encoding video',
+                  icon: const Icon(Icons.graphic_eq_rounded,
+                      color: ByteSqueezeColors.cyan),
+                  onPressed: () async {
+                    final queued = await showAudioOptimizerSheet(context,
+                        controller: controller, job: job);
+                    if (queued == true && context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                          content: Text(
+                              'Audio-only job queued. Video will be copied.')));
+                    }
+                  },
+                ),
               const SizedBox(width: 6),
             ],
           ),

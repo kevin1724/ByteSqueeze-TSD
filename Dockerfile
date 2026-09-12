@@ -266,6 +266,7 @@ COPY webui/app/jobs.py /app/webui/app/jobs.py
 COPY webui/app/presets.py /app/webui/app/presets.py
 COPY webui/app/events.py /app/webui/app/events.py
 COPY webui/app/storage_stats.py /app/webui/app/storage_stats.py
+COPY webui/app/audio_optimization.py /app/webui/app/audio_optimization.py
 COPY webui/app/node_linking.py /app/webui/app/node_linking.py
 COPY worker/__init__.py worker/app.py /app/worker/
 COPY worker/encode-one.sh /worker/encode-one.sh

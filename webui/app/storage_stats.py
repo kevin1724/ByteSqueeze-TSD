@@ -85,6 +85,8 @@ def _load_unlocked() -> dict:
     data["totals"] = _ensure_dict(data.get("totals"))
     data["totals"].setdefault("count", 0)
     data["totals"].setdefault("saved_bytes", 0)
+    data["totals"].setdefault("video_saved_bytes", 0)
+    data["totals"].setdefault("audio_saved_bytes", 0)
     _stats_cache = data
     _stats_signature = signature
     _summary_cache = None
@@ -142,6 +144,12 @@ def record_encode(
     video_codec: str | None = None,
     encoder_family: str | None = None,
     bit_depth: str | None = None,
+    job_type: str | None = None,
+    operations: dict | None = None,
+    parent_job_id: str | None = None,
+    input_inventory: dict | None = None,
+    output_inventory: dict | None = None,
+    storage_breakdown: dict | None = None,
 ) -> dict:
     """Record a successful encode's storage savings."""
     try:
@@ -186,6 +194,18 @@ def record_encode(
         row["encoder_family"] = str(encoder_family)
     if bit_depth:
         row["bit_depth"] = str(bit_depth)
+    if job_type:
+        row["job_type"] = str(job_type)
+    if isinstance(operations, dict):
+        row["operations"] = operations
+    if parent_job_id:
+        row["parent_job_id"] = str(parent_job_id)
+    if isinstance(input_inventory, dict):
+        row["input_inventory"] = input_inventory
+    if isinstance(output_inventory, dict):
+        row["output_inventory"] = output_inventory
+    if isinstance(storage_breakdown, dict):
+        row["storage_breakdown"] = storage_breakdown
 
     with STATS_LOCK:
         data = _load_unlocked()
@@ -198,6 +218,9 @@ def record_encode(
         totals = _ensure_dict(data.get("totals"))
         totals["count"] = int(totals.get("count") or 0) + 1
         totals["saved_bytes"] = int(totals.get("saved_bytes") or 0) + saved
+        if isinstance(storage_breakdown, dict):
+            totals["video_saved_bytes"] = int(totals.get("video_saved_bytes") or 0) + int(storage_breakdown.get("video_saved_bytes") or 0)
+            totals["audio_saved_bytes"] = int(totals.get("audio_saved_bytes") or 0) + int(storage_breakdown.get("audio_saved_bytes") or 0)
         data["totals"] = totals
 
         _save_unlocked(data)
@@ -223,6 +246,8 @@ def get_summary() -> dict:
                 "saved_bytes": saved_bytes,
                 "saved_gb": round(saved_bytes / (1024**3), 3) if saved_bytes else 0.0,
                 "total_runtime_seconds": round(total_runtime_seconds, 1),
+                "video_saved_bytes": int(totals.get("video_saved_bytes") or 0),
+                "audio_saved_bytes": int(totals.get("audio_saved_bytes") or 0),
             }
         return _summary_cache.copy()
 
@@ -408,6 +433,22 @@ def list_encodes(limit: int = 200) -> list[dict]:
         return [row.copy() for row in rows[: max(0, int(limit or 0))]]
 
 
+def update_encode_output_inventory(job_id: str, inventory: dict) -> bool:
+    """Lazily backfill audio/stream facts for an existing completed job."""
+    if not job_id or not isinstance(inventory, dict):
+        return False
+    with STATS_LOCK:
+        data = _load_unlocked()
+        for row in _ensure_list(data.get("encodes")):
+            if str(row.get("job_id") or "") != str(job_id):
+                continue
+            row["output_inventory"] = inventory
+            row["audio_inventory_backfilled_at"] = time.time()
+            _save_unlocked(data)
+            return True
+    return False
+
+
 def clear_stats() -> None:
     with STATS_LOCK:
-        _save_unlocked({"encodes": [], "totals": {"count": 0, "saved_bytes": 0}})
+        _save_unlocked({"encodes": [], "totals": {"count": 0, "saved_bytes": 0, "video_saved_bytes": 0, "audio_saved_bytes": 0}})

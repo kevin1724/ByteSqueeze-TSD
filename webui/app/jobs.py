@@ -46,6 +46,14 @@ from .presets import load_preset_definition, resolve_preset_file_and_name
 from .settings import load_settings, normalize_output_container
 from .events import log_event
 from .storage_stats import get_summary as get_storage_summary, list_encodes, record_encode
+from .audio_optimization import (
+    ffmpeg_audio_only_command,
+    handbrake_audio_args,
+    normalize_operations,
+    scan_media,
+    storage_breakdown,
+    validate_audio_only,
+)
 
 # -------------------------------------------------------------------
 # Global in-memory job state
@@ -676,6 +684,18 @@ def _normalized_copy_codec(value: str) -> str:
 
 def _preset_audio_encoders(job: dict | None, preset_definition: dict | None) -> list[str]:
     """Return the effective HandBrake audio encoders for container planning."""
+    operations = (job or {}).get("operations") if isinstance((job or {}).get("operations"), dict) else {}
+    actions = operations.get("audio_actions") if isinstance(operations.get("audio_actions"), list) else []
+    if actions:
+        planned = []
+        for row in actions:
+            if not isinstance(row, dict) or row.get("action") == "remove":
+                continue
+            if row.get("action") == "copy":
+                planned.append(f"copy:{str(row.get('source_codec') or '').strip().lower()}")
+            else:
+                planned.append(str(row.get("target_codec") or "aac").strip().lower())
+        return planned
     args = _split_extra_args((job or {}).get("extra_args") or "")
     override = _argument_value(args, "--aencoder", "-E")
     if override:
@@ -734,6 +754,17 @@ def _selected_audio_streams(
     ]
     if not streams:
         return []
+    operations = (job or {}).get("operations") if isinstance((job or {}).get("operations"), dict) else {}
+    actions = operations.get("audio_actions") if isinstance(operations.get("audio_actions"), list) else []
+    if actions:
+        selected_indexes = {
+            int(row.get("stream_index"))
+            for row in actions
+            if isinstance(row, dict)
+            and row.get("action") != "remove"
+            and str(row.get("stream_index", "")).lstrip("-").isdigit()
+        }
+        return [row for row in streams if int(row.get("index") or 0) in selected_indexes]
     args = _split_extra_args((job or {}).get("extra_args") or "")
     lowered = [str(arg or "").strip().lower() for arg in args]
     audio_value = _argument_value(args, "--audio", "-a").strip().lower()
@@ -1265,6 +1296,10 @@ def _apply_remote_upload_success(job_id: str, job: dict, result: dict, out_path:
         "saved_bytes": controller_saved,
         "estimated_out_bytes": controller_out_bytes,
     })
+    if isinstance(result.get("storage_breakdown"), dict):
+        job["storage_breakdown"] = result["storage_breakdown"]
+    if isinstance(result.get("output_inventory"), dict):
+        job["output_inventory"] = result["output_inventory"]
     transfer.update({
         "status": "complete",
         "controller_out_path": controller_out,
@@ -1863,6 +1898,9 @@ def _qsv_decode_log_evidence(line: str) -> str:
 def _job_uses_hardware_encoder(job: dict | None) -> bool:
     """Return True only when a job is known to use a GPU encoder."""
     job = job if isinstance(job, dict) else {}
+    operations = job.get("operations") if isinstance(job.get("operations"), dict) else {}
+    if str(job.get("job_type") or operations.get("job_type") or "").strip().lower() == "audio_only":
+        return False
     method = _job_encode_metadata(job)
     family = str(method.get("encoder_family") or "").strip().lower()
     if family in HARDWARE_ENCODER_FAMILIES:
@@ -1987,6 +2025,12 @@ def save_jobs():
                 "video_codec": j.get("video_codec"),
                 "encoder_family": j.get("encoder_family"),
                 "bit_depth": j.get("bit_depth"),
+                "job_type": j.get("job_type") or "video_preserve_audio",
+                "operations": _queued_operations(j, j.get("operations")),
+                "parent_job_id": j.get("parent_job_id") or "",
+                "audio_inventory": j.get("audio_inventory") if isinstance(j.get("audio_inventory"), dict) else None,
+                "output_inventory": j.get("output_inventory") if isinstance(j.get("output_inventory"), dict) else None,
+                "storage_breakdown": j.get("storage_breakdown") if isinstance(j.get("storage_breakdown"), dict) else None,
                 **_job_learning_metadata(j),
                 "log": j.get("log", ""),
                 "returncode": j.get("returncode"),
@@ -2147,6 +2191,12 @@ def load_jobs():
                 "video_codec": method.get("video_codec"),
                 "encoder_family": method.get("encoder_family"),
                 "bit_depth": method.get("bit_depth"),
+                "job_type": str(j.get("job_type") or (j.get("operations") or {}).get("job_type") or "video_preserve_audio"),
+                "operations": _queued_operations(j, j.get("operations")),
+                "parent_job_id": j.get("parent_job_id") or "",
+                "audio_inventory": j.get("audio_inventory") if isinstance(j.get("audio_inventory"), dict) else None,
+                "output_inventory": j.get("output_inventory") if isinstance(j.get("output_inventory"), dict) else None,
+                "storage_breakdown": j.get("storage_breakdown") if isinstance(j.get("storage_breakdown"), dict) else None,
                 **_job_learning_metadata(j),
                 "log": j.get("log", ""),
                 "returncode": j.get("returncode"),
@@ -2227,6 +2277,46 @@ def _find_existing_active_job_for_src(src: str) -> str | None:
 # Core job creation / lookup helpers (used by routes)
 # -------------------------------------------------------------------
 
+def _queued_operations(metadata: dict | None = None, operations: dict | None = None) -> dict:
+    """Keep an additive, backward-compatible operation snapshot on each job."""
+    metadata = metadata if isinstance(metadata, dict) else {}
+    source = operations if isinstance(operations, dict) else (
+        metadata.get("operations") if isinstance(metadata.get("operations"), dict) else {}
+    )
+    settings = load_settings()
+    explicit_job_type = source.get("job_type") or metadata.get("job_type")
+    job_type = str(explicit_job_type or "video_preserve_audio").strip().lower()
+    if job_type not in {"video_audio", "video_preserve_audio", "audio_only"}:
+        job_type = "video_preserve_audio"
+    audio_policy = str(
+        source.get("audio_policy")
+        or metadata.get("audio_policy")
+        or settings.get("audio_policy_default")
+        or "preserve"
+    ).strip().lower()
+    if audio_policy not in {"preserve", "optimize_lossless", "custom"}:
+        audio_policy = "preserve"
+    if not explicit_job_type and audio_policy != "preserve":
+        job_type = "video_audio"
+    if job_type == "video_preserve_audio":
+        audio_policy = "preserve"
+    return {
+        "schema": 1,
+        "job_type": job_type,
+        "video_action": "copy" if job_type == "audio_only" else "encode",
+        "audio_policy": audio_policy,
+        "audio_actions": deepcopy(source.get("audio_actions")) if isinstance(source.get("audio_actions"), list) else [],
+        "subtitle_action": str(source.get("subtitle_action") or "copy").strip().lower(),
+        "allow_object_audio_loss": bool(
+            source.get(
+                "allow_object_audio_loss",
+                settings.get("audio_allow_object_metadata_loss", False),
+            )
+        ),
+        "default_target_codec": str(source.get("default_target_codec") or settings.get("audio_optimize_codec") or "aac"),
+        "replace_source": bool(source.get("replace_source", job_type == "audio_only")),
+    }
+
 def create_job(
     src: str,
     preset: str,
@@ -2239,6 +2329,8 @@ def create_job(
     preset_adaptive: bool = False,
     preset_preferences: dict | None = None,
     encoding_policy: dict | None = None,
+    operations: dict | None = None,
+    parent_job_id: str = "",
 ) -> str:
     """
     Create a single job and append it to the queue.
@@ -2268,6 +2360,7 @@ def create_job(
     normalized_dispatch_mode = str(dispatch_mode or "local").strip().lower()
     automatic_dispatch = normalized_dispatch_mode in {"auto", "available", "next_available"}
     metadata_source = encode_metadata if isinstance(encode_metadata, dict) else {}
+    queued_operations = _queued_operations(metadata_source, operations)
     metadata_episode_plan = (
         metadata_source.get("smart_episode_plan")
         if isinstance(metadata_source.get("smart_episode_plan"), dict)
@@ -2302,6 +2395,9 @@ def create_job(
             "queued_preset_name": queued_preset_name,
             "preset_revision": 1,
             "encoding_policy": queued_encoding_policy,
+            "operations": queued_operations,
+            "job_type": queued_operations["job_type"],
+            "parent_job_id": str(parent_job_id or metadata_source.get("parent_job_id") or ""),
         }
     jobs[job_id] = {
         "status": "queued",
@@ -2335,6 +2431,12 @@ def create_job(
         "video_codec": method.get("video_codec"),
         "encoder_family": method.get("encoder_family"),
         "bit_depth": method.get("bit_depth"),
+        "job_type": queued_operations["job_type"],
+        "operations": queued_operations,
+        "parent_job_id": str(parent_job_id or metadata_source.get("parent_job_id") or ""),
+        "audio_inventory": None,
+        "output_inventory": None,
+        "storage_breakdown": None,
         **_job_learning_metadata(encode_metadata),
         "log": "",
         "returncode": None,
@@ -2433,6 +2535,10 @@ def _apply_planned_preset(job: dict, plan: dict, *, user_edit: bool = False) -> 
         preset_selection=selection,
         preset_adaptive=adaptive,
     )
+    queued_operations = _queued_operations(
+        metadata,
+        plan.get("operations") if isinstance(plan.get("operations"), dict) else job.get("operations"),
+    )
     job.update({
         "preset": preset,
         "extra_args": str(plan.get("extra_args") or ""),
@@ -2442,6 +2548,9 @@ def _apply_planned_preset(job: dict, plan: dict, *, user_edit: bool = False) -> 
         "video_codec": method.get("video_codec"),
         "encoder_family": method.get("encoder_family"),
         "bit_depth": method.get("bit_depth"),
+        "job_type": queued_operations["job_type"],
+        "operations": queued_operations,
+        "parent_job_id": str(plan.get("parent_job_id") or metadata.get("parent_job_id") or job.get("parent_job_id") or ""),
         "queued_preset_name": queued_preset_name,
         **_job_learning_metadata(metadata),
     })
@@ -2483,6 +2592,9 @@ def replace_queued_job_preset(job_id: str, plan: dict) -> tuple[bool, str | None
                 "queued_preset_name": job.get("queued_preset_name") or "",
                 "preset_revision": max(1, int(job.get("preset_revision") or 1)),
                 "encoding_policy": _job_encoding_policy(job),
+                "operations": job.get("operations"),
+                "job_type": job.get("job_type"),
+                "parent_job_id": job.get("parent_job_id") or "",
             }
         job["dispatch_error"] = ""
         job["error_message"] = ""
@@ -2631,6 +2743,7 @@ def create_jobs_batch(files_and_presets: list[tuple[str, str]]) -> int:
     seen_in_batch: set[str] = set()
     preset_snapshots: dict[str, dict | None] = {}
     queued_encoding_policy = _normalize_encoding_policy()
+    queued_operations = _queued_operations()
 
     for src, preset in files_and_presets:
         # Avoid duplicates within the same batch call
@@ -2667,6 +2780,12 @@ def create_jobs_batch(files_and_presets: list[tuple[str, str]]) -> int:
             "video_codec": method.get("video_codec"),
             "encoder_family": method.get("encoder_family"),
             "bit_depth": method.get("bit_depth"),
+            "job_type": queued_operations["job_type"],
+            "operations": deepcopy(queued_operations),
+            "parent_job_id": "",
+            "audio_inventory": None,
+            "output_inventory": None,
+            "storage_breakdown": None,
             "log": "",
             "returncode": None,
             "pid": None,
@@ -2704,7 +2823,7 @@ def create_jobs_batch(files_and_presets: list[tuple[str, str]]) -> int:
     return count
 
 
-def create_remote_transfer_job(src: str, preset: str, transfer: dict, extra_args: str = "", preset_bundle: dict | None = None, encode_metadata: dict | None = None, encoding_policy: dict | None = None) -> tuple[str, bool]:
+def create_remote_transfer_job(src: str, preset: str, transfer: dict, extra_args: str = "", preset_bundle: dict | None = None, encode_metadata: dict | None = None, encoding_policy: dict | None = None, operations: dict | None = None, parent_job_id: str = "") -> tuple[str, bool]:
     """
     Queue a job whose source is downloaded from a paired controller/storage node.
 
@@ -2739,6 +2858,7 @@ def create_remote_transfer_job(src: str, preset: str, transfer: dict, extra_args
     }
     method = _encode_metadata_from_extra_args(extra_args, preset, encode_metadata or transfer.get("encode_metadata"))
     learning_metadata = encode_metadata or transfer.get("encode_metadata")
+    queued_operations = _queued_operations(learning_metadata, operations)
     learning_episode_plan = (
         (learning_metadata or {}).get("smart_episode_plan")
         if isinstance((learning_metadata or {}).get("smart_episode_plan"), dict)
@@ -2776,6 +2896,12 @@ def create_remote_transfer_job(src: str, preset: str, transfer: dict, extra_args
         "video_codec": method.get("video_codec"),
         "encoder_family": method.get("encoder_family"),
         "bit_depth": method.get("bit_depth"),
+        "job_type": queued_operations["job_type"],
+        "operations": queued_operations,
+        "parent_job_id": str(parent_job_id or (learning_metadata or {}).get("parent_job_id") or ""),
+        "audio_inventory": None,
+        "output_inventory": None,
+        "storage_breakdown": None,
         **_job_learning_metadata(learning_metadata),
         "log": "",
         "returncode": None,
@@ -2870,6 +2996,12 @@ def list_jobs_for_api(*, include_log_tail: bool = False) -> list[dict]:
                 "video_codec": j.get("video_codec") or method.get("video_codec"),
                 "encoder_family": j.get("encoder_family") or method.get("encoder_family"),
                 "bit_depth": j.get("bit_depth") or method.get("bit_depth"),
+                "job_type": j.get("job_type") or "video_preserve_audio",
+                "operations": j.get("operations") if isinstance(j.get("operations"), dict) else _queued_operations(),
+                "parent_job_id": j.get("parent_job_id") or "",
+                "audio_inventory": j.get("audio_inventory") if isinstance(j.get("audio_inventory"), dict) else None,
+                "output_inventory": j.get("output_inventory") if isinstance(j.get("output_inventory"), dict) else None,
+                "storage_breakdown": j.get("storage_breakdown") if isinstance(j.get("storage_breakdown"), dict) else None,
                 "uses_hardware_encoder": _job_uses_hardware_encoder(j),
                 **_job_learning_metadata(j),
                 "mode": j.get("mode", "local"),
@@ -2996,6 +3128,12 @@ def _encode_history_job(row: dict, index: int) -> dict:
         "video_codec": row.get("video_codec") or "",
         "encoder_family": row.get("encoder_family") or "",
         "bit_depth": row.get("bit_depth") or "",
+        "job_type": row.get("job_type") or "video_preserve_audio",
+        "operations": row.get("operations") if isinstance(row.get("operations"), dict) else _queued_operations(),
+        "parent_job_id": row.get("parent_job_id") or "",
+        "audio_inventory": row.get("input_inventory") if isinstance(row.get("input_inventory"), dict) else None,
+        "output_inventory": row.get("output_inventory") if isinstance(row.get("output_inventory"), dict) else None,
+        "storage_breakdown": row.get("storage_breakdown") if isinstance(row.get("storage_breakdown"), dict) else None,
         "mode": "linked_node" if row.get("node_id") else "local",
         "node_id": row.get("node_id") or "",
         "node_name": row.get("node_name") or "",
@@ -3084,6 +3222,206 @@ def list_job_history_for_api(limit: int = 5000) -> list[dict]:
 # -------------------------------------------------------------------
 # Dispatcher + HandBrake process runner
 # -------------------------------------------------------------------
+
+def _audio_only_paths(src_path: str, job_id: str, replace_source: bool) -> tuple[str, str]:
+    folder = os.path.dirname(src_path)
+    base, extension = os.path.splitext(os.path.basename(src_path))
+    extension = extension if extension.lower() in {".mkv", ".mp4", ".m4v"} else ".mkv"
+    temp_out = os.path.join(folder, f".{base}.bytesqueeze-audio-{job_id}.tmp{extension}")
+    final_out = src_path if replace_source else os.path.join(folder, f"{base}-Audio-TSD{extension}")
+    return temp_out, final_out
+
+
+def _run_audio_only_job(
+    job_id: str,
+    job: dict,
+    encode_src_path: str,
+    display_src_path: str,
+    source_inventory: dict,
+    operations: dict,
+    *,
+    remote_transfer: bool,
+    transfer: dict,
+    transfer_work_dir: str,
+    update_transfer_progress,
+) -> None:
+    """Remux one file with FFmpeg while video and non-audio streams are copied."""
+    replace_source = bool(operations.get("replace_source", True)) and not remote_transfer
+    temp_out, final_out = _audio_only_paths(encode_src_path, job_id, replace_source)
+    job.update({
+        "phase": "audio_optimizing",
+        "out_path": final_out,
+        "encode_method": "ffmpeg_audio_only",
+        "encoder": "copy",
+        "video_codec": str((source_inventory.get("video_streams") or [{}])[0].get("codec") or "copy"),
+        "encoder_family": "stream_copy",
+        "bit_depth": "copy",
+    })
+    command = ffmpeg_audio_only_command(encode_src_path, temp_out, operations)
+    action_summary = ", ".join(
+        f"a:{row.get('audio_ordinal')}={row.get('action')}"
+        + (f"/{row.get('target_codec')}@{row.get('bitrate_kbps')}k/{row.get('channels')}ch" if row.get("action") == "encode" else "")
+        for row in operations.get("audio_actions", [])
+    )
+    _append_job_log(
+        job_id,
+        (
+            "[ByteSqueeze] Job type: Audio Optimization Only\n"
+            "[ByteSqueeze] Video: COPY (FFmpeg stream copy; no re-encode)\n"
+            "[ByteSqueeze] Subtitles, attachments, chapters, and metadata: COPY\n"
+            f"[ByteSqueeze] Audio actions: {action_summary or 'no audio tracks'}\n"
+            f"[ByteSqueeze] Estimated audio savings: {int((operations.get('estimate') or {}).get('audio_savings_bytes') or 0)} bytes"
+        ),
+    )
+    save_jobs()
+    try:
+        if os.path.exists(temp_out):
+            os.remove(temp_out)
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            start_new_session=True,
+        )
+        job["pid"] = process.pid
+        duration = max(0.0, float(source_inventory.get("duration_seconds") or 0.0))
+        assert process.stdout is not None
+        for line in process.stdout:
+            _append_job_log(job_id, line.rstrip())
+            if line.startswith(("out_time_us=", "out_time_ms=")) and duration:
+                value = line.split("=", 1)[-1].strip()
+                try:
+                    job["progress"] = min(99.5, max(0.0, (float(value) / 1_000_000.0) / duration * 100.0))
+                except (TypeError, ValueError):
+                    pass
+            if job.get("status") == "canceled":
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except Exception:
+                    try:
+                        process.terminate()
+                    except Exception:
+                        pass
+                break
+        returncode = process.wait()
+        job["returncode"] = returncode
+        if job.get("status") == "canceled":
+            raise RuntimeError("audio optimization was canceled")
+        if returncode != 0:
+            raise RuntimeError(f"FFmpeg exited with code {returncode}: {_job_error_excerpt(job)}")
+        output_ok, output_reason = _encoded_output_is_valid(temp_out)
+        if not output_ok:
+            raise RuntimeError(f"audio output validation failed: {output_reason}")
+        job["phase"] = "validating_stream_copy"
+        output_inventory = scan_media(temp_out, exact=True, force=True)
+        valid, validation_errors = validate_audio_only(source_inventory, output_inventory, operations)
+        if not valid:
+            raise RuntimeError("audio-only safeguards failed: " + "; ".join(validation_errors))
+        input_total = int(job.get("src_bytes") or os.path.getsize(encode_src_path))
+        output_total = int(os.path.getsize(temp_out))
+        breakdown = storage_breakdown(source_inventory, output_inventory, input_total, output_total)
+        job["output_inventory"] = output_inventory
+        job["storage_breakdown"] = breakdown
+        job["out_bytes"] = output_total
+        job["saved_bytes"] = max(0, input_total - output_total)
+        job["estimated_out_bytes"] = output_total
+
+        if remote_transfer:
+            transfer.update({"local_out": temp_out, "work_dir": transfer_work_dir, "status": "uploading"})
+            job.update({"local_out_path": temp_out, "phase": "uploading", "transfer": transfer})
+            save_jobs()
+            try:
+                upload_result = _upload_transfer_output(
+                    transfer.get("upload_url") or "",
+                    transfer.get("upload_token") or "",
+                    transfer.get("worker_node_id") or "",
+                    temp_out,
+                    job_id=job_id,
+                    duration_seconds=max(0.0, _now_ts() - float(job.get("started_at") or _now_ts())),
+                    progress_callback=update_transfer_progress,
+                )
+                _apply_remote_upload_success(job_id, job, upload_result, temp_out)
+            except Exception as upload_error:
+                _mark_transfer_waiting(job_id, job, upload_error)
+        else:
+            if replace_source:
+                backup = f"{encode_src_path}.bytesqueeze-audio-backup-{job_id}"
+                os.replace(encode_src_path, backup)
+                try:
+                    os.replace(temp_out, encode_src_path)
+                except Exception:
+                    os.replace(backup, encode_src_path)
+                    raise
+                try:
+                    os.remove(backup)
+                except OSError:
+                    pass
+                final_out = encode_src_path
+            else:
+                if os.path.exists(final_out):
+                    raise RuntimeError(f"output already exists: {final_out}")
+                os.replace(temp_out, final_out)
+            output_inventory["path"] = final_out
+            job.update({"status": "done", "phase": "done", "progress": 100.0, "out_path": final_out, "output_inventory": output_inventory})
+            try:
+                from .node_linking import local_node_info
+                local_node = local_node_info()
+            except Exception:
+                local_node = {}
+            record_encode(
+                job_id=job_id,
+                src=display_src_path,
+                out=final_out,
+                preset="audio-only",
+                src_bytes=input_total,
+                out_bytes=output_total,
+                duration_seconds=max(0.0, _now_ts() - float(job.get("started_at") or _now_ts())),
+                is_hdr=bool(job.get("is_hdr")),
+                node_id=local_node.get("id"),
+                node_name=local_node.get("name"),
+                encode_method="ffmpeg_audio_only",
+                encoder="copy",
+                video_codec=job.get("video_codec"),
+                encoder_family="stream_copy",
+                bit_depth="copy",
+                job_type="audio_only",
+                operations=operations,
+                parent_job_id=job.get("parent_job_id"),
+                input_inventory=source_inventory,
+                output_inventory=output_inventory,
+                storage_breakdown=breakdown,
+            )
+            _append_job_log(job_id, "[ByteSqueeze] Audio optimization completed; video stream copy verified.")
+    except Exception as exc:
+        if job.get("status") != "canceled":
+            job.update({"status": "error", "phase": "audio_validation_error", "error_message": str(exc)[:500]})
+        _append_job_log(job_id, f"[ByteSqueeze] ERROR: {exc}")
+        if os.path.isfile(temp_out) and job.get("status") != "waiting_to_upload":
+            try:
+                os.remove(temp_out)
+            except OSError:
+                pass
+    finally:
+        job["pid"] = None
+        job["eta_seconds"] = None
+        job["finished_at"] = _now_ts()
+        try:
+            job["duration_seconds"] = max(0.0, job["finished_at"] - float(job.get("started_at") or job["finished_at"]))
+        except Exception:
+            job["duration_seconds"] = None
+        if remote_transfer and job.get("status") != "waiting_to_upload":
+            transfer = job.get("transfer") if isinstance(job.get("transfer"), dict) else transfer
+            for key in ("download_token", "upload_token", "local_src", "local_out", "work_dir"):
+                transfer.pop(key, None)
+            job["transfer"] = transfer
+            job["local_out_path"] = None
+            _cleanup_transfer_work_dir(transfer_work_dir, transfer)
+        save_jobs()
+
 
 def run_encode(job_id: str, src_path: str, preset_key: str):
     """
@@ -3238,6 +3576,60 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
     except Exception:
         job["src_bytes"] = None
 
+    # Inventory every stream before launching either HandBrake or FFmpeg.  An
+    # unavailable inventory is a hard safety stop: ByteSqueeze will never run
+    # a normal job without knowing which audio tracks its policy affects.
+    job["phase"] = "scanning_audio"
+    try:
+        source_inventory = scan_media(encode_src_path, exact=True)
+        operations = normalize_operations(job.get("operations"), source_inventory)
+        job["audio_inventory"] = source_inventory
+        job["operations"] = operations
+        job["job_type"] = operations["job_type"]
+        estimate = operations.get("estimate") if isinstance(operations.get("estimate"), dict) else {}
+        _append_job_log(
+            job_id,
+            (
+                f"[ByteSqueeze] Audio inventory: {len(source_inventory.get('audio_streams') or [])} tracks, "
+                f"{int((source_inventory.get('aggregate') or {}).get('audio_bytes') or 0)} bytes\n"
+                f"[ByteSqueeze] Audio policy: {operations.get('audio_policy')}\n"
+                f"[ByteSqueeze] Estimated audio: {int(estimate.get('current_audio_bytes') or 0)} -> "
+                f"{int(estimate.get('output_audio_bytes') or 0)} bytes "
+                f"({float(estimate.get('audio_savings_percent') or 0):.1f}% potential savings)"
+            ),
+        )
+        for warning in operations.get("warnings") or []:
+            _append_job_log(job_id, f"[ByteSqueeze] Audio warning: {warning}")
+        save_jobs()
+    except Exception as exc:
+        job.update({
+            "status": "error",
+            "phase": "audio_scan_error",
+            "error_message": f"Audio inventory failed; encode not started: {exc}"[:500],
+            "finished_at": _now_ts(),
+            "pid": None,
+        })
+        _append_job_log(job_id, f"[ByteSqueeze] ERROR: {job['error_message']}")
+        if remote_transfer:
+            _cleanup_transfer_work_dir(transfer_work_dir, transfer)
+        save_jobs()
+        return
+
+    if operations.get("job_type") == "audio_only":
+        _run_audio_only_job(
+            job_id,
+            job,
+            encode_src_path,
+            display_src_path,
+            source_inventory,
+            operations,
+            remote_transfer=remote_transfer,
+            transfer=transfer,
+            transfer_work_dir=transfer_work_dir,
+            update_transfer_progress=update_transfer_progress,
+        )
+        return
+
     # Predict output path (must match worker/encode-one.sh)
     try:
         suffix = (os.environ.get("SUFFIX") or "TSD").strip() or "TSD"
@@ -3369,6 +3761,7 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
         "max_width": resolution_plan["max_width"],
         "max_height": resolution_plan["max_height"],
     }
+
     job["hardware_decode_mode"] = hardware_decode["mode"]
     job["hardware_decode_requested"] = hardware_decode["decoder"]
     job["hardware_decode_active"] = None if hardware_decode["enabled"] else False
@@ -3385,6 +3778,7 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
     # Controlled arguments are placed after user/Smart Preset arguments by
     # encode-one.sh so a logical 1080/4K choice remains a hard no-upscale cap.
     env["HB_EXTRA_ARGS"] = launch_extra_args
+    env["HB_AUDIO_POLICY_OPTS"] = shlex.join(handbrake_audio_args(operations, source_inventory))
     env["HB_DIMENSION_OPTS"] = shlex.join(resolution_plan["cli_args"])
     env["HB_HW_DECODE_OPTS"] = shlex.join(hardware_decode["cli_args"])
     env["HB_OUTPUT_CONTAINER"] = output_plan["container"]
@@ -3618,6 +4012,15 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
 
                 saved_bytes = max(0, src_bytes_i - out_bytes)
                 job["saved_bytes"] = saved_bytes
+                output_inventory = scan_media(out_path, exact=True, force=True)
+                breakdown = storage_breakdown(
+                    source_inventory,
+                    output_inventory,
+                    src_bytes_i,
+                    out_bytes,
+                )
+                job["output_inventory"] = output_inventory
+                job["storage_breakdown"] = breakdown
                 duration_seconds_for_stats = None
                 if job.get("started_at") is not None:
                     try:
@@ -3670,6 +4073,12 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
                         video_codec=job.get("video_codec"),
                         encoder_family=job.get("encoder_family"),
                         bit_depth=job.get("bit_depth"),
+                        job_type=job.get("job_type"),
+                        operations=operations,
+                        parent_job_id=job.get("parent_job_id"),
+                        input_inventory=source_inventory,
+                        output_inventory=output_inventory,
+                        storage_breakdown=breakdown,
                     )
 
                     source_deleted = False

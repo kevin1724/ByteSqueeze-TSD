@@ -22,9 +22,8 @@ class DashboardScreen extends StatelessWidget {
     final storage = storageSummary.isEmpty ? dashboardStorage : storageSummary;
     final dashboardAnalytics = asMap(dashboardStorage['analytics']);
     final storageAnalytics = asMap(controller.storage['analytics']);
-    final analytics = storageAnalytics.isEmpty
-        ? dashboardAnalytics
-        : storageAnalytics;
+    final analytics =
+        storageAnalytics.isEmpty ? dashboardAnalytics : storageAnalytics;
     final activeJobs = asList(controller.dashboard['active_jobs']);
     final events = asList(controller.dashboard['events']);
     final automationWrap = asMap(controller.dashboard['automation']);
@@ -52,18 +51,16 @@ class DashboardScreen extends StatelessWidget {
                 CompactPageHeader(
                   title: 'Overview',
                   status: paused ? 'Queue paused' : 'Online · $online workers',
-                  statusColor: paused
-                      ? ByteSqueezeColors.amber
-                      : ByteSqueezeColors.mint,
+                  statusColor:
+                      paused ? ByteSqueezeColors.amber : ByteSqueezeColors.mint,
                   summary: paired > 0
                       ? '$online/$paired linked workers available'
                       : 'Main controller ready',
                   trailing: controller.showSecondaryUi
                       ? IconButton(
                           tooltip: 'Refresh everything',
-                          onPressed: controller.busy
-                              ? null
-                              : controller.refreshAll,
+                          onPressed:
+                              controller.busy ? null : controller.refreshAll,
                           icon: controller.busy
                               ? const SizedBox(
                                   width: 18,
@@ -133,9 +130,7 @@ class DashboardScreen extends StatelessWidget {
                 if (runningJobs.isEmpty)
                   const _ReadyRow()
                 else
-                  ...runningJobs
-                      .take(4)
-                      .map(
+                  ...runningJobs.take(4).map(
                         (job) => Padding(
                           padding: const EdgeInsets.only(bottom: 9),
                           child: _ActiveJobCard(job: job),
@@ -148,14 +143,13 @@ class DashboardScreen extends StatelessWidget {
                 _StorageImpactCard(summary: storage, analytics: analytics),
                 const SectionHeader(title: 'Achievements'),
                 _AchievementStrip(
-                  savedBytes:
-                      (savedBytes as num?)?.toDouble() ??
+                  savedBytes: (savedBytes as num?)?.toDouble() ??
                       double.tryParse('$savedBytes') ??
                       0,
                   completed: completed,
                   efficiency:
                       (analytics['efficiency_percent'] as num?)?.toDouble() ??
-                      0,
+                          0,
                 ),
                 _AutopilotSummary(
                   autopilot: autopilot,
@@ -170,9 +164,9 @@ class DashboardScreen extends StatelessWidget {
                       FilledButton.tonalIcon(
                         onPressed: controller.canControl
                             ? () => _run(
-                                context,
-                                () => controller.setQueuePaused(!paused),
-                              )
+                                  context,
+                                  () => controller.setQueuePaused(!paused),
+                                )
                             : null,
                         icon: Icon(
                           paused
@@ -249,15 +243,13 @@ class _ActiveJobCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final progress = ((job['progress'] as num?)?.toDouble() ?? 0)
-        .clamp(0, 100)
-        .toDouble();
+    final progress =
+        ((job['progress'] as num?)?.toDouble() ?? 0).clamp(0, 100).toDouble();
     final node = '${job['node_name'] ?? 'Main controller'}';
     final encoder = '${job['encoder'] ?? job['preset'] ?? 'Smart'}';
     final fps = (job['fps'] as num?)?.toDouble();
     final inputBytes = job['src_size_bytes'] ?? job['input_size_bytes'];
-    final outputBytes =
-        job['estimated_output_bytes'] ??
+    final outputBytes = job['estimated_output_bytes'] ??
         ((job['estimated_out_gb'] as num?)?.toDouble() ?? 0) *
             1024 *
             1024 *
@@ -341,6 +333,8 @@ class _StorageImpactCard extends StatelessWidget {
     final workers = asList(analytics['workers']).map(asMap).toList();
     final recent = asMap(analytics['recent']);
     final saved = summary['saved_bytes'] ?? 0;
+    final videoSaved = (summary['video_saved_bytes'] as num?)?.toDouble() ?? 0;
+    final audioSaved = (summary['audio_saved_bytes'] as num?)?.toDouble() ?? 0;
     final completed = (summary['count'] as num?)?.toInt() ?? 0;
     final efficiency =
         (analytics['efficiency_percent'] as num?)?.toDouble() ?? 0;
@@ -369,7 +363,9 @@ class _StorageImpactCard extends StatelessWidget {
                     const SizedBox(height: 4),
                     Text(
                       formatBytes(saved),
-                      style: Theme.of(context).textTheme.headlineMedium
+                      style: Theme.of(context)
+                          .textTheme
+                          .headlineMedium
                           ?.copyWith(color: ByteSqueezeColors.mint),
                     ),
                   ],
@@ -378,6 +374,11 @@ class _StorageImpactCard extends StatelessWidget {
               _RingStat(value: efficiency, label: 'efficient'),
             ],
           ),
+          if (videoSaved != 0 || audioSaved != 0) ...[
+            const SizedBox(height: 14),
+            _SavingsBreakdownBar(
+                videoBytes: videoSaved, audioBytes: audioSaved),
+          ],
           const SizedBox(height: 14),
           Row(
             children: [
@@ -441,6 +442,64 @@ class _StorageImpactCard extends StatelessWidget {
           ],
         ],
       ),
+    );
+  }
+}
+
+class _SavingsBreakdownBar extends StatelessWidget {
+  const _SavingsBreakdownBar(
+      {required this.videoBytes, required this.audioBytes});
+  final double videoBytes;
+  final double audioBytes;
+
+  @override
+  Widget build(BuildContext context) {
+    final video = videoBytes.clamp(0, double.infinity).toDouble();
+    final audio = audioBytes.clamp(0, double.infinity).toDouble();
+    final total = video + audio;
+    final videoShare = total > 0 ? video / total : 0.0;
+    return Column(
+      children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(99),
+          child: SizedBox(
+            height: 9,
+            child: Row(
+              children: [
+                if (videoShare > 0)
+                  Expanded(
+                      flex: (videoShare * 1000).round(),
+                      child: const ColoredBox(color: ByteSqueezeColors.cyan)),
+                if (audio > 0)
+                  Expanded(
+                      flex: ((1 - videoShare) * 1000)
+                          .round()
+                          .clamp(1, 1000)
+                          .toInt(),
+                      child: const ColoredBox(color: ByteSqueezeColors.violet)),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 9),
+        Row(
+          children: [
+            Expanded(
+                child: Text('● Video ${formatBytes(video)}',
+                    style: const TextStyle(
+                        color: ByteSqueezeColors.cyan,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700))),
+            Expanded(
+                child: Text('● Audio ${formatBytes(audio)}',
+                    textAlign: TextAlign.end,
+                    style: const TextStyle(
+                        color: ByteSqueezeColors.violet,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700))),
+          ],
+        ),
+      ],
     );
   }
 }
@@ -614,8 +673,7 @@ class _SavingsChartPainter extends CustomPainter {
     }
     final path = Path();
     for (var index = 0; index < values.length; index++) {
-      final x =
-          inset +
+      final x = inset +
           (values.length == 1
               ? width / 2
               : width * index / (values.length - 1));
@@ -655,32 +713,31 @@ class _AchievementStrip extends StatelessWidget {
     const tebibyte = 1099511627776.0;
     final achievements =
         <({String label, String detail, IconData icon, bool unlocked})>[
-          (
-            label: 'First squeeze',
-            detail: 'First encode complete',
-            icon: Icons.bolt_rounded,
-            unlocked: completed >= 1,
-          ),
-          (
-            label: 'Century club',
-            detail: '$completed / 100 encodes',
-            icon: Icons.workspace_premium_rounded,
-            unlocked: completed >= 100,
-          ),
-          (
-            label: 'Terabyte saver',
-            detail:
-                '${(savedBytes / tebibyte).toStringAsFixed(1)} TB reclaimed',
-            icon: Icons.savings_rounded,
-            unlocked: savedBytes >= tebibyte,
-          ),
-          (
-            label: 'Efficiency expert',
-            detail: '${efficiency.toStringAsFixed(0)}% smaller output',
-            icon: Icons.auto_graph_rounded,
-            unlocked: efficiency >= 50,
-          ),
-        ];
+      (
+        label: 'First squeeze',
+        detail: 'First encode complete',
+        icon: Icons.bolt_rounded,
+        unlocked: completed >= 1,
+      ),
+      (
+        label: 'Century club',
+        detail: '$completed / 100 encodes',
+        icon: Icons.workspace_premium_rounded,
+        unlocked: completed >= 100,
+      ),
+      (
+        label: 'Terabyte saver',
+        detail: '${(savedBytes / tebibyte).toStringAsFixed(1)} TB reclaimed',
+        icon: Icons.savings_rounded,
+        unlocked: savedBytes >= tebibyte,
+      ),
+      (
+        label: 'Efficiency expert',
+        detail: '${efficiency.toStringAsFixed(0)}% smaller output',
+        icon: Icons.auto_graph_rounded,
+        unlocked: efficiency >= 50,
+      ),
+    ];
     return SizedBox(
       height: 94,
       child: ListView.separated(
@@ -689,9 +746,8 @@ class _AchievementStrip extends StatelessWidget {
         separatorBuilder: (_, __) => const SizedBox(width: 8),
         itemBuilder: (context, index) {
           final item = achievements[index];
-          final color = item.unlocked
-              ? ByteSqueezeColors.amber
-              : ByteSqueezeColors.muted;
+          final color =
+              item.unlocked ? ByteSqueezeColors.amber : ByteSqueezeColors.muted;
           return Container(
             width: 164,
             padding: const EdgeInsets.all(12),
