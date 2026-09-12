@@ -932,7 +932,7 @@ function formatEstimatedFinal(job) {
   const estimate = formatBytesForDisplay(job.estimated_out_bytes);
   if (!estimate) return '';
   const pct = Number(job.estimated_out_checked_progress || 0);
-  return pct > 0 ? `${estimate} @ ${pct.toFixed(0)}%` : estimate;
+  return pct > 0 ? `~${estimate} @ ${pct.toFixed(0)}%` : `~${estimate}`;
 }
 
 const JOBS_VISIBLE_ROW_OPTIONS = [10, 25, 50, 100];

@@ -20,10 +20,11 @@ executables launched directly from a NAS/UNC share; copying it locally also
 keeps the persistent Start with Windows shortcut valid.
 
 State and pairing credentials live in
-`%LOCALAPPDATA%\ByteSqueeze Worker\state`. Transfer sources and temporary
-outputs default to `%LOCALAPPDATA%\ByteSqueeze Worker\jobs`. Both locations
-survive application upgrades. The working folder is selectable in the app;
-restart the worker after changing it.
+`%LOCALAPPDATA%\ByteSqueeze Worker\state`. Incoming source copies and completed
+job outputs default to `%LOCALAPPDATA%\ByteSqueeze Worker\jobs`; HandBrake,
+FFmpeg, and pre-encode scratch files default to
+`%LOCALAPPDATA%\ByteSqueeze Worker\temp`. Both data paths are selectable in the
+app and apply to newly received jobs as soon as settings are saved.
 
 ## Hardware selection
 
@@ -35,6 +36,9 @@ actual HandBrake build exposes the matching encoder family.
   finally the CPU for adaptive Smart jobs.
 - **NVIDIA NVENC**, **AMD VCN/VCE**, **Intel Quick Sync**, and **CPU/software**
   set the preferred family for adaptive Smart jobs.
+- **GPU routing** can assign AV1, H.265, and H.264 jobs to different detected
+  adapters. When enabled, compatible idle-GPU fallback keeps another adapter
+  busy instead of waiting for the preferred one.
 - Explicitly selected/locked presets are never rewritten by this preference.
 - **Parallel GPU jobs** controls worker hardware capacity from 1–8. Software
   jobs remain exclusive to protect CPU responsiveness.
@@ -79,3 +83,5 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-windows-worker.ps1 -Use
   and work-disk free space. **Scan again** refreshes it after a driver update.
 - Failed job logs remain in the persistent state directory and are also
   available from the controller's Queue screen.
+- Hardware probes, ffprobe scans, and encoder launches run without opening
+  transient Command Prompt windows behind the notification-area app.

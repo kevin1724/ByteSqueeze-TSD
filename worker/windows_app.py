@@ -21,7 +21,7 @@ from pathlib import Path
 
 
 APP_NAME = "ByteSqueeze Worker"
-CONFIG_VERSION = 1
+CONFIG_VERSION = 2
 FAMILY_LABELS = {
     "auto": "Auto (best available)",
     "nvenc": "NVIDIA NVENC",
@@ -29,6 +29,12 @@ FAMILY_LABELS = {
     "qsv": "Intel Quick Sync",
     "software": "CPU / software",
 }
+GPU_ROUTE_LABELS = {
+    "av1": "AV1 jobs",
+    "h265": "H.265 / HEVC jobs",
+    "h264": "H.264 / AVC jobs",
+}
+AUTO_GPU_LABEL = "Any compatible idle GPU"
 
 
 def application_root() -> Path:
@@ -48,8 +54,11 @@ def default_config() -> dict:
         "worker_name": f"{socket.gethostname()} ByteSqueeze Worker",
         "port": 8082,
         "work_dir": str(root / "jobs"),
+        "scratch_dir": str(root / "temp"),
         "hardware_slots": 1,
         "preferred_encoder_family": "auto",
+        "gpu_routes": {codec: "auto" for codec in GPU_ROUTE_LABELS},
+        "gpu_fallback_any": True,
         "start_minimized": False,
         "run_at_login": False,
     }
@@ -74,6 +83,14 @@ def load_config() -> dict:
         config.update({"port": 8082, "hardware_slots": 1})
     if config.get("preferred_encoder_family") not in FAMILY_LABELS:
         config["preferred_encoder_family"] = "auto"
+    routes = config.get("gpu_routes") if isinstance(config.get("gpu_routes"), dict) else {}
+    config["gpu_routes"] = {
+        codec: str(routes.get(codec) or "auto").strip()[:300]
+        for codec in GPU_ROUTE_LABELS
+    }
+    config["gpu_fallback_any"] = bool(config.get("gpu_fallback_any", True))
+    config["scratch_dir"] = str(config.get("scratch_dir") or (application_root() / "temp"))
+    config["version"] = CONFIG_VERSION
     return config
 
 
@@ -89,8 +106,10 @@ def configure_environment(config: dict) -> None:
     root = application_root()
     state_dir = root / "state"
     work_dir = Path(str(config["work_dir"])).expanduser().resolve()
+    scratch_dir = Path(str(config.get("scratch_dir") or (root / "temp"))).expanduser().resolve()
     state_dir.mkdir(parents=True, exist_ok=True)
     work_dir.mkdir(parents=True, exist_ok=True)
+    scratch_dir.mkdir(parents=True, exist_ok=True)
 
     resources = resource_root()
     presets = resources / "presets"
@@ -100,12 +119,18 @@ def configure_environment(config: dict) -> None:
         "TSD_WINDOWS_WORKER": "1",
         "TSD_WORKER_NAME": str(config["worker_name"]),
         "TSD_WORKER_TEMP_DIR": str(work_dir),
+        "TSD_WORKER_SCRATCH_DIR": str(scratch_dir),
         "TSD_PREFERRED_ENCODER_FAMILY": str(config["preferred_encoder_family"]),
+        "TSD_WINDOWS_GPU_ROUTES": json.dumps(config.get("gpu_routes") or {}),
+        "TSD_WINDOWS_GPU_FALLBACK_ANY": "1" if config.get("gpu_fallback_any", True) else "0",
         "TSD_ENCODER_FAMILIES": "nvenc,vce,qsv,software",
         "HB_DATA_DIR": str(state_dir),
         "HB_MEDIA_BASE": str(work_dir),
         "HB_ROOTS_JSON": json.dumps([[str(work_dir), "Worker jobs"]]),
         "HB_PRESET_DIR": str(presets),
+        "TEMP": str(scratch_dir),
+        "TMP": str(scratch_dir),
+        "TMPDIR": str(scratch_dir),
     })
     if tools_dir.is_dir():
         os.environ["PATH"] = str(tools_dir) + os.pathsep + os.environ.get("PATH", "")
@@ -205,6 +230,17 @@ class WorkerRuntime:
         self.config = config
         os.environ["TSD_WORKER_NAME"] = str(config["worker_name"])
         os.environ["TSD_PREFERRED_ENCODER_FAMILY"] = str(config["preferred_encoder_family"])
+        work_dir = Path(str(config["work_dir"])).expanduser().resolve()
+        scratch_dir = Path(str(config["scratch_dir"])).expanduser().resolve()
+        work_dir.mkdir(parents=True, exist_ok=True)
+        scratch_dir.mkdir(parents=True, exist_ok=True)
+        os.environ["TSD_WORKER_TEMP_DIR"] = str(work_dir)
+        os.environ["TSD_WORKER_SCRATCH_DIR"] = str(scratch_dir)
+        os.environ["TSD_WINDOWS_GPU_ROUTES"] = json.dumps(config.get("gpu_routes") or {})
+        os.environ["TSD_WINDOWS_GPU_FALLBACK_ANY"] = "1" if config.get("gpu_fallback_any", True) else "0"
+        os.environ["TEMP"] = str(scratch_dir)
+        os.environ["TMP"] = str(scratch_dir)
+        os.environ["TMPDIR"] = str(scratch_dir)
         from webui.app.node_linking import encoder_hardware_profile, set_local_node_name
         from webui.app.settings import save_settings
 
@@ -213,7 +249,7 @@ class WorkerRuntime:
         profile = encoder_hardware_profile(force=True)
         self.log(
             f"Settings saved: {config['hardware_slots']} encode slot(s), "
-            f"{FAMILY_LABELS[config['preferred_encoder_family']]}"
+            f"{FAMILY_LABELS[config['preferred_encoder_family']]}; GPU routes refreshed"
         )
         return profile
 
@@ -226,7 +262,7 @@ class WorkerRuntime:
                 local_node_overview,
             )
 
-            work = Path(str(self.config["work_dir"]))
+            work = Path(str(os.environ.get("TSD_WORKER_TEMP_DIR") or self.config["work_dir"]))
             usage = shutil.disk_usage(work)
             return {
                 "ok": not self.error,
@@ -252,9 +288,9 @@ class WorkerWindow:
         self.config = config
         self.root = tk.Tk()
         self.root.title(APP_NAME)
-        self.root.geometry("860x660")
-        self.root.minsize(720, 560)
-        self.root.configure(bg="#090d12")
+        self.root.geometry("940x800")
+        self.root.minsize(780, 690)
+        self.root.configure(bg="#080d13")
         self.root.protocol("WM_DELETE_WINDOW", self.hide)
         self.log_lines: list[str] = []
         self.runtime = WorkerRuntime(config, self.append_log)
@@ -273,21 +309,36 @@ class WorkerWindow:
     def _make_styles(self) -> None:
         style = self.ttk.Style(self.root)
         style.theme_use("clam")
-        style.configure("TFrame", background="#090d12")
-        style.configure("Card.TFrame", background="#111821", relief="flat")
-        style.configure("TLabel", background="#090d12", foreground="#edf6f8", font=("Segoe UI", 10))
-        style.configure("Muted.TLabel", foreground="#91a0aa", font=("Segoe UI", 9))
-        style.configure("Card.TLabel", background="#111821", foreground="#edf6f8", font=("Segoe UI", 10))
-        style.configure("CardTitle.TLabel", background="#111821", foreground="#edf6f8", font=("Segoe UI Semibold", 12))
+        canvas = "#080d13"
+        surface = "#111a24"
+        field = "#0b131c"
+        border = "#2a3a49"
+        text = "#f2f7f8"
+        muted = "#a8b6c2"
+        accent = "#4dd4e4"
+        self.root.option_add("*TCombobox*Listbox.background", field)
+        self.root.option_add("*TCombobox*Listbox.foreground", text)
+        self.root.option_add("*TCombobox*Listbox.selectBackground", "#1e7180")
+        self.root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+        style.configure("TFrame", background=canvas)
+        style.configure("Card.TFrame", background=surface, relief="flat")
+        style.configure("TLabel", background=canvas, foreground=text, font=("Segoe UI", 10))
+        style.configure("Muted.TLabel", background=canvas, foreground=muted, font=("Segoe UI", 9))
+        style.configure("Card.TLabel", background=surface, foreground=text, font=("Segoe UI", 10))
+        style.configure("CardMuted.TLabel", background=surface, foreground=muted, font=("Segoe UI", 9))
+        style.configure("CardTitle.TLabel", background=surface, foreground="#ffffff", font=("Segoe UI Semibold", 12))
         style.configure("Hero.TLabel", foreground="#ffffff", font=("Segoe UI Semibold", 19))
-        style.configure("Status.TLabel", foreground="#55d9e8", font=("Segoe UI Semibold", 10))
-        style.configure("TButton", background="#1a2730", foreground="#e9f7f9", borderwidth=0, padding=(12, 8), font=("Segoe UI Semibold", 9))
-        style.map("TButton", background=[("active", "#263844")])
-        style.configure("Accent.TButton", background="#46cede", foreground="#061014", padding=(14, 9))
-        style.map("Accent.TButton", background=[("active", "#70e0eb")])
-        style.configure("TEntry", fieldbackground="#0b1118", foreground="#edf6f8", insertcolor="#edf6f8", bordercolor="#26323c", padding=8)
-        style.configure("TCombobox", fieldbackground="#0b1118", background="#0b1118", foreground="#edf6f8", arrowcolor="#9fadb5", padding=7)
-        style.configure("Horizontal.TProgressbar", background="#46cede", troughcolor="#1a232b", bordercolor="#1a232b", lightcolor="#46cede", darkcolor="#46cede")
+        style.configure("Status.TLabel", foreground=accent, font=("Segoe UI Semibold", 10))
+        style.configure("TButton", background="#1b2a36", foreground=text, borderwidth=1, bordercolor=border, padding=(12, 8), font=("Segoe UI Semibold", 9))
+        style.map("TButton", background=[("active", "#263b49"), ("pressed", "#15222d")], foreground=[("disabled", "#6f7e89")])
+        style.configure("Accent.TButton", background=accent, foreground="#051014", bordercolor=accent, padding=(14, 9))
+        style.map("Accent.TButton", background=[("active", "#7ae4ee"), ("pressed", "#32b9ca")], foreground=[("disabled", "#53666b")])
+        style.configure("TEntry", fieldbackground=field, foreground=text, insertcolor=text, bordercolor=border, lightcolor=border, darkcolor=border, padding=8)
+        style.configure("TCombobox", fieldbackground=field, background=field, foreground=text, arrowcolor="#b9c8d0", bordercolor=border, lightcolor=border, darkcolor=border, padding=7)
+        style.map("TCombobox", fieldbackground=[("readonly", field), ("disabled", "#101720")], foreground=[("readonly", text), ("disabled", "#74838e")], selectbackground=[("readonly", field)], selectforeground=[("readonly", text)])
+        style.configure("TCheckbutton", background=surface, foreground=text, indicatorbackground=field, indicatorforeground=accent, font=("Segoe UI", 10))
+        style.map("TCheckbutton", background=[("active", surface)], foreground=[("disabled", "#74838e")])
+        style.configure("Horizontal.TProgressbar", background=accent, troughcolor="#1a2630", bordercolor="#1a2630", lightcolor=accent, darkcolor=accent)
 
     def _card(self, parent, column: int, row: int, title: str, *, columnspan: int = 1):
         frame = self.ttk.Frame(parent, style="Card.TFrame", padding=16)
@@ -309,17 +360,17 @@ class WorkerWindow:
         grid.pack(fill="both", expand=True)
         grid.columnconfigure(0, weight=1)
         grid.columnconfigure(1, weight=1)
-        grid.rowconfigure(2, weight=1)
+        grid.rowconfigure(3, weight=1)
 
         pairing = self._card(grid, 0, 0, "Pair this worker")
         self.pairing_var = tk.StringVar(value="Starting…")
         ttk.Label(pairing, textvariable=self.pairing_var, style="Card.TLabel", font=("Consolas", 23, "bold")).grid(column=0, row=1, sticky="w")
         self.pair_expiry = tk.StringVar(value="")
-        ttk.Label(pairing, textvariable=self.pair_expiry, style="Card.TLabel", foreground="#91a0aa").grid(column=0, row=2, sticky="w", pady=(2, 10))
+        ttk.Label(pairing, textvariable=self.pair_expiry, style="CardMuted.TLabel").grid(column=0, row=2, sticky="w", pady=(2, 10))
         ttk.Button(pairing, text="Copy code", command=self.copy_pairing).grid(column=0, row=3, sticky="w")
         ttk.Button(pairing, text="New code", command=self.new_pairing).grid(column=1, row=3, sticky="w", padx=(8, 0))
         self.controller_var = tk.StringVar(value="Not paired yet")
-        ttk.Label(pairing, textvariable=self.controller_var, style="Card.TLabel", foreground="#91a0aa", wraplength=340).grid(column=0, row=4, columnspan=3, sticky="w", pady=(12, 0))
+        ttk.Label(pairing, textvariable=self.controller_var, style="CardMuted.TLabel", wraplength=360).grid(column=0, row=4, columnspan=3, sticky="w", pady=(12, 0))
 
         hardware = self._card(grid, 1, 0, "Compute detected")
         self.hardware_var = tk.StringVar(value="Detecting GPUs and encoders…")
@@ -331,25 +382,56 @@ class WorkerWindow:
         ttk.Label(settings, text="Name", style="Card.TLabel").grid(column=0, row=1, sticky="w", padx=(0, 10), pady=4)
         self.name_var = tk.StringVar(value=str(self.config["worker_name"]))
         ttk.Entry(settings, textvariable=self.name_var).grid(column=1, row=1, sticky="ew", pady=4)
-        ttk.Label(settings, text="Working folder", style="Card.TLabel").grid(column=0, row=2, sticky="w", padx=(0, 10), pady=4)
+        ttk.Label(settings, text="Job staging folder", style="Card.TLabel").grid(column=0, row=2, sticky="w", padx=(0, 10), pady=4)
         self.work_var = tk.StringVar(value=str(self.config["work_dir"]))
         ttk.Entry(settings, textvariable=self.work_var).grid(column=1, row=2, sticky="ew", pady=4)
         ttk.Button(settings, text="Browse", command=self.choose_work_dir).grid(column=2, row=2, padx=(8, 0))
         ttk.Button(settings, text="Open", command=self.open_work_dir).grid(column=3, row=2, padx=(8, 0))
-        ttk.Label(settings, text="Preferred compute", style="Card.TLabel").grid(column=0, row=3, sticky="w", padx=(0, 10), pady=4)
+        ttk.Label(settings, text="Incoming copies and encoded outputs are kept here per job.", style="CardMuted.TLabel").grid(column=1, row=3, columnspan=3, sticky="w", pady=(0, 5))
+        ttk.Label(settings, text="Encoder temp folder", style="Card.TLabel").grid(column=0, row=4, sticky="w", padx=(0, 10), pady=4)
+        self.scratch_var = tk.StringVar(value=str(self.config["scratch_dir"]))
+        ttk.Entry(settings, textvariable=self.scratch_var).grid(column=1, row=4, sticky="ew", pady=4)
+        ttk.Button(settings, text="Browse", command=self.choose_scratch_dir).grid(column=2, row=4, padx=(8, 0))
+        ttk.Button(settings, text="Open", command=self.open_scratch_dir).grid(column=3, row=4, padx=(8, 0))
+        ttk.Label(settings, text="HandBrake, FFmpeg, and pre-encode scratch files use this drive.", style="CardMuted.TLabel").grid(column=1, row=5, columnspan=3, sticky="w", pady=(0, 5))
+        ttk.Label(settings, text="Preferred compute", style="Card.TLabel").grid(column=0, row=6, sticky="w", padx=(0, 10), pady=4)
         self.family_var = tk.StringVar(value=FAMILY_LABELS[str(self.config["preferred_encoder_family"])])
         self.family_combo = ttk.Combobox(settings, textvariable=self.family_var, state="readonly", values=list(FAMILY_LABELS.values()))
-        self.family_combo.grid(column=1, row=3, sticky="ew", pady=4)
-        ttk.Label(settings, text="Parallel GPU jobs", style="Card.TLabel").grid(column=2, row=3, sticky="e", padx=(16, 8))
+        self.family_combo.grid(column=1, row=6, sticky="ew", pady=4)
+        ttk.Label(settings, text="Parallel GPU jobs", style="Card.TLabel").grid(column=2, row=6, sticky="e", padx=(16, 8))
         self.slots_var = tk.StringVar(value=str(self.config["hardware_slots"]))
-        ttk.Combobox(settings, textvariable=self.slots_var, state="readonly", width=4, values=[str(value) for value in range(1, 9)]).grid(column=3, row=3, sticky="e")
+        ttk.Combobox(settings, textvariable=self.slots_var, state="readonly", width=4, values=[str(value) for value in range(1, 9)]).grid(column=3, row=6, sticky="e")
         self.login_var = tk.BooleanVar(value=bool(self.config["run_at_login"]))
-        ttk.Checkbutton(settings, text="Start with Windows", variable=self.login_var).grid(column=1, row=4, sticky="w", pady=(8, 0))
-        ttk.Button(settings, text="Save settings", style="Accent.TButton", command=self.save_settings).grid(column=3, row=4, sticky="e", pady=(8, 0))
+        ttk.Checkbutton(settings, text="Start with Windows", variable=self.login_var).grid(column=1, row=7, sticky="w", pady=(8, 0))
+        ttk.Button(settings, text="Save settings", style="Accent.TButton", command=self.save_settings).grid(column=3, row=7, sticky="e", pady=(8, 0))
         self.settings_note = tk.StringVar(value="Smart jobs use this preference; explicitly locked presets stay unchanged.")
-        ttk.Label(settings, textvariable=self.settings_note, style="Card.TLabel", foreground="#91a0aa").grid(column=0, row=5, columnspan=4, sticky="w", pady=(8, 0))
+        ttk.Label(settings, textvariable=self.settings_note, style="CardMuted.TLabel").grid(column=0, row=8, columnspan=4, sticky="w", pady=(8, 0))
 
-        activity = self._card(grid, 0, 2, "Activity", columnspan=2)
+        routing = self._card(grid, 0, 2, "GPU routing", columnspan=2)
+        routing.columnconfigure(1, weight=1)
+        self.gpu_choice_map = {AUTO_GPU_LABEL: "auto"}
+        self.route_vars = {}
+        self.route_combos = {}
+        for row_index, (codec, label) in enumerate(GPU_ROUTE_LABELS.items(), start=1):
+            ttk.Label(routing, text=label, style="Card.TLabel").grid(column=0, row=row_index, sticky="w", padx=(0, 12), pady=3)
+            variable = tk.StringVar(value=AUTO_GPU_LABEL)
+            combo = ttk.Combobox(routing, textvariable=variable, state="readonly", values=[AUTO_GPU_LABEL])
+            combo.grid(column=1, row=row_index, sticky="ew", pady=3)
+            self.route_vars[codec] = variable
+            self.route_combos[codec] = combo
+        self.gpu_fallback_var = tk.BooleanVar(value=bool(self.config.get("gpu_fallback_any", True)))
+        ttk.Checkbutton(
+            routing,
+            text="If the assigned GPU is busy, use another compatible idle GPU",
+            variable=self.gpu_fallback_var,
+        ).grid(column=1, row=4, sticky="w", pady=(7, 2))
+        ttk.Label(
+            routing,
+            text="Routes apply per codec. One active encode reserves one adapter; incompatible GPUs are skipped.",
+            style="CardMuted.TLabel",
+        ).grid(column=0, row=5, columnspan=2, sticky="w", pady=(3, 0))
+
+        activity = self._card(grid, 0, 3, "Activity", columnspan=2)
         activity.columnconfigure(0, weight=1)
         activity.rowconfigure(3, weight=1)
         self.queue_var = tk.StringVar(value="No jobs running")
@@ -393,35 +475,57 @@ class WorkerWindow:
     def choose_work_dir(self) -> None:
         from tkinter import filedialog
 
-        selected = filedialog.askdirectory(initialdir=self.work_var.get(), title="Choose ByteSqueeze working folder")
+        selected = filedialog.askdirectory(initialdir=self.work_var.get(), title="Choose job staging folder")
         if selected:
             self.work_var.set(selected)
-            self.settings_note.set("Save and restart the worker to use the new working folder.")
+            self.settings_note.set("Save to use the new staging folder for newly received jobs.")
+
+    def choose_scratch_dir(self) -> None:
+        from tkinter import filedialog
+
+        selected = filedialog.askdirectory(initialdir=self.scratch_var.get(), title="Choose encoder temp folder")
+        if selected:
+            self.scratch_var.set(selected)
+            self.settings_note.set("Save to move new HandBrake and FFmpeg temp files to this folder.")
 
     def open_work_dir(self) -> None:
         path = Path(self.work_var.get())
         path.mkdir(parents=True, exist_ok=True)
         os.startfile(str(path))
 
+    def open_scratch_dir(self) -> None:
+        path = Path(self.scratch_var.get())
+        path.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(path))
+
     def save_settings(self) -> None:
         reverse = {label: key for key, label in FAMILY_LABELS.items()}
         old_work = str(self.config["work_dir"])
+        old_scratch = str(self.config["scratch_dir"])
+        reverse_routes = {label: token for label, token in self.gpu_choice_map.items()}
         self.config.update({
             "worker_name": self.name_var.get().strip() or default_config()["worker_name"],
             "work_dir": self.work_var.get().strip() or default_config()["work_dir"],
+            "scratch_dir": self.scratch_var.get().strip() or default_config()["scratch_dir"],
             "preferred_encoder_family": reverse.get(self.family_var.get(), "auto"),
             "hardware_slots": int(self.slots_var.get()),
             "run_at_login": bool(self.login_var.get()),
+            "gpu_routes": {
+                codec: reverse_routes.get(variable.get(), "auto")
+                for codec, variable in self.route_vars.items()
+            },
+            "gpu_fallback_any": bool(self.gpu_fallback_var.get()),
         })
         Path(str(self.config["work_dir"])).expanduser().mkdir(parents=True, exist_ok=True)
+        Path(str(self.config["scratch_dir"])).expanduser().mkdir(parents=True, exist_ok=True)
         save_config(self.config)
         try:
             set_run_at_login(bool(self.config["run_at_login"]))
         except OSError as exc:
             self.append_log(f"Could not update Windows startup: {exc}")
         self.runtime.apply_live_settings(self.config)
-        if old_work != str(self.config["work_dir"]):
-            self.settings_note.set("Saved. Restart ByteSqueeze Worker to change the working folder.")
+        if old_work != str(self.config["work_dir"]) or old_scratch != str(self.config["scratch_dir"]):
+            self.settings_note.set("Saved. New jobs will use the selected staging and temp folders.")
         else:
             self.settings_note.set("Settings saved and advertised to the controller.")
         self.refresh(force=True)
@@ -442,6 +546,30 @@ class WorkerWindow:
         gpu_lines = []
         for gpu in hardware.get("gpus") or []:
             gpu_lines.append(f"{gpu.get('name')}  ·  {gpu.get('driver_version') or 'driver detected'}")
+        route_choices = {AUTO_GPU_LABEL: "auto"}
+        family_by_vendor = {"nvidia": "nvenc", "amd": "vce", "intel": "qsv"}
+        for gpu in hardware.get("gpus") or []:
+            try:
+                index = int(gpu.get("index"))
+            except (TypeError, ValueError):
+                continue
+            family = str(gpu.get("encoder_family") or family_by_vendor.get(str(gpu.get("vendor") or ""), ""))
+            family_label = FAMILY_LABELS.get(family, family.upper() or "GPU")
+            label = f"GPU {index}: {gpu.get('name') or 'Display adapter'} — {family_label}"
+            route_choices[label] = f"gpu:{index}"
+        current_tokens = {
+            codec: next(
+                (token for label, token in self.gpu_choice_map.items() if label == variable.get()),
+                str((self.config.get("gpu_routes") or {}).get(codec) or "auto"),
+            )
+            for codec, variable in self.route_vars.items()
+        }
+        self.gpu_choice_map = route_choices
+        for codec, combo in self.route_combos.items():
+            combo.configure(values=list(route_choices))
+            token = current_tokens.get(codec, "auto")
+            label = next((name for name, value in route_choices.items() if value == token), AUTO_GPU_LABEL)
+            self.route_vars[codec].set(label)
         if not gpu_lines:
             vendors = hardware.get("gpu_vendors") or []
             gpu_lines.append("GPU: " + (", ".join(vendors) if vendors else "No supported GPU found"))

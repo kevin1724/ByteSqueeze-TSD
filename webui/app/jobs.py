@@ -46,6 +46,7 @@ from .config import (
 from .presets import load_preset_definition, resolve_preset_file_and_name
 from .settings import load_settings, normalize_output_container
 from .events import log_event
+from .process_utils import background_process_options
 from .storage_stats import get_summary as get_storage_summary, list_encodes, record_encode
 from .audio_optimization import (
     ffmpeg_audio_only_command,
@@ -59,9 +60,7 @@ from .audio_optimization import (
 
 def _process_group_options() -> dict:
     """Start encoders in their own group on both POSIX and Windows."""
-    if os.name == "nt":
-        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
-    return {"start_new_session": True}
+    return background_process_options(process_group=True)
 
 
 def _encoder_launch_command() -> tuple[list[str], str]:
@@ -124,6 +123,29 @@ HARDWARE_ENCODER_FAMILIES = frozenset({
 })
 QSV_ENCODERS = frozenset({"qsv_h264", "qsv_h265", "qsv_h265_10bit", "qsv_av1", "qsv_av1_10bit"})
 QSV_DECODE_SOURCE_CODECS = frozenset({"h264", "avc", "avc1", "hevc", "h265"})
+WINDOWS_GPU_ENCODERS = {
+    "qsv": {
+        ("h264", "8"): "qsv_h264",
+        ("h265", "8"): "qsv_h265",
+        ("h265", "10"): "qsv_h265_10bit",
+        ("av1", "8"): "qsv_av1",
+        ("av1", "10"): "qsv_av1_10bit",
+    },
+    "nvenc": {
+        ("h264", "8"): "nvenc_h264",
+        ("h265", "8"): "nvenc_h265",
+        ("h265", "10"): "nvenc_h265_10bit",
+        ("av1", "8"): "nvenc_av1",
+        ("av1", "10"): "nvenc_av1_10bit",
+    },
+    "vce": {
+        ("h264", "8"): "vce_h264",
+        ("h265", "8"): "vce_h265",
+        ("h265", "10"): "vce_h265_10bit",
+        ("av1", "8"): "vce_av1",
+        ("av1", "10"): "vce_av1_10bit",
+    },
+}
 QSV_DECODE_POSITIVE_RE = re.compile(
     r'(?:"(?:HWDecode|HardwareDecode)"\s*:\s*(?!0\b)-?\d+|"Decode"\s*:\s*true|using full QSV|QSV hardware decode and QSV hardware encode|decoder:\s*(?:qsv\s+)?(?:h264|hevc)(?:_qsv)?|(?:h264|hevc)_qsv-decoder)',
     re.IGNORECASE,
@@ -475,6 +497,7 @@ def _encoded_output_is_valid(path: str) -> tuple[bool, str]:
             errors="replace",
             timeout=20,
             check=False,
+            **background_process_options(),
         )
     except FileNotFoundError:
         return True, "ffprobe unavailable; size check passed"
@@ -618,24 +641,28 @@ def _maybe_update_output_estimate(job: dict, out_path: str, progress: float) -> 
     seen = job.get("estimate_checkpoints_seen")
     if not isinstance(seen, list):
         seen = []
-    next_checkpoint = next((point for point in OUTPUT_ESTIMATE_CHECKPOINTS if pct >= point and point not in seen), None)
+    eligible = [point for point in OUTPUT_ESTIMATE_CHECKPOINTS if pct >= point and point not in seen]
+    next_checkpoint = max(eligible) if eligible else None
     if next_checkpoint is None:
+        return False
+
+    try:
+        current_bytes = int(os.path.getsize(out_path))
+    except Exception:
+        # HandBrake may not have created/opened the output yet. Do not consume
+        # the checkpoint: the next progress update should retry it.
+        return False
+    if current_bytes <= 0:
         return False
 
     seen.append(next_checkpoint)
     job["estimate_checkpoints_seen"] = seen
-    try:
-        current_bytes = int(os.path.getsize(out_path))
-    except Exception:
-        return True
-    if current_bytes <= 0:
-        return True
-
     estimated = int(round(current_bytes / max(0.01, pct / 100.0)))
     job["estimated_out_bytes"] = estimated
     job["estimated_out_current_bytes"] = current_bytes
     job["estimated_out_checked_progress"] = round(pct, 2)
     job["estimated_out_updated_at"] = _now_ts()
+    job["estimated_out_source"] = "live"
     return True
 
 
@@ -1325,6 +1352,7 @@ def _apply_remote_upload_success(job_id: str, job: dict, result: dict, out_path:
         "out_bytes": controller_out_bytes,
         "saved_bytes": controller_saved,
         "estimated_out_bytes": controller_out_bytes,
+        "estimated_out_source": "actual",
     })
     if isinstance(result.get("storage_breakdown"), dict):
         job["storage_breakdown"] = result["storage_breakdown"]
@@ -1612,6 +1640,7 @@ def _source_video_probe(src_path: str) -> dict:
             errors="replace",
             timeout=30,
             check=False,
+            **background_process_options(),
         )
     except FileNotFoundError:
         return {"error": "ffprobe is not installed"}
@@ -1774,8 +1803,15 @@ def _qsv_adapter_index() -> int:
     return index if index >= 0 else 0
 
 
-def _set_preset_hardware_decode(data, preset_name: str, enabled: bool) -> bool:
-    """Set decode policy only on a preset object with a video encoder."""
+def _set_preset_hardware_decode(
+    data,
+    preset_name: str,
+    enabled: bool,
+    *,
+    video_encoder: str = "",
+    gpu_index: int | None = None,
+) -> bool:
+    """Set per-job decode, encoder, and adapter policy on one video preset."""
     candidates = []
 
     def walk(value):
@@ -1799,6 +1835,14 @@ def _set_preset_hardware_decode(data, preset_name: str, enabled: bool) -> bool:
         ),
         candidates[0],
     )
+    routed_encoder = str(video_encoder or "").strip().lower()
+    if routed_encoder:
+        selected["VideoEncoder"] = routed_encoder
+    if gpu_index is not None and routed_encoder.startswith(("nvenc_", "vce_")):
+        existing = str(selected.get("VideoOptionExtra") or "").strip()
+        parts = [part for part in existing.split(":") if part and not part.lower().startswith("gpu=")]
+        parts.append(f"gpu={max(0, int(gpu_index))}")
+        selected["VideoOptionExtra"] = ":".join(parts)
     # HandBrake 1.x represents QSV with bit 0x02. Using 1 here means
     # software decode support and HandBrake normalizes it back to zero for a
     # QSV source, even when VideoQSVDecode is true.
@@ -1817,16 +1861,25 @@ def _materialize_decode_policy_preset(
     preset_name: str,
     enabled: bool,
     work_dir: str = "",
+    *,
+    video_encoder: str = "",
+    gpu_index: int | None = None,
 ) -> tuple[str, str] | None:
-    """Create a job-scoped preset whose video section enforces decode policy."""
+    """Create a job-scoped preset that enforces decode and GPU routing."""
     try:
         with open(preset_file, "r", encoding="utf-8") as stream:
             data = json.load(stream)
-        if not _set_preset_hardware_decode(data, preset_name, enabled):
+        if not _set_preset_hardware_decode(
+            data,
+            preset_name,
+            enabled,
+            video_encoder=video_encoder,
+            gpu_index=gpu_index,
+        ):
             return None
         target_dir = work_dir or os.path.join(PRESET_WORK_DIR, str(job_id))
         os.makedirs(target_dir, exist_ok=True)
-        target = os.path.join(target_dir, "decode-policy-preset.json")
+        target = os.path.join(target_dir, "video-policy-preset.json")
         with open(target, "w", encoding="utf-8") as stream:
             json.dump(data, stream, ensure_ascii=False, indent=2)
         return target, target_dir
@@ -1991,6 +2044,127 @@ def _can_dispatch_job(job: dict | None, running_jobs: list[dict], hardware_limit
     return len(running_jobs) < max(1, int(hardware_limit or 1))
 
 
+def _windows_gpu_route_settings() -> tuple[dict[str, str], bool]:
+    """Return the desktop worker's persistent per-codec routing policy."""
+    if str(os.environ.get("TSD_WINDOWS_WORKER") or "").strip().lower() not in {
+        "1", "true", "yes", "on",
+    }:
+        return {}, True
+    try:
+        parsed = json.loads(os.environ.get("TSD_WINDOWS_GPU_ROUTES") or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        parsed = {}
+    routes = parsed if isinstance(parsed, dict) else {}
+    fallback = str(os.environ.get("TSD_WINDOWS_GPU_FALLBACK_ANY") or "1").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    return {
+        codec: str(routes.get(codec) or "auto").strip().lower()
+        for codec in ("av1", "h265", "h264")
+    }, fallback
+
+
+def _windows_route_encoder(family: str, codec: str, bit_depth: str, available: list[str]) -> str:
+    depth = "10" if str(bit_depth or "8") in {"10", "12"} else "8"
+    candidate = WINDOWS_GPU_ENCODERS.get(family, {}).get((codec, depth), "")
+    if candidate and (not available or candidate in available):
+        return candidate
+    return ""
+
+
+def _assign_windows_gpu_route(job: dict, running_jobs: list[dict]) -> tuple[bool, dict | None]:
+    """Reserve an idle compatible Windows adapter for one queued video job."""
+    routes, fallback_any = _windows_gpu_route_settings()
+    if not routes:
+        job.pop("gpu_route_assignment", None)
+        return True, None
+
+    method = _job_encode_metadata(job)
+    encoder = str(method.get("encoder") or _preset_video_encoder(job) or "").strip().lower()
+    if encoder:
+        method = _encoder_method_from_encoder(encoder, job.get("preset") or "")
+    codec = str(method.get("video_codec") or "").strip().lower()
+    if codec not in routes:
+        job.pop("gpu_route_assignment", None)
+        return True, None
+    bit_depth = str(method.get("bit_depth") or "8")
+
+    try:
+        from .node_linking import encoder_hardware_profile
+
+        hardware = encoder_hardware_profile()
+    except Exception:
+        hardware = {}
+    gpus = [row for row in hardware.get("gpus") or [] if isinstance(row, dict)]
+    compatible = []
+    family_seen: dict[str, int] = {}
+    for row in gpus:
+        family = str(row.get("encoder_family") or "").strip().lower()
+        vendor_index = family_seen.get(family, 0)
+        family_seen[family] = vendor_index + 1
+        routed_encoder = _windows_route_encoder(
+            family,
+            codec,
+            bit_depth,
+            [str(value) for value in row.get("encoders") or []],
+        )
+        if not routed_encoder:
+            continue
+        try:
+            index = int(row.get("index"))
+        except (TypeError, ValueError):
+            continue
+        compatible.append({
+            "key": f"gpu:{index}",
+            "index": index,
+            "vendor_index": vendor_index,
+            "name": str(row.get("name") or f"GPU {index}"),
+            "vendor": str(row.get("vendor") or ""),
+            "encoder_family": family,
+            "encoder": routed_encoder,
+            "codec": codec,
+            "bit_depth": bit_depth,
+            "memory_bytes": int(row.get("memory_bytes") or 0),
+        })
+    if not compatible:
+        job.pop("gpu_route_assignment", None)
+        return True, None
+
+    busy = {
+        str((row.get("gpu_route_assignment") or {}).get("key") or "")
+        for row in running_jobs
+        if isinstance(row.get("gpu_route_assignment"), dict)
+    }
+    requested = routes.get(codec, "auto")
+    requested_rows = [row for row in compatible if row["key"] == requested]
+    preferred_family = str(method.get("encoder_family") or "")
+    idle = [row for row in compatible if row["key"] not in busy]
+    choices = [row for row in requested_rows if row["key"] not in busy]
+    used_fallback = False
+    if not choices and (requested == "auto" or fallback_any):
+        choices = idle
+        used_fallback = requested != "auto"
+    if not choices:
+        return False, None
+    choices.sort(key=lambda row: (row["encoder_family"] != preferred_family, -row["memory_bytes"], row["index"]))
+    assignment = dict(choices[0])
+    assignment.update({
+        "requested": requested,
+        "fallback_used": used_fallback,
+        "assigned_at": _now_ts(),
+    })
+    job["gpu_route_assignment"] = assignment
+    routed = _encoder_method_from_encoder(assignment["encoder"], job.get("preset") or "")
+    job.update({
+        "encode_method": routed.get("encode_method"),
+        "encoder": routed.get("encoder"),
+        "video_codec": routed.get("video_codec"),
+        "encoder_family": routed.get("encoder_family"),
+        "bit_depth": routed.get("bit_depth"),
+    })
+    return True, assignment
+
+
 def _job_learning_metadata(metadata: dict | None) -> dict:
     """Keep the small, safe provenance needed for post-encode learning."""
     metadata = metadata if isinstance(metadata, dict) else {}
@@ -2069,6 +2243,8 @@ def save_jobs():
                 # NEW: persist ETA if present
                 "eta_seconds": j.get("eta_seconds"),
                 "estimated_out_bytes": j.get("estimated_out_bytes"),
+                "planned_out_bytes": j.get("planned_out_bytes"),
+                "estimated_out_source": j.get("estimated_out_source") or "",
                 "estimated_out_current_bytes": j.get("estimated_out_current_bytes"),
                 "estimated_out_checked_progress": j.get("estimated_out_checked_progress"),
                 "estimated_out_updated_at": j.get("estimated_out_updated_at"),
@@ -2235,6 +2411,8 @@ def load_jobs():
                 # NEW: restore ETA if it was saved
                 "eta_seconds": j.get("eta_seconds"),
                 "estimated_out_bytes": j.get("estimated_out_bytes"),
+                "planned_out_bytes": j.get("planned_out_bytes"),
+                "estimated_out_source": j.get("estimated_out_source") or "",
                 "estimated_out_current_bytes": j.get("estimated_out_current_bytes"),
                 "estimated_out_checked_progress": j.get("estimated_out_checked_progress"),
                 "estimated_out_updated_at": j.get("estimated_out_updated_at"),
@@ -2363,6 +2541,40 @@ def _queued_operations(metadata: dict | None = None, operations: dict | None = N
         "replace_source": bool(source.get("replace_source", job_type == "audio_only")),
     }
 
+
+def _planned_output_estimate(
+    metadata: dict | None,
+    operations: dict | None = None,
+) -> int | None:
+    """Return a real planner-provided output estimate, never a guessed ratio."""
+    metadata = metadata if isinstance(metadata, dict) else {}
+    operations = operations if isinstance(operations, dict) else {}
+    estimates = metadata.get("estimates") if isinstance(metadata.get("estimates"), dict) else {}
+    operation_estimate = operations.get("estimate") if isinstance(operations.get("estimate"), dict) else {}
+    candidates = (
+        metadata.get("estimated_output_bytes"),
+        metadata.get("estimated_out_bytes"),
+        estimates.get("estimated_output_bytes"),
+        operation_estimate.get("output_total_bytes"),
+        operation_estimate.get("estimated_output_bytes"),
+    )
+    for value in candidates:
+        try:
+            size = int(float(value or 0))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if size > 0:
+            return size
+
+    episode_plan = metadata.get("smart_episode_plan")
+    episode_plan = episode_plan if isinstance(episode_plan, dict) else {}
+    target = episode_plan.get("target") if isinstance(episode_plan.get("target"), dict) else {}
+    try:
+        target_mb = float(target.get("target_mb") or metadata.get("target_mb") or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        target_mb = 0.0
+    return int(round(target_mb * 1024.0 * 1024.0)) if target_mb > 0 else None
+
 def create_job(
     src: str,
     preset: str,
@@ -2419,6 +2631,7 @@ def create_job(
     )
     queued_encoding_policy = _normalize_encoding_policy(encoding_policy)
     method = _encode_metadata_from_extra_args(extra_args, preset, encode_metadata)
+    planned_out_bytes = _planned_output_estimate(metadata_source, queued_operations)
     normalized_bundle = _normalize_preset_bundle(preset_bundle) or snapshot_preset_bundle(preset)
     queued_preset_name = _queued_preset_display_name(
         preset,
@@ -2489,7 +2702,9 @@ def create_job(
         "pid": None,
         "progress": 0.0,
         "eta_seconds": None,  # if you already added ETA support
-        "estimated_out_bytes": None,
+        "estimated_out_bytes": planned_out_bytes,
+        "planned_out_bytes": planned_out_bytes,
+        "estimated_out_source": "planned" if planned_out_bytes else "",
         "estimated_out_current_bytes": None,
         "estimated_out_checked_progress": None,
         "estimated_out_updated_at": None,
@@ -2585,6 +2800,7 @@ def _apply_planned_preset(job: dict, plan: dict, *, user_edit: bool = False) -> 
         metadata,
         plan.get("operations") if isinstance(plan.get("operations"), dict) else job.get("operations"),
     )
+    planned_out_bytes = _planned_output_estimate(metadata, queued_operations)
     job.update({
         "preset": preset,
         "extra_args": str(plan.get("extra_args") or ""),
@@ -2598,6 +2814,13 @@ def _apply_planned_preset(job: dict, plan: dict, *, user_edit: bool = False) -> 
         "operations": queued_operations,
         "parent_job_id": str(plan.get("parent_job_id") or metadata.get("parent_job_id") or job.get("parent_job_id") or ""),
         "queued_preset_name": queued_preset_name,
+        "planned_out_bytes": planned_out_bytes,
+        "estimated_out_bytes": planned_out_bytes,
+        "estimated_out_source": "planned" if planned_out_bytes else "",
+        "estimated_out_current_bytes": None,
+        "estimated_out_checked_progress": None,
+        "estimated_out_updated_at": _now_ts() if planned_out_bytes else None,
+        "estimate_checkpoints_seen": [],
         **_job_learning_metadata(metadata),
     })
     if isinstance(plan.get("preset_adaptation"), dict):
@@ -2838,6 +3061,8 @@ def create_jobs_batch(files_and_presets: list[tuple[str, str]]) -> int:
             "progress": 0.0,
             "eta_seconds": None,  # remove if you don't use ETA
             "estimated_out_bytes": None,
+            "planned_out_bytes": None,
+            "estimated_out_source": "",
             "estimated_out_current_bytes": None,
             "estimated_out_checked_progress": None,
             "estimated_out_updated_at": None,
@@ -2905,6 +3130,7 @@ def create_remote_transfer_job(src: str, preset: str, transfer: dict, extra_args
     method = _encode_metadata_from_extra_args(extra_args, preset, encode_metadata or transfer.get("encode_metadata"))
     learning_metadata = encode_metadata or transfer.get("encode_metadata")
     queued_operations = _queued_operations(learning_metadata, operations)
+    planned_out_bytes = _planned_output_estimate(learning_metadata, queued_operations)
     learning_episode_plan = (
         (learning_metadata or {}).get("smart_episode_plan")
         if isinstance((learning_metadata or {}).get("smart_episode_plan"), dict)
@@ -2954,7 +3180,9 @@ def create_remote_transfer_job(src: str, preset: str, transfer: dict, extra_args
         "pid": None,
         "progress": 0.0,
         "eta_seconds": None,
-        "estimated_out_bytes": None,
+        "estimated_out_bytes": planned_out_bytes,
+        "planned_out_bytes": planned_out_bytes,
+        "estimated_out_source": "planned" if planned_out_bytes else "",
         "estimated_out_current_bytes": None,
         "estimated_out_checked_progress": None,
         "estimated_out_updated_at": None,
@@ -3085,6 +3313,8 @@ def list_jobs_for_api(*, include_log_tail: bool = False) -> list[dict]:
                 ),
                 "log_tail": "",
                 "estimated_out_bytes": j.get("estimated_out_bytes"),
+                "planned_out_bytes": j.get("planned_out_bytes"),
+                "estimated_out_source": j.get("estimated_out_source") or "",
                 "estimated_out_gb": round((int(j.get("estimated_out_bytes") or 0) / (1024**3)), 3)
                 if j.get("estimated_out_bytes") is not None
                 else None,
@@ -3193,6 +3423,8 @@ def _encode_history_job(row: dict, index: int) -> dict:
         # route cannot serve anymore.
         "has_log": False,
         "estimated_out_bytes": out_bytes or None,
+        "planned_out_bytes": None,
+        "estimated_out_source": "actual" if out_bytes else "",
         "estimated_out_gb": round(out_bytes / (1024**3), 3) if out_bytes else None,
         "estimated_out_current_bytes": None,
         "estimated_out_checked_progress": None,
@@ -3375,6 +3607,7 @@ def _run_audio_only_job(
         job["out_bytes"] = output_total
         job["saved_bytes"] = max(0, input_total - output_total)
         job["estimated_out_bytes"] = output_total
+        job["estimated_out_source"] = "actual"
 
         if remote_transfer:
             transfer.update({"local_out": temp_out, "work_dir": transfer_work_dir, "status": "uploading"})
@@ -3510,7 +3743,11 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
     job["saved_bytes"] = None
     job["out_path"] = None
     job["is_hdr"] = bool(job.get("is_hdr", False) or _looks_like_hdr_path(display_src_path))
-    job["estimated_out_bytes"] = None
+    # Keep the planner's estimate visible while HandBrake starts. A live
+    # projection replaces it once the output file has measurable bytes.
+    planned_out_bytes = job.get("planned_out_bytes")
+    job["estimated_out_bytes"] = planned_out_bytes
+    job["estimated_out_source"] = "planned" if planned_out_bytes else ""
     job["estimated_out_current_bytes"] = None
     job["estimated_out_checked_progress"] = None
     job["estimated_out_updated_at"] = None
@@ -3741,6 +3978,14 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
             source_video.get("fps"),
         )
     selected_encoder = _selected_video_encoder(job, preset_file, preset_name)
+    gpu_assignment = job.get("gpu_route_assignment") if isinstance(job.get("gpu_route_assignment"), dict) else {}
+    routed_encoder = str(gpu_assignment.get("encoder") or "").strip().lower()
+    if routed_encoder:
+        selected_encoder = routed_encoder
+        # HandBrake applies CLI values after imported preset values. Appending
+        # the route keeps any user's quality/filter arguments intact while
+        # making only the video encoder follow this worker's routing policy.
+        launch_extra_args = (launch_extra_args + " --encoder " + shlex.quote(routed_encoder)).strip()
     try:
         preset_definition = load_preset_definition(preset_file, preset_name)
     except Exception:
@@ -3776,6 +4021,12 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
         preset_name,
         hardware_decode["enabled"],
         preset_work_dir,
+        video_encoder=routed_encoder,
+        gpu_index=(
+            0
+            if str(gpu_assignment.get("encoder_family") or "") == "nvenc"
+            else int(gpu_assignment.get("vendor_index") or 0)
+        ) if routed_encoder.startswith(("nvenc_", "vce_")) else None,
     )
     if controlled_preset:
         preset_file, preset_work_dir = controlled_preset
@@ -3836,7 +4087,11 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
     env["HB_VIDEO_ENCODER"] = selected_encoder or "unknown"
     env["HB_SOURCE_RESOLUTION"] = source_resolution_label
     env["HB_TARGET_RESOLUTION"] = target_resolution_label
-    qsv_adapter = _qsv_adapter_index()
+    qsv_adapter = (
+        int(gpu_assignment.get("vendor_index") or 0)
+        if str(gpu_assignment.get("encoder_family") or "") == "qsv"
+        else _qsv_adapter_index()
+    )
     qsv_render_device = str(os.environ.get("TSD_QSV_RENDER_DEVICE") or "/dev/dri/renderD128")
     qsv_va_driver = str(os.environ.get("LIBVA_DRIVER_NAME") or "iHD")
     qsv_job = selected_encoder.startswith("qsv_") or hardware_decode["enabled"]
@@ -3847,6 +4102,16 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
         job["qsv_adapter"] = qsv_adapter
         job["qsv_render_device"] = qsv_render_device
         job["qsv_va_driver"] = qsv_va_driver
+    routed_family = str(gpu_assignment.get("encoder_family") or "")
+    routed_vendor_index = int(gpu_assignment.get("vendor_index") or 0) if gpu_assignment else 0
+    if routed_family == "nvenc":
+        # Expose only the chosen physical NVIDIA adapter. It becomes logical
+        # gpu=0 inside HandBrake, avoiding ambiguous adapter ordering.
+        env["CUDA_VISIBLE_DEVICES"] = str(routed_vendor_index)
+        env["NVIDIA_VISIBLE_DEVICES"] = str(routed_vendor_index)
+    elif routed_family == "vce":
+        env["GPU_DEVICE_ORDINAL"] = str(routed_vendor_index)
+        env["HIP_VISIBLE_DEVICES"] = str(routed_vendor_index)
     episode_plan = job.get("smart_episode_plan") if isinstance(job.get("smart_episode_plan"), dict) else {}
     episode_source = episode_plan.get("source") if isinstance(episode_plan.get("source"), dict) else {}
     episode_target = episode_plan.get("target") if isinstance(episode_plan.get("target"), dict) else {}
@@ -3883,6 +4148,15 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
         f"[ByteSqueeze] Selected QSV adapter: {qsv_adapter}\n"
         if qsv_job else ""
     )
+    gpu_route_log = ""
+    if gpu_assignment:
+        route_note = " (compatible fallback)" if gpu_assignment.get("fallback_used") else ""
+        gpu_route_log = (
+            f"[ByteSqueeze] GPU route: {gpu_assignment.get('codec', '').upper()} -> "
+            f"GPU {gpu_assignment.get('index')} {gpu_assignment.get('name')}"
+            f" [{gpu_assignment.get('encoder_family')}]"
+            f"{route_note}\n"
+        )
 
     # Spawn the Docker shell runner or the native Windows runner. Both consume
     # the exact same snapshotted environment contract.
@@ -3904,6 +4178,7 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
             f"{smart_episode_log}"
             f"{frame_rate_log}"
             f"{qsv_diagnostics_log}"
+            f"{gpu_route_log}"
             f"[ByteSqueeze] Preset decode policy: {preset_decode_policy}\n"
             f"[ByteSqueeze] Encoder launch: {launch_label}\n"
             f"[ByteSqueeze] Preset file: {preset_file}\n"
@@ -4054,6 +4329,7 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
                 out_bytes = int(os.path.getsize(out_path))
                 job["out_bytes"] = out_bytes
                 job["estimated_out_bytes"] = out_bytes
+                job["estimated_out_source"] = "actual"
 
                 src_bytes = job.get("src_bytes")
                 try:
@@ -4401,7 +4677,10 @@ def dispatcher_loop():
                         for job_id in RUNNING_JOB_THREADS
                         if job_id in jobs
                     ]
-                    if next_job and _can_dispatch_job(
+                    route_available = True
+                    if next_job:
+                        route_available, _assignment = _assign_windows_gpu_route(next_job, running_jobs)
+                    if next_job and route_available and _can_dispatch_job(
                         next_job,
                         running_jobs,
                         _hardware_transcode_limit(job=next_job),

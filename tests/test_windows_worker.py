@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,8 @@ from unittest import mock
 from worker import encode_runner
 from worker.windows_app import configure_environment, default_config
 from webui.app import node_linking
+from webui.app import jobs
+from webui.app.process_utils import background_process_options
 
 
 class WindowsEncodeRunnerTests(unittest.TestCase):
@@ -75,13 +78,90 @@ class WindowsHardwareInventoryTests(unittest.TestCase):
         config = default_config()
         with tempfile.TemporaryDirectory() as tempdir:
             config["work_dir"] = str(Path(tempdir) / "jobs")
+            config["scratch_dir"] = str(Path(tempdir) / "scratch")
             config["preferred_encoder_family"] = "nvenc"
+            config["gpu_routes"] = {"av1": "gpu:0", "h265": "gpu:1", "h264": "auto"}
             with mock.patch.dict(os.environ, {}, clear=False):
                 configure_environment(config)
                 self.assertEqual(os.environ["TSD_WORKER_MODE"], "1")
                 self.assertEqual(os.environ["TSD_PREFERRED_ENCODER_FAMILY"], "nvenc")
                 self.assertIn("vce", os.environ["TSD_ENCODER_FAMILIES"])
                 self.assertTrue(Path(os.environ["TSD_WORKER_TEMP_DIR"]).is_dir())
+                self.assertTrue(Path(os.environ["TSD_WORKER_SCRATCH_DIR"]).is_dir())
+                self.assertEqual(os.environ["TEMP"], config["scratch_dir"])
+                self.assertEqual(json.loads(os.environ["TSD_WINDOWS_GPU_ROUTES"])["h265"], "gpu:1")
+
+    def test_background_windows_processes_never_create_a_console(self):
+        if os.name != "nt":
+            self.skipTest("Windows-only process flags")
+        options = background_process_options(process_group=True)
+        self.assertTrue(options["creationflags"] & subprocess.CREATE_NO_WINDOW)
+        self.assertTrue(options["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP)
+
+
+class WindowsGpuRoutingTests(unittest.TestCase):
+    HARDWARE = {
+        "gpus": [
+            {
+                "index": 0,
+                "name": "NVIDIA GeForce RTX 5080",
+                "vendor": "nvidia",
+                "encoder_family": "nvenc",
+                "memory_bytes": 16_000,
+                "encoders": ["nvenc_h265_10bit", "nvenc_av1_10bit"],
+            },
+            {
+                "index": 1,
+                "name": "AMD Radeon RX 9070 XT",
+                "vendor": "amd",
+                "encoder_family": "vce",
+                "memory_bytes": 16_000,
+                "encoders": ["vce_h265_10bit", "vce_av1_10bit"],
+            },
+        ]
+    }
+
+    def _environment(self, fallback: str = "1") -> dict[str, str]:
+        return {
+            "TSD_WINDOWS_WORKER": "1",
+            "TSD_WINDOWS_GPU_ROUTES": json.dumps({"av1": "gpu:0", "h265": "gpu:1", "h264": "auto"}),
+            "TSD_WINDOWS_GPU_FALLBACK_ANY": fallback,
+        }
+
+    def test_h265_route_changes_only_video_encoder_to_selected_amd_gpu(self):
+        job = {
+            "preset": "1080",
+            "encoder": "nvenc_h265_10bit",
+            "video_codec": "h265",
+            "encoder_family": "nvenc",
+            "bit_depth": "10",
+        }
+        with mock.patch.dict(os.environ, self._environment(), clear=False), mock.patch.object(
+            node_linking, "encoder_hardware_profile", return_value=self.HARDWARE
+        ):
+            available, assignment = jobs._assign_windows_gpu_route(job, [])
+        self.assertTrue(available)
+        self.assertEqual(assignment["key"], "gpu:1")
+        self.assertEqual(assignment["encoder"], "vce_h265_10bit")
+        self.assertEqual(job["encoder_family"], "vce")
+
+    def test_busy_specific_gpu_falls_back_to_other_compatible_idle_gpu(self):
+        job = {
+            "preset": "1080",
+            "encoder": "vce_h265_10bit",
+            "video_codec": "h265",
+            "encoder_family": "vce",
+            "bit_depth": "10",
+        }
+        running = [{"gpu_route_assignment": {"key": "gpu:1"}, "encoder": "vce_h265_10bit"}]
+        with mock.patch.dict(os.environ, self._environment(), clear=False), mock.patch.object(
+            node_linking, "encoder_hardware_profile", return_value=self.HARDWARE
+        ):
+            available, assignment = jobs._assign_windows_gpu_route(job, running)
+        self.assertTrue(available)
+        self.assertEqual(assignment["key"], "gpu:0")
+        self.assertTrue(assignment["fallback_used"])
+        self.assertEqual(assignment["encoder"], "nvenc_h265_10bit")
 
 
 if __name__ == "__main__":

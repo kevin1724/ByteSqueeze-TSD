@@ -16,6 +16,7 @@ import time
 from copy import deepcopy
 
 from .config import DATA_DIR
+from .process_utils import background_process_options
 
 
 AUDIO_CACHE_FILE = os.path.join(DATA_DIR.rstrip("/"), "audio_inventory_cache.json")
@@ -129,6 +130,7 @@ def _packet_sizes(path: str) -> dict[int, int]:
         encoding="utf-8",
         errors="replace",
         bufsize=1,
+        **background_process_options(),
     )
     try:
         assert process.stdout is not None
@@ -189,6 +191,7 @@ def _quick_audio_estimates(path: str, duration: float, stream_indexes: set[int])
             errors="replace",
             timeout=40,
             check=False,
+            **background_process_options(),
         )
         if result.returncode != 0:
             return {}
@@ -278,6 +281,7 @@ def scan_media(path: str, *, exact: bool = True, force: bool = False) -> dict:
         errors="replace",
         timeout=90,
         check=False,
+        **background_process_options(),
     )
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout or "ffprobe failed").strip()[:300])

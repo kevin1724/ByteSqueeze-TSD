@@ -94,8 +94,9 @@ class HeadlessWorkerServiceTests(unittest.TestCase):
                         "bit_depth": "10",
                         "smart_preset": True,
                         "smart_candidate_id": "balanced",
+                        "estimated_output_bytes": 5 * 1024 * 1024 * 1024,
                         "smart_episode_plan": {
-                            "target": {"width": 1920, "height": 1080},
+                            "target": {"width": 1920, "height": 1080, "target_mb": 5120},
                         },
                     },
                     dispatch_mode="auto",
@@ -120,6 +121,9 @@ class HeadlessWorkerServiceTests(unittest.TestCase):
                     queued["queued_preset_name"],
                     "Smart Balanced · H.265 10-bit · Intel QSV · 1080p",
                 )
+                self.assertEqual(queued["estimated_out_bytes"], 5 * 1024 * 1024 * 1024)
+                self.assertEqual(queued["planned_out_bytes"], 5 * 1024 * 1024 * 1024)
+                self.assertEqual(queued["estimated_out_source"], "planned")
                 self.assertEqual(jobs.get_next_auto_dispatch_job()[0], job_id)
 
                 # Simulate the incorrect label persisted by an older release.
@@ -144,6 +148,8 @@ class HeadlessWorkerServiceTests(unittest.TestCase):
                     queued["dispatch_plan"]["encoding_policy"]["output_container"],
                     "mp4",
                 )
+                self.assertEqual(queued["estimated_out_bytes"], 5 * 1024 * 1024 * 1024)
+                self.assertEqual(queued["estimated_out_source"], "planned")
                 self.assertEqual(jobs.get_next_auto_dispatch_job()[0], job_id)
 
                 claimed = jobs.claim_auto_dispatch_job(job_id, "worker-1", "Worker one")
@@ -166,6 +172,28 @@ class HeadlessWorkerServiceTests(unittest.TestCase):
             jobs.RUNNING_JOB_THREADS = original_threads
             jobs.JOBS_FILE = original_jobs_file
             jobs.queue_paused = original_queue_paused
+
+    def test_live_output_estimate_retries_until_output_exists(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            output = os.path.join(tempdir, "encode.tmp.mkv")
+            job = {
+                "estimated_out_bytes": 4096,
+                "planned_out_bytes": 4096,
+                "estimated_out_source": "planned",
+                "estimate_checkpoints_seen": [],
+            }
+
+            self.assertFalse(jobs._maybe_update_output_estimate(job, output, 25.0))
+            self.assertEqual(job["estimate_checkpoints_seen"], [])
+            self.assertEqual(job["estimated_out_bytes"], 4096)
+            self.assertEqual(job["estimated_out_source"], "planned")
+
+            with open(output, "wb") as handle:
+                handle.write(b"x" * 1024)
+            self.assertTrue(jobs._maybe_update_output_estimate(job, output, 25.0))
+            self.assertEqual(job["estimated_out_bytes"], 4096)
+            self.assertEqual(job["estimated_out_checked_progress"], 25.0)
+            self.assertEqual(job["estimated_out_source"], "live")
 
     def test_next_available_bypasses_pinned_local_only_for_another_node(self):
         original_jobs = jobs.jobs
@@ -443,7 +471,7 @@ class HeadlessWorkerServiceTests(unittest.TestCase):
         self.assertEqual(jobs._hardware_transcode_limit(job=stale_job), 3)
 
         health = self.client.get("/api/health").get_json()
-        self.assertEqual(health["release"], "2.11.2")
+        self.assertEqual(health["release"], "2.12.0")
         self.assertEqual(health["encoding_policy"]["hardware_transcode_concurrency"], 3)
         self.assertEqual(health["encoding_policy"]["output_container"], "mp4")
         self.assertTrue(health["encoding_policy"]["web_optimized"])

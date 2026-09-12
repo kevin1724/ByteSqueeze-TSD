@@ -18,6 +18,21 @@ from pathlib import Path
 TRUE_VALUES = {"1", "true", "yes", "on"}
 
 
+def _background_process_options() -> dict:
+    """Prevent HandBrake from flashing a console behind the tray app."""
+    if os.name != "nt":
+        return {}
+    flags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    options: dict = {"creationflags": flags}
+    startupinfo_type = getattr(subprocess, "STARTUPINFO", None)
+    if startupinfo_type is not None:
+        startupinfo = startupinfo_type()
+        startupinfo.dwFlags |= int(getattr(subprocess, "STARTF_USESHOWWINDOW", 0))
+        startupinfo.wShowWindow = int(getattr(subprocess, "SW_HIDE", 0))
+        options["startupinfo"] = startupinfo
+    return options
+
+
 def _emit(message: str = "") -> None:
     """Write a UTF-8-safe line even from a windowed PyInstaller executable."""
     line = f"{message}\n"
@@ -120,6 +135,7 @@ def _run(command: list[str]) -> int:
         encoding="utf-8",
         errors="replace",
         bufsize=1,
+        **_background_process_options(),
     )
     assert process.stdout is not None
     for line in process.stdout:

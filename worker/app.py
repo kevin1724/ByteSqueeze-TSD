@@ -52,7 +52,7 @@ from webui.app.presets import guess_preset_from_filename, load_preset_config
 from webui.app.settings import load_settings, normalize_output_container, save_settings
 
 
-WORKER_RELEASE = "2.11.2"
+WORKER_RELEASE = "2.12.0"
 
 
 def _public_encoding_policy() -> dict:
@@ -118,6 +118,10 @@ def _work_dir() -> str:
     return os.path.abspath(os.environ.get("TSD_WORKER_TEMP_DIR") or "/work/jobs")
 
 
+def _scratch_dir() -> str:
+    return os.path.abspath(os.environ.get("TSD_WORKER_SCRATCH_DIR") or _work_dir())
+
+
 def _pairing_ttl() -> int:
     try:
         value = int(os.environ.get("TSD_WORKER_PAIRING_TTL_SECONDS") or 3600)
@@ -151,6 +155,7 @@ def _print_startup_diagnostics(work_dir: str) -> None:
         f"[WORKER] work_dir={work_dir} free_bytes={int(usage.free)} total_bytes={int(usage.total)}",
         flush=True,
     )
+    print(f"[WORKER] encoder_temp_dir={_scratch_dir()}", flush=True)
     print(
         f"[WORKER] HandBrakeCLI={shutil.which('HandBrakeCLI') or 'NOT FOUND'} "
         f"ffprobe={shutil.which('ffprobe') or 'NOT FOUND'}",
@@ -270,6 +275,7 @@ def create_worker_app(*, announce_pairing: bool = True) -> Flask:
 
     @app.get("/api/health")
     def worker_health():
+        work_dir = _work_dir()
         usage = shutil.disk_usage(work_dir)
         summary = get_job_summary()
         return jsonify(
@@ -349,7 +355,8 @@ def create_worker_app(*, announce_pairing: bool = True) -> Flask:
         if not controller:
             return jsonify(error="unauthorized"), 401
         local = local_node_overview()
-        usage = shutil.disk_usage(work_dir)
+        current_work_dir = _work_dir()
+        usage = shutil.disk_usage(current_work_dir)
         discovery = node_discovery()
         return jsonify(
             ok=True,
@@ -364,7 +371,8 @@ def create_worker_app(*, announce_pairing: bool = True) -> Flask:
             capabilities=discovery.get("capabilities") or [],
             hardware=discovery.get("hardware") or {},
             paired_controllers=list_trusted_controllers_public(),
-            remote_transfer_temp_dir=work_dir,
+            remote_transfer_temp_dir=current_work_dir,
+            encoder_temp_dir=_scratch_dir(),
             work_free_bytes=int(usage.free),
             summary=get_job_summary(),
             jobs=list_jobs_for_api(include_log_tail=True),
@@ -419,6 +427,8 @@ def create_worker_app(*, announce_pairing: bool = True) -> Flask:
 
         count = 0
         skipped = []
+        current_work_dir = _work_dir()
+        os.makedirs(current_work_dir, exist_ok=True)
         for job in jobs_payload:
             if not isinstance(job, dict):
                 continue
@@ -435,7 +445,7 @@ def create_worker_app(*, announce_pairing: bool = True) -> Flask:
             if missing:
                 skipped.append({"path": src, "reason": f"missing transfer data: {', '.join(missing)}"})
                 continue
-            transfer["remote_temp_dir"] = work_dir
+            transfer["remote_temp_dir"] = current_work_dir
             preset = str(job.get("preset") or "auto").strip().lower()
             if preset not in {"auto", "1080", "4k"}:
                 preset = "auto"

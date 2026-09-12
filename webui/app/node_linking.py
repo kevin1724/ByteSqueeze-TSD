@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from .config import DATA_DIR
+from .process_utils import background_process_options
 
 
 NODE_LINK_FILE = os.path.join(DATA_DIR.rstrip("/"), "linked_nodes.json")
@@ -125,6 +126,7 @@ def _windows_gpu_inventory() -> list[dict]:
             errors="replace",
             timeout=12,
             check=False,
+            **background_process_options(),
         )
         payload = json.loads(result.stdout or "[]") if result.returncode == 0 else []
     except Exception:
@@ -200,6 +202,7 @@ def encoder_hardware_profile(*, force: bool = False) -> dict:
                     text=True,
                     timeout=5,
                     check=False,
+                    **background_process_options(),
                 )
                 if probe.returncode == 0 and "GPU" in (probe.stdout or ""):
                     vendors.add("nvidia")
@@ -228,6 +231,7 @@ def encoder_hardware_profile(*, force: bool = False) -> dict:
                     errors="replace",
                     timeout=12,
                     check=False,
+                    **background_process_options(),
                 )
                 help_text = f"{help_result.stdout}\n{help_result.stderr}".lower()
             except Exception:
