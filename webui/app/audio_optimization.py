@@ -19,8 +19,9 @@ from .config import DATA_DIR
 
 
 AUDIO_CACHE_FILE = os.path.join(DATA_DIR.rstrip("/"), "audio_inventory_cache.json")
-AUDIO_CACHE_SCHEMA = 1
+AUDIO_CACHE_SCHEMA = 2
 AUDIO_CACHE_LOCK = threading.RLock()
+QUICK_SAMPLE_WINDOW_SECONDS = 8.0
 LOSSLESS_CODECS = {"alac", "ape", "flac", "mlp", "truehd", "wavpack"}
 EFFICIENT_LOSSY_CODECS = {"aac", "ac3", "eac3", "mp3", "opus"}
 OBJECT_AUDIO_MARKERS = ("atmos", "dts:x", "dtsx", "object based", "object-based")
@@ -139,6 +140,82 @@ def _packet_sizes(path: str) -> dict[int, int]:
     return totals
 
 
+def _quick_audio_estimates(path: str, duration: float, stream_indexes: set[int]) -> dict[int, dict]:
+    """Estimate missing audio sizes from three short, seeked packet samples.
+
+    Interactive planners do not need a byte-perfect answer.  Sampling avoids a
+    second full read of a large NAS file while still measuring VBR/lossless
+    tracks from their real packets.  Failures deliberately fall through to the
+    metadata-only estimate so an optional size cannot block a job.
+    """
+    duration = max(0.0, _float(duration))
+    indexes = {int(index) for index in stream_indexes if int(index) >= 0}
+    if duration <= 0 or not indexes:
+        return {}
+
+    window = min(QUICK_SAMPLE_WINDOW_SECONDS, max(2.0, duration / 24.0))
+    if duration <= window * 3.0:
+        starts = [0.0]
+        window = duration
+    else:
+        starts = [
+            max(0.0, min(duration - window, duration * fraction))
+            for fraction in (0.12, 0.50, 0.82)
+        ]
+    intervals = ",".join(f"{start:.3f}%+{window:.3f}" for start in starts)
+    command = [
+        "ffprobe", "-v", "error", "-select_streams", "a",
+        "-read_intervals", intervals,
+        "-show_packets", "-show_entries", "packet=stream_index,size,duration_time",
+        "-of", "json", path,
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=40,
+            check=False,
+        )
+        if result.returncode != 0:
+            return {}
+        payload = json.loads(result.stdout or "{}")
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return {}
+
+    sampled_bytes: dict[int, int] = {}
+    sampled_seconds: dict[int, float] = {}
+    for packet in payload.get("packets") or []:
+        if not isinstance(packet, dict):
+            continue
+        index = _int(packet.get("stream_index"), -1)
+        size = max(0, _int(packet.get("size")))
+        if index not in indexes or size <= 0:
+            continue
+        sampled_bytes[index] = sampled_bytes.get(index, 0) + size
+        sampled_seconds[index] = sampled_seconds.get(index, 0.0) + max(
+            0.0, _float(packet.get("duration_time"))
+        )
+
+    estimates = {}
+    sampled_window_seconds = min(duration, window * len(starts))
+    for index, byte_count in sampled_bytes.items():
+        seconds = sampled_seconds.get(index) or sampled_window_seconds
+        if seconds <= 0:
+            continue
+        bitrate = int(round(byte_count * 8.0 / seconds))
+        size_bytes = int(round(bitrate * duration / 8.0))
+        if bitrate > 0 and size_bytes > 0:
+            estimates[index] = {
+                "bitrate": bitrate,
+                "size_bytes": size_bytes,
+                "sample_seconds": round(seconds, 3),
+            }
+    return estimates
+
+
 def _lossless(codec: str, profile: str) -> bool:
     codec = str(codec or "").lower()
     profile = str(profile or "").lower()
@@ -162,7 +239,7 @@ def _codec_label(codec: str, profile: str) -> str:
 
 
 def scan_media(path: str, *, exact: bool = True, force: bool = False) -> dict:
-    """Return a cached full stream inventory with exact packet sizes when asked."""
+    """Return a cached stream inventory, using short samples unless exact is required."""
     signature = _signature(path)
     key = _cache_key(signature)
     with AUDIO_CACHE_LOCK:
@@ -195,9 +272,41 @@ def scan_media(path: str, *, exact: bool = True, force: bool = False) -> dict:
         raise RuntimeError((result.stderr or result.stdout or "ffprobe failed").strip()[:300])
     payload = json.loads(result.stdout or "{}")
     raw_streams = payload.get("streams") if isinstance(payload.get("streams"), list) else []
-    packet_sizes = _packet_sizes(path) if exact else {}
     format_row = payload.get("format") if isinstance(payload.get("format"), dict) else {}
     duration = max(0.0, _float(format_row.get("duration")))
+    primary_streams = [
+        raw for raw in raw_streams
+        if isinstance(raw, dict) and str(raw.get("codec_type") or "").lower() in {"video", "audio"}
+    ]
+    missing_exact_sizes = [
+        raw for raw in primary_streams
+        if not _tag_number(
+            raw.get("tags") if isinstance(raw.get("tags"), dict) else {},
+            "NUMBER_OF_BYTES", "NUMBER_OF_BYTES-eng",
+        )
+    ]
+    # Container-provided track byte counts are already exact.  The old path
+    # performed a full packet walk before checking them, which was especially
+    # expensive over SMB.  Only exact callers with missing tags pay that cost.
+    packet_sizes = _packet_sizes(path) if exact and missing_exact_sizes else {}
+    sample_indexes = {
+        _int(raw.get("index"), -1)
+        for raw in raw_streams
+        if isinstance(raw, dict)
+        and str(raw.get("codec_type") or "").lower() == "audio"
+        and not _tag_number(
+            raw.get("tags") if isinstance(raw.get("tags"), dict) else {},
+            "NUMBER_OF_BYTES", "NUMBER_OF_BYTES-eng",
+        )
+        and not (
+            max(0, _int(raw.get("bit_rate")))
+            or _tag_number(
+                raw.get("tags") if isinstance(raw.get("tags"), dict) else {},
+                "BPS", "BPS-eng",
+            )
+        )
+    }
+    sampled_audio = _quick_audio_estimates(path, duration, sample_indexes) if not exact else {}
     ordinals: dict[str, int] = {}
     streams = []
     for raw in raw_streams:
@@ -213,8 +322,23 @@ def scan_media(path: str, *, exact: bool = True, force: bool = False) -> dict:
         bitrate = max(0, _int(raw.get("bit_rate"))) or _tag_number(tags, "BPS", "BPS-eng")
         tagged_size = _tag_number(tags, "NUMBER_OF_BYTES", "NUMBER_OF_BYTES-eng")
         packet_size = max(0, _int(packet_sizes.get(index)))
+        sampled = sampled_audio.get(index) if isinstance(sampled_audio.get(index), dict) else {}
+        sampled_size = max(0, _int(sampled.get("size_bytes")))
+        sampled_bitrate = max(0, _int(sampled.get("bitrate")))
+        if not bitrate and sampled_bitrate:
+            bitrate = sampled_bitrate
         estimated_size = int(bitrate * stream_duration / 8.0) if bitrate and stream_duration else 0
-        size_bytes = packet_size or tagged_size or estimated_size
+        size_bytes = packet_size or tagged_size or sampled_size or estimated_size
+        if packet_size:
+            size_source, size_accuracy = "packet_scan", 1.0
+        elif tagged_size:
+            size_source, size_accuracy = "container_tag", 1.0
+        elif sampled_size:
+            size_source, size_accuracy = "packet_sample", 0.8
+        elif estimated_size:
+            size_source, size_accuracy = "bitrate_estimate", 0.8
+        else:
+            size_source, size_accuracy = "unavailable", 0.0
         codec = str(raw.get("codec_name") or "unknown").strip().lower()
         profile = str(raw.get("profile") or "").strip()
         title = str(tags.get("title") or "").strip()
@@ -245,6 +369,8 @@ def scan_media(path: str, *, exact: bool = True, force: bool = False) -> dict:
             "forced": bool(disposition.get("forced")),
             "size_bytes": size_bytes,
             "size_exact": bool(packet_size or tagged_size),
+            "size_source": size_source,
+            "size_accuracy": size_accuracy,
             "object_audio": any(marker in searchable for marker in OBJECT_AUDIO_MARKERS),
             "object_audio_capable": object_audio_capable,
             "commentary": any(marker in title.lower() for marker in COMMENTARY_MARKERS),
@@ -260,6 +386,10 @@ def scan_media(path: str, *, exact: bool = True, force: bool = False) -> dict:
     total_bytes = max(0, _int(format_row.get("size"), signature["size"])) or signature["size"]
     known = sum(aggregate.values())
     aggregate["other_bytes"] = max(0, total_bytes - known)
+    primary_rows = [row for row in streams if row["type"] in {"video", "audio"}]
+    audio_rows = [row for row in streams if row["type"] == "audio"]
+    primary_sizes_exact = all(row.get("size_exact") for row in primary_rows)
+    audio_sizes_exact = all(row.get("size_exact") for row in audio_rows)
     inventory = {
         "schema": AUDIO_CACHE_SCHEMA,
         "path": path,
@@ -269,12 +399,16 @@ def scan_media(path: str, *, exact: bool = True, force: bool = False) -> dict:
         "total_bytes": total_bytes,
         "chapter_count": len(chapters),
         "streams": streams,
-        "audio_streams": [row for row in streams if row["type"] == "audio"],
+        "audio_streams": audio_rows,
         "video_streams": [row for row in streams if row["type"] == "video"],
         "subtitle_streams": [row for row in streams if row["type"] == "subtitle"],
         "attachment_streams": [row for row in streams if row["type"] == "attachment"],
         "aggregate": aggregate,
-        "packet_sizes_exact": bool(exact),
+        # Keep the legacy field for callers/cache checks. It now truthfully
+        # means every primary stream has an exact packet or container-tag size.
+        "packet_sizes_exact": bool(primary_sizes_exact),
+        "audio_sizes_exact": bool(audio_sizes_exact),
+        "audio_size_accuracy": 1.0 if audio_sizes_exact else (0.8 if all(row.get("size_bytes") for row in audio_rows) else 0.0),
         "scanned_at": time.time(),
     }
     with AUDIO_CACHE_LOCK:

@@ -154,6 +154,7 @@ class _AudioOptimizerSheetState extends State<AudioOptimizerSheet> {
     final estimate = asMap(_operations['estimate']);
     final warnings = asList(_operations['warnings']);
     final video = asList(_inventory['video_streams']).map(asMap).firstOrNull;
+    final audioSizesExact = _inventory['audio_sizes_exact'] == true;
     return Column(
       children: [
         Padding(
@@ -211,7 +212,9 @@ class _AudioOptimizerSheetState extends State<AudioOptimizerSheet> {
                         Row(children: [
                           Expanded(
                               child: _Estimate(
-                                  label: 'Current audio',
+                                  label: audioSizesExact
+                                      ? 'Current audio'
+                                      : 'Current audio (estimated)',
                                   value: formatBytes(
                                       estimate['current_audio_bytes']))),
                           const Icon(Icons.arrow_forward_rounded,

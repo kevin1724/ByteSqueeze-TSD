@@ -3581,7 +3581,10 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
     # a normal job without knowing which audio tracks its policy affects.
     job["phase"] = "scanning_audio"
     try:
-        source_inventory = scan_media(encode_src_path, exact=True)
+        # Stream metadata is authoritative for safety. Track sizes shown before
+        # the encode may be sampled estimates so a NAS file is not read twice
+        # before HandBrake/FFmpeg can start.
+        source_inventory = scan_media(encode_src_path, exact=False)
         operations = normalize_operations(job.get("operations"), source_inventory)
         job["audio_inventory"] = source_inventory
         job["operations"] = operations

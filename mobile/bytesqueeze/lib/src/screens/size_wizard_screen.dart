@@ -6,6 +6,25 @@ import '../app_controller.dart';
 import '../theme.dart';
 import '../widgets/common.dart';
 
+@visibleForTesting
+Map<String, dynamic> applySizeWizardOption(
+  Map<String, dynamic> current,
+  String key,
+  dynamic value,
+) {
+  final updated = Map<String, dynamic>.from(current)..[key] = value;
+  if (key == 'audio_mode') {
+    // Smart Presets safely begin with passthrough locked. Selecting another
+    // mode in this screen is an explicit per-job override, so clear the stale
+    // lock before the estimate request is sent back to the server.
+    if (value != 'copy') updated['smart_never_transcode_audio'] = false;
+    updated['ai_copy_audio'] = value == 'copy';
+    updated['smart_audio_strategy'] =
+        value == 'copy' ? 'copy' : (value == 'eac3' ? 'eac3_surround' : '');
+  }
+  return updated;
+}
+
 class SizeWizardScreen extends StatefulWidget {
   const SizeWizardScreen({
     super.key,
@@ -104,7 +123,7 @@ class _SizeWizardScreenState extends State<SizeWizardScreen> {
 
   void _setOption(String key, dynamic value) {
     setState(() {
-      _options[key] = value;
+      _options = applySizeWizardOption(_options, key, value);
       _dirty = true;
       _editRevision += 1;
     });
@@ -147,7 +166,9 @@ class _SizeWizardScreenState extends State<SizeWizardScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            learned ? 'Queued and saved as a Smart Preset preference.' : 'Queued. This source was already active, so learning was not duplicated.',
+            learned
+                ? 'Queued and saved as a Smart Preset preference.'
+                : 'Queued. This source was already active, so learning was not duplicated.',
           ),
         ),
       );
@@ -174,12 +195,10 @@ class _SizeWizardScreenState extends State<SizeWizardScreen> {
     final estimatedMb =
         (estimates['estimated_output_mb'] as num?)?.toDouble() ?? 0;
     final outputBytes = estimatedMb * 1024 * 1024;
-    final savedBytes = (sourceBytes - outputBytes)
-        .clamp(0, double.infinity)
-        .toDouble();
-    final savingsPercent = sourceBytes > 0
-        ? savedBytes / sourceBytes * 100
-        : 0.0;
+    final savedBytes =
+        (sourceBytes - outputBytes).clamp(0, double.infinity).toDouble();
+    final savingsPercent =
+        sourceBytes > 0 ? savedBytes / sourceBytes * 100 : 0.0;
     final encoderLabel =
         '${estimates['encoder_label'] ?? estimates['encoder'] ?? 'Smart encoder'}';
 
@@ -236,9 +255,8 @@ class _SizeWizardScreenState extends State<SizeWizardScreen> {
                     ),
                     trailing: IconButton(
                       tooltip: 'Restore Smart starting point',
-                      onPressed: _loading
-                          ? null
-                          : () => _load(smartStart: true),
+                      onPressed:
+                          _loading ? null : () => _load(smartStart: true),
                       icon: const Icon(Icons.restore_rounded),
                     ),
                   ),
@@ -268,8 +286,8 @@ class _SizeWizardScreenState extends State<SizeWizardScreen> {
                                 controller: _targetSize,
                                 keyboardType:
                                     const TextInputType.numberWithOptions(
-                                      decimal: true,
-                                    ),
+                                  decimal: true,
+                                ),
                                 onChanged: (_) => _targetChanged(),
                                 decoration: const InputDecoration(
                                   labelText: 'Target size',
@@ -429,7 +447,7 @@ class _SizeWizardScreenState extends State<SizeWizardScreen> {
                     onPressed: _loading
                         ? null
                         : () =>
-                              _load(smartStart: false, revision: _editRevision),
+                            _load(smartStart: false, revision: _editRevision),
                     icon: _loading
                         ? const SizedBox(
                             width: 17,
@@ -564,26 +582,26 @@ class _SizeWizardScreenState extends State<SizeWizardScreen> {
   }
 
   Widget _resultRow(String label, String value) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 5),
-    child: Row(
-      children: [
-        Expanded(
-          child: Text(
-            label,
-            style: const TextStyle(color: ByteSqueezeColors.muted),
-          ),
+        padding: const EdgeInsets.symmetric(vertical: 5),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                label,
+                style: const TextStyle(color: ByteSqueezeColors.muted),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Flexible(
+              child: Text(
+                value,
+                textAlign: TextAlign.right,
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
+          ],
         ),
-        const SizedBox(width: 12),
-        Flexible(
-          child: Text(
-            value,
-            textAlign: TextAlign.right,
-            style: const TextStyle(fontWeight: FontWeight.w700),
-          ),
-        ),
-      ],
-    ),
-  );
+      );
 }
 
 class _EstimateHero extends StatelessWidget {
@@ -675,7 +693,9 @@ class _EstimateHero extends StatelessWidget {
                       alignment: Alignment.centerRight,
                       child: Text(
                         ready ? formatBytes(outputBytes) : 'Calculating',
-                        style: Theme.of(context).textTheme.headlineSmall
+                        style: Theme.of(context)
+                            .textTheme
+                            .headlineSmall
                             ?.copyWith(color: ByteSqueezeColors.cyan),
                       ),
                     ),

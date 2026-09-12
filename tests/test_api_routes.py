@@ -535,6 +535,54 @@ class ApiRouteSmokeTests(unittest.TestCase):
         self.assertEqual(manual["inputs"]["target_mb"], 2048.0)
         self.assertEqual(manual["estimates"]["auto_target"]["mode"], "manual")
 
+    def test_size_wizard_keeps_an_explicit_manual_audio_choice(self):
+        media_path = os.path.join(TEST_MEDIA, "Manual.Audio.Choice.2026.mkv")
+        with open(media_path, "wb") as handle:
+            handle.write(b"wizard-source")
+        probe = {
+            "duration_sec": 5400.0,
+            "width": 1920,
+            "height": 1080,
+            "fps": 24000 / 1001,
+            "is_hdr": False,
+        }
+        with (
+            patch.object(app_routes.os.path, "getsize", return_value=12 * 1024**3),
+            patch.object(
+                app_routes,
+                "load_settings",
+                return_value={"cpu_profile": "i5-9500t", "cpu_speed_override": 1.0},
+            ),
+            patch.object(
+                app_routes,
+                "smart_learned_plan_defaults",
+                return_value={"sample_count": 0, "confidence": 0.0},
+            ),
+            patch.object(
+                app_routes,
+                "_history_prediction_for",
+                return_value={"available": False, "sample_count": 0},
+            ),
+        ):
+            plan = app_routes._wizard_plan(
+                {
+                    "src": media_path,
+                    "preset": "auto",
+                    "ai_mode": False,
+                    "audio_mode": "eac3",
+                    "smart_never_transcode_audio": True,
+                    "ai_copy_audio": True,
+                    "smart_audio_strategy": "copy",
+                },
+                probe_func=lambda _src: probe,
+            )
+        self.assertEqual(plan["options"]["audio_mode"], "eac3")
+        self.assertFalse(plan["options"]["smart_never_transcode_audio"])
+        self.assertFalse(plan["options"]["ai_copy_audio"])
+        self.assertEqual(plan["options"]["smart_audio_strategy"], "eac3_surround")
+        self.assertEqual(plan["extra_args"][plan["extra_args"].index("-E") + 1], "eac3")
+
+
     def test_queued_wizard_preferences_are_contextual_smart_defaults(self):
         hdr_context = {
             "source": {"kind": "show", "hdr": True, "resolution": "4k"},

@@ -1,8 +1,12 @@
+import json
 import os
 import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
+
+from webui.app import audio_optimization as audio_module
 
 from webui.app.audio_optimization import (
     ffmpeg_audio_only_command,
@@ -58,6 +62,126 @@ def inventory(*audio):
 
 
 class AudioOptimizationTests(unittest.TestCase):
+    def test_quick_audio_estimate_reads_only_short_audio_intervals(self):
+        packets = {
+            "packets": [
+                {"stream_index": 1, "size": "1000", "duration_time": "1.0"},
+                {"stream_index": 1, "size": "1000", "duration_time": "1.0"},
+                {"stream_index": 2, "size": "9999", "duration_time": "1.0"},
+            ]
+        }
+        completed = subprocess.CompletedProcess(
+            ["ffprobe"], 0, stdout=json.dumps(packets), stderr=""
+        )
+        with patch.object(
+            audio_module.subprocess, "run", return_value=completed
+        ) as probe:
+            result = audio_module._quick_audio_estimates("movie.mkv", 100.0, {1})
+        command = probe.call_args.args[0]
+        self.assertIn("-select_streams", command)
+        self.assertEqual(command[command.index("-select_streams") + 1], "a")
+        self.assertIn("-read_intervals", command)
+        self.assertEqual(result[1]["bitrate"], 8000)
+        self.assertEqual(result[1]["size_bytes"], 100000)
+
+    def test_fast_inventory_samples_missing_audio_size_without_full_packet_scan(self):
+        with tempfile.TemporaryDirectory(prefix="bytesqueeze-audio-fast-") as folder:
+            source_path = os.path.join(folder, "sample.mkv")
+            cache_path = os.path.join(folder, "cache.json")
+            with open(source_path, "wb") as stream:
+                stream.write(b"media")
+            metadata = {
+                "format": {
+                    "duration": "100.0",
+                    "size": "10000000",
+                    "format_name": "matroska",
+                },
+                "streams": [
+                    {
+                        "index": 0,
+                        "codec_type": "video",
+                        "codec_name": "hevc",
+                        "duration": "100.0",
+                    },
+                    {
+                        "index": 1,
+                        "codec_type": "audio",
+                        "codec_name": "truehd",
+                        "profile": "TrueHD",
+                        "channels": 8,
+                        "duration": "100.0",
+                    },
+                ],
+            }
+            completed = subprocess.CompletedProcess(
+                ["ffprobe"], 0, stdout=json.dumps(metadata), stderr=""
+            )
+            sampled = {
+                1: {
+                    "bitrate": 800000,
+                    "size_bytes": 10000000,
+                    "sample_seconds": 24.0,
+                }
+            }
+            with (
+                patch.object(audio_module, "AUDIO_CACHE_FILE", cache_path),
+                patch.object(audio_module.subprocess, "run", return_value=completed),
+                patch.object(
+                    audio_module, "_quick_audio_estimates", return_value=sampled
+                ) as quick,
+                patch.object(audio_module, "_packet_sizes") as full_scan,
+            ):
+                result = scan_media(source_path, exact=False, force=True)
+            full_scan.assert_not_called()
+            quick.assert_called_once()
+            track = result["audio_streams"][0]
+            self.assertEqual(track["size_bytes"], 10000000)
+            self.assertEqual(track["size_source"], "packet_sample")
+            self.assertEqual(track["size_accuracy"], 0.8)
+            self.assertFalse(track["size_exact"])
+
+    def test_exact_inventory_uses_container_sizes_without_packet_scan(self):
+        with tempfile.TemporaryDirectory(prefix="bytesqueeze-audio-tags-") as folder:
+            source_path = os.path.join(folder, "tagged.mkv")
+            cache_path = os.path.join(folder, "cache.json")
+            with open(source_path, "wb") as stream:
+                stream.write(b"media")
+            metadata = {
+                "format": {
+                    "duration": "100.0",
+                    "size": "9000000",
+                    "format_name": "matroska",
+                },
+                "streams": [
+                    {
+                        "index": 0,
+                        "codec_type": "video",
+                        "codec_name": "hevc",
+                        "tags": {"NUMBER_OF_BYTES": "8000000"},
+                    },
+                    {
+                        "index": 1,
+                        "codec_type": "audio",
+                        "codec_name": "eac3",
+                        "channels": 6,
+                        "tags": {"NUMBER_OF_BYTES-eng": "1000000"},
+                    },
+                ],
+            }
+            completed = subprocess.CompletedProcess(
+                ["ffprobe"], 0, stdout=json.dumps(metadata), stderr=""
+            )
+            with (
+                patch.object(audio_module, "AUDIO_CACHE_FILE", cache_path),
+                patch.object(audio_module.subprocess, "run", return_value=completed),
+                patch.object(audio_module, "_packet_sizes") as full_scan,
+            ):
+                result = scan_media(source_path, exact=True, force=True)
+            full_scan.assert_not_called()
+            self.assertTrue(result["packet_sizes_exact"])
+            self.assertTrue(result["audio_sizes_exact"])
+            self.assertEqual(result["audio_streams"][0]["size_source"], "container_tag")
+
     def test_preserve_is_safe_default_and_copies_every_track(self):
         source = inventory(
             {},

@@ -2451,6 +2451,10 @@ def _wizard_plan(
         raise ValueError("file already tagged -TSD, not queuing")
 
     options = _wizard_normalize_options(data)
+    manual_audio_override = (
+        "audio_mode" in data
+        and not _truthy(data.get("ai_mode"), options.get("ai_mode", False))
+    )
     effective_preset = options["preset"]
     if effective_preset == "auto":
         effective_preset = guess_preset_from_filename(base)
@@ -2560,6 +2564,23 @@ def _wizard_plan(
         )
     options["source_is_hdr"] = bool(info.get("is_hdr"))
     options["source_hdr_format"] = hdr_format
+    if manual_audio_override:
+        # A saved Smart profile may start with the safe passthrough guardrail,
+        # but choosing an audio mode in Size Wizard is an explicit per-job
+        # decision. Preserve it across estimate refreshes instead of silently
+        # restoring passthrough.
+        selected_audio_mode = _choice(
+            data.get("audio_mode"), WIZARD_AUDIO_MODES, options.get("audio_mode", "copy")
+        )
+        options["audio_mode"] = selected_audio_mode
+        options["ai_copy_audio"] = selected_audio_mode == "copy"
+        options["smart_audio_strategy"] = (
+            "copy"
+            if selected_audio_mode == "copy"
+            else ("eac3_surround" if selected_audio_mode == "eac3" else "")
+        )
+        if selected_audio_mode != "copy":
+            options["smart_never_transcode_audio"] = False
     options = _enforce_smart_guardrails(options)
     # AI and learned preferences can change codec, quality, encoder, or output
     # resolution. Recalculate automatic size from those final choices so every
@@ -11410,7 +11431,14 @@ def register_routes(app):
 
     def _audio_scan_response(path: str, payload: dict | None = None) -> dict:
         payload = payload if isinstance(payload, dict) else {}
-        inventory = scan_media(path, exact=True, force=_truthy(payload.get("force"), False))
+        # The planner needs stream identity and an actionable size estimate,
+        # not a blocking packet-perfect traversal of a multi-gigabyte file.
+        # Exact scans remain available to explicit callers and completion QA.
+        inventory = scan_media(
+            path,
+            exact=_truthy(payload.get("exact"), False),
+            force=_truthy(payload.get("force"), False),
+        )
         operations = payload.get("operations") if isinstance(payload.get("operations"), dict) else {}
         operations = dict(operations)
         if payload.get("audio_policy"):
@@ -11448,7 +11476,7 @@ def register_routes(app):
             raise ValueError("the media file no longer exists")
         if not is_allowed_path(path):
             raise ValueError("path not allowed")
-        inventory = scan_media(path, exact=True)
+        inventory = scan_media(path, exact=False)
         requested = data.get("operations") if isinstance(data.get("operations"), dict) else {}
         requested = dict(requested)
         requested.update({
