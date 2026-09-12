@@ -39,7 +39,7 @@ env:
   IMAGE_NAME: kevina1724/handbrake-tsd-helper
   WORKER_IMAGE_NAME: kevina1724/handbrake-tsd-worker
   CONTROLLER_VERSION: 3.25.0
-  WORKER_VERSION: 2.12.0
+  WORKER_VERSION: 2.12.1
 
 jobs:
   publish:

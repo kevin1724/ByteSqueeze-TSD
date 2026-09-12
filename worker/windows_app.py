@@ -8,6 +8,7 @@ worker modules; this file owns Windows paths, lifecycle, tray, and diagnostics.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import shutil
@@ -22,6 +23,7 @@ from pathlib import Path
 
 APP_NAME = "ByteSqueeze Worker"
 CONFIG_VERSION = 2
+FIREWALL_RULE_PREFIX = "ByteSqueeze Worker TCP"
 FAMILY_LABELS = {
     "auto": "Auto (best available)",
     "nvenc": "NVIDIA NVENC",
@@ -61,6 +63,7 @@ def default_config() -> dict:
         "gpu_fallback_any": True,
         "start_minimized": False,
         "run_at_login": False,
+        "network_setup_prompted": False,
     }
 
 
@@ -89,6 +92,7 @@ def load_config() -> dict:
         for codec in GPU_ROUTE_LABELS
     }
     config["gpu_fallback_any"] = bool(config.get("gpu_fallback_any", True))
+    config["network_setup_prompted"] = bool(config.get("network_setup_prompted", False))
     config["scratch_dir"] = str(config.get("scratch_dir") or (application_root() / "temp"))
     config["version"] = CONFIG_VERSION
     return config
@@ -154,7 +158,62 @@ def local_addresses(port: int) -> list[str]:
                 hosts.add(address)
     except OSError:
         pass
-    return [f"http://{host}:{port}" for host in sorted(hosts)] or [f"http://127.0.0.1:{port}"]
+    def route_priority(host: str) -> tuple[int, str]:
+        try:
+            address = ipaddress.ip_address(host)
+            if address.is_private and not address.is_link_local:
+                return (0, host)
+            if not address.is_link_local:
+                return (1, host)
+        except ValueError:
+            pass
+        return (2, host)
+
+    ordered = sorted(hosts, key=route_priority)
+    return [f"http://{host}:{port}" for host in ordered] or [f"http://127.0.0.1:{port}"]
+
+
+def windows_firewall_script(port: int) -> str:
+    """Build the narrowly scoped, idempotent private-LAN firewall rule."""
+    safe_port = max(1024, min(65535, int(port or 8082)))
+    name = f"{FIREWALL_RULE_PREFIX} {safe_port}"
+    return (
+        f"$rule=Get-NetFirewallRule -DisplayName '{name}' -ErrorAction SilentlyContinue;"
+        "if($rule){$rule|Remove-NetFirewallRule -ErrorAction Stop};"
+        f"New-NetFirewallRule -DisplayName '{name}' -Direction Inbound "
+        f"-Action Allow -Protocol TCP -LocalPort {safe_port} "
+        "-Profile Private,Domain -ErrorAction Stop|Out-Null"
+    )
+
+
+def request_windows_firewall_access(port: int) -> None:
+    """Ask Windows elevation once, then allow this worker on trusted LANs."""
+    if os.name != "nt":
+        return
+    import ctypes
+
+    parameters = subprocess.list2cmdline([
+        "-NoProfile",
+        "-NonInteractive",
+        "-WindowStyle",
+        "Hidden",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        windows_firewall_script(port),
+    ])
+    result = int(
+        ctypes.windll.shell32.ShellExecuteW(
+            None,
+            "runas",
+            "powershell.exe",
+            parameters,
+            None,
+            0,
+        )
+    )
+    if result <= 32:
+        raise OSError(f"Windows did not start the firewall setup (code {result})")
 
 
 def _format_bytes(value: int) -> str:
@@ -305,6 +364,8 @@ class WorkerWindow:
         self._start_tray()
         self.refresh(force=True)
         self.root.after(2500, self._poll)
+        if os.name == "nt" and not bool(self.config.get("network_setup_prompted")):
+            self.root.after(900, self._offer_network_access)
 
     def _make_styles(self) -> None:
         style = self.ttk.Style(self.root)
@@ -363,6 +424,7 @@ class WorkerWindow:
         grid.rowconfigure(3, weight=1)
 
         pairing = self._card(grid, 0, 0, "Pair this worker")
+        pairing.columnconfigure(0, weight=1)
         self.pairing_var = tk.StringVar(value="Starting…")
         ttk.Label(pairing, textvariable=self.pairing_var, style="Card.TLabel", font=("Consolas", 23, "bold")).grid(column=0, row=1, sticky="w")
         self.pair_expiry = tk.StringVar(value="")
@@ -371,6 +433,10 @@ class WorkerWindow:
         ttk.Button(pairing, text="New code", command=self.new_pairing).grid(column=1, row=3, sticky="w", padx=(8, 0))
         self.controller_var = tk.StringVar(value="Not paired yet")
         ttk.Label(pairing, textvariable=self.controller_var, style="CardMuted.TLabel", wraplength=360).grid(column=0, row=4, columnspan=3, sticky="w", pady=(12, 0))
+        self.worker_url_var = tk.StringVar(value=local_addresses(int(self.config["port"]))[0])
+        ttk.Label(pairing, textvariable=self.worker_url_var, style="Card.TLabel").grid(column=0, row=5, columnspan=3, sticky="w", pady=(10, 5))
+        ttk.Button(pairing, text="Copy worker URL", command=self.copy_worker_url).grid(column=0, row=6, sticky="w")
+        ttk.Button(pairing, text="Allow controller access", command=self.allow_controller_access).grid(column=1, row=6, columnspan=2, sticky="w", padx=(8, 0))
 
         hardware = self._card(grid, 1, 0, "Compute detected")
         self.hardware_var = tk.StringVar(value="Detecting GPUs and encoders…")
@@ -471,6 +537,38 @@ class WorkerWindow:
         self.root.clipboard_clear()
         self.root.clipboard_append(str(self.pairing.get("code") or ""))
         self.settings_note.set("Pairing code copied to the clipboard.")
+
+    def copy_worker_url(self) -> None:
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self.worker_url_var.get())
+        self.settings_note.set("Worker URL copied. Paste it into Settings → Linked Nodes.")
+
+    def allow_controller_access(self) -> None:
+        try:
+            request_windows_firewall_access(int(self.config["port"]))
+            self.settings_note.set("Approve the Windows prompt, then retry Pair and verify on the controller.")
+            self.append_log("Requested private-network firewall access for the controller")
+        except OSError as exc:
+            self.settings_note.set(f"Network access setup failed: {exc}")
+            self.append_log(f"Firewall setup failed: {exc}")
+
+    def _offer_network_access(self) -> None:
+        from tkinter import messagebox
+
+        self.config["network_setup_prompted"] = True
+        try:
+            save_config(self.config)
+        except OSError as exc:
+            self.append_log(f"Could not save network setup status: {exc}")
+        if messagebox.askyesno(
+            "Allow ByteSqueeze controller access?",
+            (
+                "The ByteSqueeze controller must reach this PC on TCP port "
+                f"{int(self.config['port'])}. Allow the worker through Windows "
+                "Firewall on private and domain networks?"
+            ),
+        ):
+            self.allow_controller_access()
 
     def choose_work_dir(self) -> None:
         from tkinter import filedialog

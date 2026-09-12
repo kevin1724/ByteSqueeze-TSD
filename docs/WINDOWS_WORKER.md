@@ -10,9 +10,11 @@ Docker worker.
 1. Download `ByteSqueezeWorker.exe` from the project release and run it.
 2. Allow the app through Windows Firewall on private networks when prompted.
 3. In the main ByteSqueeze server, open **Settings → Linked Nodes**.
-4. Add the worker URL shown in the app, enter its one-time pairing code, and
+4. Approve the one-time Windows Firewall prompt. You can reopen it later with
+   **Allow controller access** in the worker window.
+5. Copy the worker URL shown in the app, enter its one-time pairing code, and
    pair it.
-5. Close the window when finished. The worker remains visible in the Windows
+6. Close the window when finished. The worker remains visible in the Windows
    notification area and continues accepting jobs.
 
 Run the executable from a local Windows folder. Windows can block unsigned
@@ -76,7 +78,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-windows-worker.ps1 -Use
 ## Troubleshooting
 
 - The worker listens on TCP port `8082` by default. Allow that port on private
-  networks and do not expose it directly to the public internet.
+  networks and do not expose it directly to the public internet. If pairing
+  stays on Discovering, click **Allow controller access**, approve Windows,
+  and retry with the exact URL displayed in the worker.
 - Pairing codes expire after one hour. Generate a new code from the window or
   notification-area menu.
 - The Compute panel shows the GPU driver, encoder families, CPU thread count,

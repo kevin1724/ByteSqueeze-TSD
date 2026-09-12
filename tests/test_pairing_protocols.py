@@ -66,6 +66,27 @@ class NodePairingProtocolTests(unittest.TestCase):
         pairing_body = request_json.call_args_list[1].kwargs["body"]
         self.assertEqual(pairing_body["code"], "AbC_def-12")
 
+    def test_legacy_worker_without_discovery_still_pairs(self):
+        responses = [
+            RuntimeError("HTTP Error 404: Not Found"),
+            {"token": "worker-token", "recovery_token": "recovery", "worker_id": "legacy-worker"},
+        ]
+        with mock.patch.object(node_linking, "_request_json", side_effect=responses):
+            paired = node_linking.pair_worker("http://legacy-worker:8080", "AbC_def-12")
+        self.assertEqual(paired["id"], "legacy-worker")
+
+    def test_unreachable_worker_reports_windows_firewall_repair(self):
+        with (
+            mock.patch.object(
+                node_linking,
+                "_request_json",
+                side_effect=RuntimeError("node request failed: timed out"),
+            ) as request_json,
+            self.assertRaisesRegex(RuntimeError, "Allow controller access"),
+        ):
+            node_linking.pair_worker("http://192.168.1.50:8082", "ABCDE-FGHJK")
+        self.assertEqual(request_json.call_count, 1)
+
     def test_valid_pairing_can_rotate_a_cloned_worker_identity_once(self):
         old_worker_id = node_linking.local_node_info()["id"]
         node_linking._mutate_state(

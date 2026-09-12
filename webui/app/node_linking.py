@@ -1027,9 +1027,17 @@ def pair_worker(
     local = local_node_info()
     try:
         discovery = _request_json(f"{url}/api/node/discovery", timeout=5, retries=1)
-    except RuntimeError:
-        # Protocol v1 workers predate discovery and remain pairable.
-        discovery = {"protocol_version": 1, "capabilities": []}
+    except RuntimeError as exc:
+        message = str(exc)
+        if "404" in message or "not found" in message.lower():
+            # Protocol v1 workers predate discovery and remain pairable.
+            discovery = {"protocol_version": 1, "capabilities": []}
+        else:
+            raise RuntimeError(
+                f"Cannot reach the worker at {url}. On the Windows Worker, "
+                "click Allow controller access and approve the Windows Firewall prompt, "
+                f"then retry. Details: {message}"
+            ) from exc
     request_id = uuid.uuid4().hex
     discovered_worker_id = str(discovery.get("node_id") or discovery.get("worker_id") or "").strip()
     existing_discovered = get_node_private(discovered_worker_id) if discovered_worker_id else None

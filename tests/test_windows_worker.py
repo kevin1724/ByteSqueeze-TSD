@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from worker import encode_runner
-from worker.windows_app import configure_environment, default_config
+from worker.windows_app import configure_environment, default_config, local_addresses, windows_firewall_script
 from webui.app import node_linking
 from webui.app import jobs
 from webui.app.process_utils import background_process_options
@@ -63,6 +63,22 @@ class WindowsEncodeRunnerTests(unittest.TestCase):
 
 
 class WindowsHardwareInventoryTests(unittest.TestCase):
+    def test_worker_url_prefers_private_lan_over_virtual_network(self):
+        addresses = [
+            (None, None, None, None, ("100.96.1.71", 0)),
+            (None, None, None, None, ("192.168.12.246", 0)),
+        ]
+        with mock.patch("worker.windows_app.socket.getaddrinfo", return_value=addresses):
+            urls = local_addresses(8082)
+        self.assertEqual(urls[0], "http://192.168.12.246:8082")
+
+    def test_firewall_rule_is_limited_to_worker_port_and_trusted_networks(self):
+        script = windows_firewall_script(8082)
+        self.assertIn("-LocalPort 8082", script)
+        self.assertIn("-Protocol TCP", script)
+        self.assertIn("-Profile Private,Domain", script)
+        self.assertNotIn("-Profile Any", script)
+
     def test_windows_inventory_detects_multiple_vendor_adapters(self):
         payload = [
             {"Name": "NVIDIA GeForce RTX 5080", "PNPDeviceID": "PCI\\VEN_10DE", "DriverVersion": "1", "AdapterRAM": 1000, "Status": "OK"},
