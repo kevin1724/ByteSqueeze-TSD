@@ -88,7 +88,9 @@ class WindowsHardwareInventoryTests(unittest.TestCase):
                 self.assertIn("vce", os.environ["TSD_ENCODER_FAMILIES"])
                 self.assertTrue(Path(os.environ["TSD_WORKER_TEMP_DIR"]).is_dir())
                 self.assertTrue(Path(os.environ["TSD_WORKER_SCRATCH_DIR"]).is_dir())
-                self.assertEqual(os.environ["TEMP"], config["scratch_dir"])
+                # Windows runners may expose the same temp directory once as
+                # an 8.3 short path and once as its long path.
+                self.assertTrue(os.path.samefile(os.environ["TEMP"], config["scratch_dir"]))
                 self.assertEqual(json.loads(os.environ["TSD_WINDOWS_GPU_ROUTES"])["h265"], "gpu:1")
 
     def test_background_windows_processes_never_create_a_console(self):
