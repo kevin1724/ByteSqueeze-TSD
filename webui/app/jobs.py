@@ -29,6 +29,7 @@ import threading
 import subprocess
 import http.client
 import shutil
+import sys
 import traceback
 from copy import deepcopy
 from urllib.parse import urlparse
@@ -54,6 +55,22 @@ from .audio_optimization import (
     storage_breakdown,
     validate_audio_only,
 )
+
+
+def _process_group_options() -> dict:
+    """Start encoders in their own group on both POSIX and Windows."""
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+    return {"start_new_session": True}
+
+
+def _encoder_launch_command() -> tuple[list[str], str]:
+    """Return the platform launcher while keeping one dispatcher contract."""
+    if os.name != "nt":
+        return ["/bin/sh", "/worker/encode-one.sh"], "/worker/encode-one.sh"
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--encode-one"], "ByteSqueezeWorker.exe --encode-one"
+    return [sys.executable, "-m", "worker.windows_app", "--encode-one"], "python -m worker.windows_app --encode-one"
 
 # -------------------------------------------------------------------
 # Global in-memory job state
@@ -652,6 +669,12 @@ def _normalize_encoding_policy(policy: dict | None = None) -> dict:
             "yes",
             "on",
         }
+    try:
+        audio_target_bitrate = max(
+            640, min(2048, int(source.get("audio_optimize_bitrate_kbps") or 1024))
+        )
+    except (TypeError, ValueError):
+        audio_target_bitrate = 1024
 
     return {
         "hb_threads": hb_threads,
@@ -660,6 +683,13 @@ def _normalize_encoding_policy(policy: dict | None = None) -> dict:
         "auto_stop_large_output_percent": round(max(1.0, min(500.0, stop_percent)), 1),
         "output_container": output_container,
         "web_optimized": bool(output_container == "mp4" and web_optimized_value),
+        "audio_policy_default": str(source.get("audio_policy_default") or "preserve"),
+        "audio_optimize_codec": str(source.get("audio_optimize_codec") or "aac"),
+        "audio_optimize_bitrate_kbps": audio_target_bitrate,
+        "audio_deduplicate_languages": bool(source.get("audio_deduplicate_languages", True)),
+        "audio_preferred_languages": list(source.get("audio_preferred_languages") or ["eng", "spa"]),
+        "audio_allow_downmix": bool(source.get("audio_allow_downmix", False)),
+        "audio_allow_object_metadata_loss": bool(source.get("audio_allow_object_metadata_loss", False)),
     }
 
 
@@ -2314,6 +2344,22 @@ def _queued_operations(metadata: dict | None = None, operations: dict | None = N
             )
         ),
         "default_target_codec": str(source.get("default_target_codec") or settings.get("audio_optimize_codec") or "aac"),
+        "default_target_bitrate_kbps": int(
+            source.get("default_target_bitrate_kbps")
+            or settings.get("audio_optimize_bitrate_kbps")
+            or 1024
+        ),
+        "deduplicate_languages": bool(
+            source.get(
+                "deduplicate_languages",
+                settings.get("audio_deduplicate_languages", True),
+            )
+        ),
+        "preferred_languages": deepcopy(
+            source.get("preferred_languages")
+            if isinstance(source.get("preferred_languages"), list)
+            else settings.get("audio_preferred_languages", ["eng", "spa"])
+        ),
         "replace_source": bool(source.get("replace_source", job_type == "audio_only")),
     }
 
@@ -3285,7 +3331,7 @@ def _run_audio_only_job(
             encoding="utf-8",
             errors="replace",
             bufsize=1,
-            start_new_session=True,
+            **_process_group_options(),
         )
         job["pid"] = process.pid
         duration = max(0.0, float(source_inventory.get("duration_seconds") or 0.0))
@@ -3838,7 +3884,9 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
         if qsv_job else ""
     )
 
-    # Spawn worker shell script
+    # Spawn the Docker shell runner or the native Windows runner. Both consume
+    # the exact same snapshotted environment contract.
+    launch_command, launch_label = _encoder_launch_command()
     job["phase"] = "encoding"
     _append_job_log(
         job_id,
@@ -3857,14 +3905,14 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
             f"{frame_rate_log}"
             f"{qsv_diagnostics_log}"
             f"[ByteSqueeze] Preset decode policy: {preset_decode_policy}\n"
-            f"[ByteSqueeze] Encoder launch: /worker/encode-one.sh\n"
+            f"[ByteSqueeze] Encoder launch: {launch_label}\n"
             f"[ByteSqueeze] Preset file: {preset_file}\n"
             f"[ByteSqueeze] Preset name: {preset_name}\n"
             f"[ByteSqueeze] HandBrakeCLI: {shutil.which('HandBrakeCLI') or 'NOT FOUND'}"
         ),
     )
     proc = subprocess.Popen(
-        ["/bin/sh", "/worker/encode-one.sh"],
+        launch_command,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         env=env,
@@ -3872,7 +3920,7 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
         encoding="utf-8",
         errors="replace",
         bufsize=1,
-        start_new_session=True,
+        **_process_group_options(),
     )
 
     job["pid"] = proc.pid

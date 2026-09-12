@@ -9,6 +9,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import platform
 import threading
 import time
 import uuid
@@ -91,6 +92,72 @@ def _read_gpu_vendor(path: str) -> str:
     }.get(value, value)
 
 
+def _gpu_vendor(name: str, pnp_device_id: str = "") -> str:
+    value = f"{name} {pnp_device_id}".lower()
+    if "nvidia" in value or "ven_10de" in value:
+        return "nvidia"
+    if any(token in value for token in ("amd", "radeon", "advanced micro devices", "ven_1002")):
+        return "amd"
+    if "intel" in value or "ven_8086" in value:
+        return "intel"
+    return "unknown"
+
+
+def _windows_gpu_inventory() -> list[dict]:
+    """Read display adapters without requiring vendor-specific SDKs."""
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        (
+            "Get-CimInstance Win32_VideoController | "
+            "Select-Object Name,PNPDeviceID,DriverVersion,AdapterRAM,Status | "
+            "ConvertTo-Json -Compress"
+        ),
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=12,
+            check=False,
+        )
+        payload = json.loads(result.stdout or "[]") if result.returncode == 0 else []
+    except Exception:
+        payload = []
+    if isinstance(payload, dict):
+        payload = [payload]
+    rows = []
+    for index, item in enumerate(payload if isinstance(payload, list) else []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("Name") or f"GPU {index + 1}").strip()
+        pnp = str(item.get("PNPDeviceID") or "").strip()
+        rows.append({
+            "index": index,
+            "name": name,
+            "vendor": _gpu_vendor(name, pnp),
+            "driver_version": str(item.get("DriverVersion") or "").strip(),
+            "memory_bytes": max(0, _safe_int(item.get("AdapterRAM"))),
+            "status": str(item.get("Status") or "").strip(),
+            "pnp_device_id": pnp,
+        })
+    return rows
+
+
+def _requested_family_order() -> list[str]:
+    requested = []
+    for value in re.split(r"[,;\s]+", str(os.environ.get("TSD_ENCODER_FAMILIES") or "")):
+        family = value.strip().lower()
+        if family in HARDWARE_ENCODERS and family not in requested:
+            requested.append(family)
+    return requested
+
+
 def encoder_hardware_profile(*, force: bool = False) -> dict:
     """Report encoder families that are usable by this node's container."""
     now = _now()
@@ -99,6 +166,10 @@ def encoder_hardware_profile(*, force: bool = False) -> dict:
         if not force and isinstance(cached, dict) and float(HARDWARE_PROFILE_CACHE.get("expires_at") or 0) > now:
             return deepcopy(cached)
 
+        windows = os.name == "nt"
+        windows_gpus = _windows_gpu_inventory() if windows else []
+        # Keep probing Unix device paths even on Windows. They are normally an
+        # empty set there, and doing so keeps WSL/mocked diagnostics useful.
         render_devices = sorted(glob.glob("/dev/dri/renderD*"))
         vendors = {
             vendor
@@ -108,6 +179,9 @@ def encoder_hardware_profile(*, force: bool = False) -> dict:
             )
             if vendor
         }
+        vendors.update(
+            row.get("vendor") for row in windows_gpus if row.get("vendor") != "unknown"
+        )
         if render_devices and not vendors:
             driver = str(os.environ.get("LIBVA_DRIVER_NAME") or "").strip().lower()
             if driver == "ihd":
@@ -132,17 +206,13 @@ def encoder_hardware_profile(*, force: bool = False) -> dict:
             except Exception:
                 pass
 
-        requested = {
-            value.strip().lower()
-            for value in re.split(r"[,;\s]+", str(os.environ.get("TSD_ENCODER_FAMILIES") or ""))
-            if value.strip()
-        }
-        families = set(requested.intersection(HARDWARE_ENCODERS))
-        if "intel" in vendors and render_devices:
+        requested_order = _requested_family_order()
+        families = set(requested_order)
+        if "intel" in vendors and (render_devices or windows):
             families.add("qsv")
         if "nvidia" in vendors:
             families.add("nvenc")
-        if "amd" in vendors and render_devices:
+        if "amd" in vendors and (render_devices or windows):
             families.add("vce")
         families.add("software")
 
@@ -154,6 +224,8 @@ def encoder_hardware_profile(*, force: bool = False) -> dict:
                     [handbrake, "--help"],
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=12,
                     check=False,
                 )
@@ -177,13 +249,36 @@ def encoder_hardware_profile(*, force: bool = False) -> dict:
             encoders.extend(supported)
 
         usable_families.add("software")
-        ordered_families = [family for family in ("qsv", "nvenc", "vce", "software") if family in usable_families]
+        windows_worker = windows and str(os.environ.get("TSD_WINDOWS_WORKER") or "").strip().lower() in {"1", "true", "yes", "on"}
+        default_order = ("nvenc", "vce", "qsv", "software") if windows_worker else ("qsv", "nvenc", "vce", "software")
+        ordered_families = []
+        for family in [*requested_order, *default_order]:
+            if family in usable_families and family not in ordered_families:
+                ordered_families.append(family)
+        preferred = str(os.environ.get("TSD_PREFERRED_ENCODER_FAMILY") or "auto").strip().lower()
+        if preferred not in {*HARDWARE_ENCODERS, "auto"}:
+            preferred = "auto"
+        vendor_family = {"nvidia": "nvenc", "amd": "vce", "intel": "qsv"}
+        for gpu in windows_gpus:
+            family = vendor_family.get(str(gpu.get("vendor") or ""), "")
+            gpu["encoder_family"] = family
+            gpu["encoders"] = [name for name in encoders if name in HARDWARE_ENCODERS.get(family, ())]
         value = {
             "encoder_families": ordered_families,
             "encoders": list(dict.fromkeys(encoders)),
             "gpu_vendors": sorted(vendors),
+            "gpus": windows_gpus,
             "render_devices": render_devices,
             "nvidia_devices": nvidia_devices,
+            "preferred_encoder_family": preferred,
+            "cpu": {
+                "name": platform.processor() or os.environ.get("PROCESSOR_IDENTIFIER") or "Unknown CPU",
+                "logical_cores": os.cpu_count() or 1,
+            },
+            "platform": "windows" if windows else "linux",
+            "handbrake_path": handbrake or "",
+            "ffmpeg_path": shutil.which("ffmpeg") or "",
+            "ffprobe_path": shutil.which("ffprobe") or "",
             "detected_at": now,
         }
         HARDWARE_PROFILE_CACHE.update({"expires_at": now + 60.0, "value": value})
@@ -297,6 +392,8 @@ def node_discovery() -> dict:
     capabilities = list(NODE_CAPABILITIES)
     if headless:
         capabilities.extend(["headless-worker", "remote-transfer-only"])
+    if str(os.environ.get("TSD_WINDOWS_WORKER") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        capabilities.extend(["windows-desktop-worker", "multi-vendor-gpu-discovery", "notification-area"])
     return {
         "service": "handbrake-tsd-node",
         "node_id": local["id"],

@@ -1,0 +1,83 @@
+name: Build ByteSqueeze Windows Worker
+
+on:
+  push:
+    tags:
+      - "windows-worker-v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Optional release tag, for example windows-worker-v2.11.0
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-worker-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Run worker tests
+        run: python -m unittest tests.test_windows_worker tests.test_worker_service
+
+      - name: Build self-contained worker
+        shell: pwsh
+        run: .\scripts\build-windows-worker.ps1 -Python python
+
+      - name: Verify packaged API and bundled tools
+        shell: pwsh
+        run: |
+          $result = Join-Path $env:RUNNER_TEMP "bytesqueeze-self-test.json"
+          $process = Start-Process -FilePath ".\dist\windows-worker\ByteSqueezeWorker.exe" -ArgumentList @("--self-test", $result) -Wait -PassThru -WindowStyle Hidden
+          if ($process.ExitCode -ne 0) { throw "Worker self-test exited $($process.ExitCode)" }
+          $report = Get-Content -LiteralPath $result -Raw | ConvertFrom-Json
+          if (-not $report.ok -or -not $report.handbrake_path -or -not $report.ffmpeg_path) { throw "Packaged worker self-test failed." }
+          Get-Content -LiteralPath $result
+
+      - name: Write checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash .\dist\windows-worker\ByteSqueezeWorker.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  ByteSqueezeWorker.exe" | Set-Content .\dist\windows-worker\ByteSqueezeWorker.exe.sha256 -Encoding ascii
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ByteSqueeze-Windows-Worker
+          path: |
+            dist/windows-worker/ByteSqueezeWorker.exe
+            dist/windows-worker/ByteSqueezeWorker.exe.sha256
+          if-no-files-found: error
+
+      - name: Publish GitHub release assets
+        if: startsWith(github.ref, 'refs/tags/windows-worker-v') || inputs.release_tag != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          $tag = if ($env:INPUT_RELEASE_TAG) { $env:INPUT_RELEASE_TAG } else { $env:GITHUB_REF_NAME }
+          if (-not $tag.StartsWith("windows-worker-v")) { throw "Release tag must start with windows-worker-v" }
+          $assets = @("dist/windows-worker/ByteSqueezeWorker.exe", "dist/windows-worker/ByteSqueezeWorker.exe.sha256")
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @assets --clobber --repo $env:GITHUB_REPOSITORY
+          } else {
+            gh release create $tag @assets --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "ByteSqueeze Windows Worker $tag" --generate-notes
+          }

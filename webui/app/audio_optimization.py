@@ -26,6 +26,17 @@ LOSSLESS_CODECS = {"alac", "ape", "flac", "mlp", "truehd", "wavpack"}
 EFFICIENT_LOSSY_CODECS = {"aac", "ac3", "eac3", "mp3", "opus"}
 OBJECT_AUDIO_MARKERS = ("atmos", "dts:x", "dtsx", "object based", "object-based")
 COMMENTARY_MARKERS = ("commentary", "director", "descriptive", "description")
+SPANISH_LATAM_MARKERS = (
+    "latino", "latin american", "latin-american", "latam", "es-419",
+    "es_419", "mexican", "mexico", "es-mx", "es_mx",
+)
+SPANISH_CASTILIAN_MARKERS = (
+    "castellano", "castilian", "españa", "spain", "es-es", "es_es",
+)
+LANGUAGE_ALIASES = {
+    "en": "eng", "eng": "eng", "english": "eng",
+    "es": "spa", "spa": "spa", "spanish": "spa", "español": "spa",
+}
 JOB_TYPES = {"video_audio", "video_preserve_audio", "audio_only"}
 AUDIO_POLICIES = {"preserve", "optimize_lossless", "custom"}
 
@@ -423,17 +434,63 @@ def scan_media(path: str, *, exact: bool = True, force: bool = False) -> dict:
     return deepcopy(inventory)
 
 
-def _target_bitrate(channels: int) -> int:
-    if channels >= 8:
-        return 1024
+def _target_bitrate(channels: int, surround_target_kbps: int = 1024) -> int:
+    """Return a quality-first bitrate instead of the old stereo-sized budget."""
+    surround_target_kbps = max(640, min(2048, _int(surround_target_kbps, 1024)))
     if channels >= 6:
-        return 640
+        return surround_target_kbps
     if channels >= 3:
-        return 448
-    return 256
+        return min(surround_target_kbps, 640)
+    return 320
 
 
-def _track_defaults(track: dict, policy: str, allow_object_audio_loss: bool) -> tuple[dict, list[str]]:
+def _language_family(value: str) -> str:
+    raw = str(value or "und").strip().lower().replace("_", "-")
+    return LANGUAGE_ALIASES.get(raw, LANGUAGE_ALIASES.get(raw.split("-", 1)[0], raw or "und"))
+
+
+def _language_group(track: dict) -> str:
+    family = _language_family(track.get("language"))
+    if family != "spa":
+        return family
+    searchable = f"{track.get('language') or ''} {track.get('title') or ''}".lower()
+    if any(marker in searchable for marker in SPANISH_LATAM_MARKERS):
+        return "spa:latam"
+    if any(marker in searchable for marker in SPANISH_CASTILIAN_MARKERS):
+        return "spa:castilian"
+    return "spa:generic"
+
+
+def _preferred_languages(value) -> list[str]:
+    raw = value if isinstance(value, list) else str(value or "").replace(";", ",").split(",")
+    result = []
+    for item in raw:
+        language = _language_family(str(item))
+        if language and language != "und" and language not in result:
+            result.append(language)
+    return result
+
+
+def _track_quality_score(track: dict) -> tuple:
+    """Rank the main program track ahead of duplicates and commentary."""
+    return (
+        0 if track.get("commentary") else 1,
+        1 if (track.get("object_audio") or track.get("object_audio_capable")) else 0,
+        1 if track.get("lossless") else 0,
+        max(0, _int(track.get("channels"))),
+        max(0, _int(track.get("bitrate"))),
+        max(0, _int(track.get("size_bytes"))),
+        1 if track.get("default") else 0,
+        -max(0, _int(track.get("type_ordinal"))),
+    )
+
+
+def _track_defaults(
+    track: dict,
+    policy: str,
+    allow_object_audio_loss: bool,
+    surround_target_kbps: int,
+) -> tuple[dict, list[str]]:
     warnings = []
     action = "copy"
     if policy == "optimize_lossless" and track.get("lossless"):
@@ -462,7 +519,7 @@ def _track_defaults(track: dict, policy: str, allow_object_audio_loss: bool) -> 
         "commentary": bool(track.get("commentary")),
         "action": action,
         "target_codec": "aac",
-        "bitrate_kbps": _target_bitrate(channels),
+        "bitrate_kbps": _target_bitrate(channels, surround_target_kbps),
         "channels": channels,
         "channel_layout": str(track.get("channel_layout") or ""),
         "sample_rate": _int(track.get("sample_rate")),
@@ -481,6 +538,12 @@ def normalize_operations(payload: dict | None, inventory: dict) -> dict:
     if policy not in AUDIO_POLICIES:
         policy = "preserve"
     allow_object = _bool(payload.get("allow_object_audio_loss"), False)
+    surround_target_kbps = max(
+        640,
+        min(2048, _int(payload.get("default_target_bitrate_kbps"), 1024)),
+    )
+    deduplicate_languages = _bool(payload.get("deduplicate_languages"), True)
+    preferred_languages = _preferred_languages(payload.get("preferred_languages", ["eng", "spa"]))
     default_target_codec = str(payload.get("default_target_codec") or "aac").strip().lower()
     if default_target_codec not in {"aac", "eac3", "ac3", "opus", "flac"}:
         default_target_codec = "aac"
@@ -492,7 +555,9 @@ def normalize_operations(payload: dict | None, inventory: dict) -> dict:
     actions = []
     warnings = []
     for track in inventory.get("audio_streams", []):
-        action, track_warnings = _track_defaults(track, policy, allow_object)
+        action, track_warnings = _track_defaults(
+            track, policy, allow_object, surround_target_kbps
+        )
         action["target_codec"] = default_target_codec
         override = proposed_by_index.get(_int(track.get("index"), -1))
         if policy in {"custom", "optimize_lossless"} and isinstance(override, dict):
@@ -511,7 +576,16 @@ def normalize_operations(payload: dict | None, inventory: dict) -> dict:
         action["target_codec"] = str(action.get("target_codec") or "aac").strip().lower()
         if action["target_codec"] not in {"aac", "eac3", "ac3", "opus", "flac"}:
             action["target_codec"] = "aac"
-        action["bitrate_kbps"] = max(64, min(2048, _int(action.get("bitrate_kbps"), _target_bitrate(action["source_channels"]))))
+        action["bitrate_kbps"] = max(
+            64,
+            min(
+                2048,
+                _int(
+                    action.get("bitrate_kbps"),
+                    _target_bitrate(action["source_channels"], surround_target_kbps),
+                ),
+            ),
+        )
         requested_channels = max(1, min(8, _int(action.get("channels"), action["source_channels"])))
         action["allow_downmix"] = _bool(action.get("allow_downmix"), False)
         if requested_channels < action["source_channels"] and not action["allow_downmix"]:
@@ -525,6 +599,9 @@ def normalize_operations(payload: dict | None, inventory: dict) -> dict:
                 f"{action['target_codec'].upper()} cannot safely preserve {requested_channels} channels with the bundled encoder; using AAC instead of downmixing."
             )
             action["target_codec"] = "aac"
+        if action["action"] == "encode" and action["target_codec"] == "ac3" and action["bitrate_kbps"] > 640:
+            warnings.append("AC3 is limited to 640 kbps; the selected track was capped at 640 kbps.")
+            action["bitrate_kbps"] = 640
         action["sample_rate"] = max(0, min(192000, _int(action.get("sample_rate"), action["source_sample_rate"])))
         action["gain_db"] = max(-20.0, min(20.0, _float(action.get("gain_db"))))
         action["preserve_metadata"] = _bool(action.get("preserve_metadata"), True)
@@ -540,6 +617,42 @@ def normalize_operations(payload: dict | None, inventory: dict) -> dict:
             warnings.append("A commentary/descriptive track is being changed; verify this is intentional.")
         warnings.extend(track_warnings if action["action"] != "copy" or track.get("object_audio") else [])
         actions.append(action)
+
+    # Smart language cleanup is applied only to the initial automatic plan.
+    # Once the UI returns explicit per-track actions, those choices are
+    # authoritative and are never silently rebuilt on validation/queueing.
+    if policy == "optimize_lossless" and deduplicate_languages and not proposed:
+        grouped: dict[str, list[tuple[dict, dict]]] = {}
+        preferred = set(preferred_languages)
+        inventory_by_index = {
+            _int(track.get("index"), -1): track
+            for track in inventory.get("audio_streams", [])
+            if isinstance(track, dict)
+        }
+        for action in actions:
+            track = inventory_by_index.get(action["stream_index"], action)
+            group = _language_group(track)
+            action["language_group"] = group
+            family = group.split(":", 1)[0]
+            if preferred and family not in preferred:
+                action["action"] = "remove"
+                action["selected_by_language_policy"] = False
+                warnings.append(
+                    f"Removing non-preferred {action['language']} {action['source_codec_label']} track; review before queueing."
+                )
+                continue
+            grouped.setdefault(group, []).append((action, track))
+        for group, candidates in grouped.items():
+            winner, _winner_track = max(candidates, key=lambda pair: _track_quality_score(pair[1]))
+            winner["selected_by_language_policy"] = True
+            for action, _track in candidates:
+                if action is winner:
+                    continue
+                action["action"] = "remove"
+                action["selected_by_language_policy"] = False
+                warnings.append(
+                    f"Keeping the strongest {group.replace(':', ' ')} track and removing duplicate {action['source_codec_label']} {action['source_channels']}ch; review before queueing."
+                )
 
     duration = max(0.0, _float(inventory.get("duration_seconds")))
     source_audio = sum(_int(row.get("source_size_bytes")) for row in actions)
@@ -565,6 +678,9 @@ def normalize_operations(payload: dict | None, inventory: dict) -> dict:
         "subtitle_action": str(payload.get("subtitle_action") or "copy").lower() if job_type == "audio_only" else "copy",
         "allow_object_audio_loss": allow_object,
         "default_target_codec": default_target_codec,
+        "default_target_bitrate_kbps": surround_target_kbps,
+        "deduplicate_languages": deduplicate_languages,
+        "preferred_languages": preferred_languages,
         "replace_source": _bool(payload.get("replace_source"), job_type == "audio_only"),
         "warnings": list(dict.fromkeys(warnings)),
         "estimate": {

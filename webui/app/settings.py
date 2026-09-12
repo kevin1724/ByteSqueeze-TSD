@@ -41,6 +41,9 @@ DEFAULT_SETTINGS = {
     # enabled implicitly.
     "audio_policy_default": "preserve",
     "audio_optimize_codec": "aac",
+    "audio_optimize_bitrate_kbps": 1024,
+    "audio_deduplicate_languages": True,
+    "audio_preferred_languages": ["eng", "spa"],
     "audio_allow_downmix": False,
     "audio_allow_object_metadata_loss": False,
 
@@ -130,6 +133,20 @@ def _ensure_dict(obj) -> dict:
     if isinstance(obj, dict):
         return obj
     return {}
+
+
+def _normalize_audio_languages(value) -> list[str]:
+    aliases = {
+        "en": "eng", "eng": "eng", "english": "eng",
+        "es": "spa", "spa": "spa", "spanish": "spa", "español": "spa",
+    }
+    rows = value if isinstance(value, list) else str(value or "").replace(";", ",").split(",")
+    result = []
+    for row in rows:
+        language = aliases.get(str(row).strip().lower(), str(row).strip().lower())
+        if language and language not in result:
+            result.append(language[:24])
+    return result[:16]
 
 
 def _path_is_under_allowed_root(path: str) -> bool:
@@ -270,6 +287,15 @@ def load_settings() -> dict:
         ).strip().lower()
         if merged["audio_optimize_codec"] not in {"aac", "eac3", "ac3", "opus", "flac"}:
             merged["audio_optimize_codec"] = "aac"
+        merged["audio_optimize_bitrate_kbps"] = int(_bounded_number(
+            merged.get("audio_optimize_bitrate_kbps", 1024), 1024, 640, 2048, integer=True
+        ))
+        merged["audio_deduplicate_languages"] = _boolean_value(
+            merged.get("audio_deduplicate_languages"), True
+        )
+        merged["audio_preferred_languages"] = _normalize_audio_languages(
+            merged.get("audio_preferred_languages", ["eng", "spa"])
+        ) or ["eng", "spa"]
         merged["audio_allow_downmix"] = _boolean_value(merged.get("audio_allow_downmix"), False)
         merged["audio_allow_object_metadata_loss"] = _boolean_value(
             merged.get("audio_allow_object_metadata_loss"), False
@@ -358,6 +384,29 @@ def _save_settings_unlocked(new_values: dict) -> dict:
     base["audio_optimize_codec"] = audio_codec if audio_codec in {
         "aac", "eac3", "ac3", "opus", "flac"
     } else "aac"
+    base["audio_optimize_bitrate_kbps"] = int(_bounded_number(
+        new_values.get(
+            "audio_optimize_bitrate_kbps",
+            base.get("audio_optimize_bitrate_kbps", 1024),
+        ),
+        1024,
+        640,
+        2048,
+        integer=True,
+    ))
+    base["audio_deduplicate_languages"] = _boolean_value(
+        new_values.get(
+            "audio_deduplicate_languages",
+            base.get("audio_deduplicate_languages", True),
+        ),
+        True,
+    )
+    base["audio_preferred_languages"] = _normalize_audio_languages(
+        new_values.get(
+            "audio_preferred_languages",
+            base.get("audio_preferred_languages", ["eng", "spa"]),
+        )
+    ) or ["eng", "spa"]
     base["audio_allow_downmix"] = _boolean_value(
         new_values.get("audio_allow_downmix", base.get("audio_allow_downmix", False)), False
     )

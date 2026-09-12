@@ -1402,10 +1402,10 @@ def _wizard_audio_kbps(options: dict) -> int:
     if options["audio_mode"] == "copy":
         return 256
     if options["audio_mode"] == "eac3":
-        return 640
+        return 1024
     if options["audio_bitrate"] != "auto":
         try:
-            return max(64, min(640, int(options["audio_bitrate"])))
+            return max(64, min(2048, int(options["audio_bitrate"])))
         except Exception:
             pass
     return _quality_audio_kbps(options["quality"])
@@ -1529,7 +1529,7 @@ def _wizard_ai_choices(
     source_bitrate_kbps = (source_size_bytes_i * 8.0 / max(1.0, duration_sec)) / 1000.0
     target_total_kbps = (target_bytes * 8.0 / max(1.0, duration_sec)) / 1000.0
     if out.get("smart_audio_strategy") == "eac3_surround":
-        rough_audio_kbps = 640
+        rough_audio_kbps = 1024
     elif out.get("smart_audio_strategy") == "copy" or out.get("ai_copy_audio", True):
         rough_audio_kbps = 256
     else:
@@ -1803,8 +1803,8 @@ def _wizard_ai_choices(
     smart_audio_strategy = out.get("smart_audio_strategy") or ""
     if smart_audio_strategy == "eac3_surround":
         out["audio_mode"] = "eac3"
-        out["audio_bitrate"] = "640"
-        decisions.append("Encoding the selected audio tracks to E-AC3 5.1 at 640 kbps to save space while retaining surround sound.")
+        out["audio_bitrate"] = "1024"
+        decisions.append("Encoding large lossless surround tracks at 1024 kbps while copying efficient AC3/E-AC3 tracks unchanged.")
     elif smart_audio_strategy == "copy":
         out["audio_mode"] = "copy"
     else:
@@ -1821,7 +1821,7 @@ def _wizard_ai_choices(
     elif out["audio_mode"] == "eac3":
         # The fixed surround-safe rate above is intentional; do not let the
         # video quality goal reduce it to a stereo-oriented AAC budget.
-        out["audio_bitrate"] = "640"
+        out["audio_bitrate"] = "1024"
     elif goal == "quality":
         out["audio_bitrate"] = "256"
         decisions.append("Converting audio at 256 kbps for quality.")
@@ -2056,7 +2056,7 @@ def _wizard_ai_plan_insights(
         _wizard_ai_add_recommendation(
             recommendations,
             "Surround retained",
-            "Selected audio tracks will use E-AC3 5.1 at 640 kbps for smaller surround-capable tracks.",
+            "Large lossless tracks use a quality-first 1024 kbps target; already-efficient AC3/E-AC3 tracks are copied.",
             "success",
         )
     elif options.get("audio_mode") == "copy" and options.get("audio_tracks") == "all" and total_bitrate_kbps < 2500:
@@ -2268,7 +2268,7 @@ def _wizard_normalize_options(data: dict) -> dict:
             audio_bitrate_i = int(audio_bitrate)
         except Exception:
             audio_bitrate_i = 192
-        audio_bitrate = str(max(64, min(640, audio_bitrate_i)))
+        audio_bitrate = str(max(64, min(2048, audio_bitrate_i)))
     options["audio_bitrate"] = audio_bitrate
 
     resolution_mode = data.get("resolution_mode")
@@ -2407,7 +2407,7 @@ def _wizard_build_extra_args(options: dict, video_kbps: float, out_w: int, out_h
                     "none",
                 ]
         elif options["audio_mode"] == "eac3":
-            args += ["-E", "eac3", "-B", "640", "-6", "5point1"]
+            args += ["-E", "eac3", "-B", "1024", "-6", "5point1"]
         else:
             args += ["-E", "av_aac", "-B", str(_wizard_audio_kbps(options))]
 
@@ -2948,7 +2948,7 @@ def _smart_profile_options(data: dict, profile: dict) -> dict:
             "ai_subtitle_scope": "all",
             "smart_audio_strategy": audio_strategy,
             "audio_mode": "copy" if copy_audio else "eac3",
-            "audio_bitrate": "auto" if copy_audio else "640",
+            "audio_bitrate": "auto" if copy_audio else "1024",
             "audio_tracks": "all",
             "audio_languages": [] if keep_all_audio_languages else audio_languages,
             "subtitle_mode": "all",
@@ -3223,7 +3223,7 @@ def _smart_recommendation(data: dict, *, require_automation_ready: bool = False)
         if not profile.get("never_transcode_audio", True) and not tuning.get("audio_strategy"):
             learned_audio = str(learned_defaults.get("audio_strategy") or "")
             if learned_audio in {"eac3", "eac3_surround"}:
-                base_options.update({"smart_audio_strategy": "eac3_surround", "audio_mode": "eac3", "audio_bitrate": "640"})
+                base_options.update({"smart_audio_strategy": "eac3_surround", "audio_mode": "eac3", "audio_bitrate": "1024"})
         if not profile.get("keep_all_subtitle_languages", True) and not tuning.get("subtitle_mode"):
             learned_subtitle_mode = str(learned_defaults.get("subtitle_mode") or "")
             if learned_subtitle_mode in WIZARD_SUBTITLE_MODES:
@@ -3666,7 +3666,7 @@ BETA_MEDIA_TAG_RE = re.compile(
 )
 
 
-APP_RELEASE = "3.24.0"
+APP_RELEASE = "3.25.0"
 BETA_DIMENSION_TAG_RE = re.compile(r"(?<!\d)(?:\d{3,4}x\d{3,4}|(?:8|10|12)bit)(?!\d)", re.IGNORECASE)
 HDR_PATH_RE = re.compile(
     r"(?:^|[ ._\-\[\(])(?:"
@@ -7995,14 +7995,26 @@ def _adapt_smart_plan_for_node(plan: dict, node: dict) -> dict:
     metadata["queued_preset_name"] = display_name
     out["encode_metadata"] = metadata
     hardware = node.get("hardware") if isinstance(node.get("hardware"), dict) else {}
-    if not hardware or _hardware_supports_plan(out, hardware):
-        return out
-
     families = [str(value).lower() for value in hardware.get("encoder_families") or []]
     supported = {str(value).lower() for value in hardware.get("encoders") or []}
+    preferred_family = str(hardware.get("preferred_encoder_family") or "auto").strip().lower()
+    preferred_candidate = NODE_ENCODERS.get(preferred_family, {}).get((codec, depth))
+    force_preferred = bool(
+        preferred_family != "auto"
+        and preferred_family != old_family
+        and preferred_family in families
+        and preferred_candidate
+        and (not supported or preferred_candidate in supported)
+    )
+    if not hardware or (_hardware_supports_plan(out, hardware) and not force_preferred):
+        return out
+
     selected_encoder = ""
     selected_family = "software"
-    for family in [value for value in families if value != "software"] + ["software"]:
+    candidate_families = [value for value in families if value != "software"] + ["software"]
+    if force_preferred:
+        candidate_families = [preferred_family] + [value for value in candidate_families if value != preferred_family]
+    for family in candidate_families:
         candidate = NODE_ENCODERS.get(family, {}).get((codec, depth))
         if candidate and (not supported or candidate in supported):
             selected_encoder = candidate
@@ -8027,7 +8039,11 @@ def _adapt_smart_plan_for_node(plan: dict, node: dict) -> dict:
         "from_family": old_family,
         "to_encoder": selected_encoder,
         "to_family": selected_family,
-        "reason": f"{old_family or 'requested'} encoder is unavailable on the selected node",
+        "reason": (
+            f"worker preference selected {preferred_family} for adaptive Smart jobs"
+            if force_preferred
+            else f"{old_family or 'requested'} encoder is unavailable on the selected node"
+        ),
         "adapted_at": time.time(),
     }
     metadata["preset_adaptation"] = adaptation
@@ -8082,6 +8098,9 @@ def _plan_metadata_for_worker(plan: dict) -> dict:
             "job_type": "video_audio" if audio_policy != "preserve" else "video_preserve_audio",
             "audio_policy": audio_policy,
             "default_target_codec": str(settings.get("audio_optimize_codec") or "aac"),
+            "default_target_bitrate_kbps": int(settings.get("audio_optimize_bitrate_kbps") or 1024),
+            "deduplicate_languages": bool(settings.get("audio_deduplicate_languages", True)),
+            "preferred_languages": list(settings.get("audio_preferred_languages") or ["eng", "spa"]),
             "allow_object_audio_loss": bool(settings.get("audio_allow_object_metadata_loss", False)),
             "subtitle_action": "copy",
         }
@@ -8140,6 +8159,9 @@ def _worker_encoding_policy(selected: dict, source_policy: dict | None = None) -
         ),
         "audio_policy_default": str(source.get("audio_policy_default") or controller_settings.get("audio_policy_default") or "preserve"),
         "audio_optimize_codec": str(source.get("audio_optimize_codec") or controller_settings.get("audio_optimize_codec") or "aac"),
+        "audio_optimize_bitrate_kbps": int(source.get("audio_optimize_bitrate_kbps") or controller_settings.get("audio_optimize_bitrate_kbps") or 1024),
+        "audio_deduplicate_languages": bool(source.get("audio_deduplicate_languages", controller_settings.get("audio_deduplicate_languages", True))),
+        "audio_preferred_languages": list(source.get("audio_preferred_languages") or controller_settings.get("audio_preferred_languages") or ["eng", "spa"]),
         "audio_allow_downmix": bool(source.get("audio_allow_downmix", controller_settings.get("audio_allow_downmix", False))),
         "audio_allow_object_metadata_loss": bool(source.get("audio_allow_object_metadata_loss", controller_settings.get("audio_allow_object_metadata_loss", False))),
     }
@@ -10206,6 +10228,9 @@ def register_routes(app):
             "auto_stop_large_output_percent",
             "audio_policy_default",
             "audio_optimize_codec",
+            "audio_optimize_bitrate_kbps",
+            "audio_deduplicate_languages",
+            "audio_preferred_languages",
             "audio_allow_downmix",
             "audio_allow_object_metadata_loss",
         }
@@ -10229,6 +10254,9 @@ def register_routes(app):
             "auto_stop_large_output_percent": settings.get("auto_stop_large_output_percent", 90),
             "audio_policy_default": settings.get("audio_policy_default", "preserve"),
             "audio_optimize_codec": settings.get("audio_optimize_codec", "aac"),
+            "audio_optimize_bitrate_kbps": settings.get("audio_optimize_bitrate_kbps", 1024),
+            "audio_deduplicate_languages": bool(settings.get("audio_deduplicate_languages", True)),
+            "audio_preferred_languages": settings.get("audio_preferred_languages", ["eng", "spa"]),
             "audio_allow_downmix": bool(settings.get("audio_allow_downmix")),
             "audio_allow_object_metadata_loss": bool(settings.get("audio_allow_object_metadata_loss")),
         }
@@ -11445,7 +11473,11 @@ def register_routes(app):
             operations["audio_policy"] = payload.get("audio_policy")
         if payload.get("job_type"):
             operations["job_type"] = payload.get("job_type")
-        operations.setdefault("default_target_codec", load_settings().get("audio_optimize_codec") or "aac")
+        audio_settings = load_settings()
+        operations.setdefault("default_target_codec", audio_settings.get("audio_optimize_codec") or "aac")
+        operations.setdefault("default_target_bitrate_kbps", audio_settings.get("audio_optimize_bitrate_kbps") or 1024)
+        operations.setdefault("deduplicate_languages", audio_settings.get("audio_deduplicate_languages", True))
+        operations.setdefault("preferred_languages", audio_settings.get("audio_preferred_languages") or ["eng", "spa"])
         return {
             "ok": True,
             "path": path,
@@ -11486,7 +11518,11 @@ def register_routes(app):
             "replace_source": True,
         })
         requested.setdefault("audio_policy", "optimize_lossless")
-        requested.setdefault("default_target_codec", load_settings().get("audio_optimize_codec") or "aac")
+        audio_settings = load_settings()
+        requested.setdefault("default_target_codec", audio_settings.get("audio_optimize_codec") or "aac")
+        requested.setdefault("default_target_bitrate_kbps", audio_settings.get("audio_optimize_bitrate_kbps") or 1024)
+        requested.setdefault("deduplicate_languages", audio_settings.get("audio_deduplicate_languages", True))
+        requested.setdefault("preferred_languages", audio_settings.get("audio_preferred_languages") or ["eng", "spa"])
         operations = normalize_operations(requested, inventory)
         if not any(row.get("action") != "copy" for row in operations.get("audio_actions") or []):
             raise ValueError("no audio tracks are selected for optimization or removal")

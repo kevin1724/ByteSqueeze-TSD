@@ -1119,7 +1119,7 @@
           <label for="smartAudioStrategy">Audio handling</label>
           <select id="smartAudioStrategy">
             <option value="copy" selected>Original passthrough (exact quality)</option>
-            <option value="eac3_surround">Smaller E-AC3 5.1 (640 kbps)</option>
+            <option value="eac3_surround">Smart lossless optimize (1024 kbps surround)</option>
           </select>
           <div class="help-text">Passthrough is exact. E-AC3 saves space and keeps surround sound.</div>
         </div>
@@ -1589,7 +1589,7 @@
               <select id="audioMode">
                 <option value="auto">AAC auto</option>
                 <option value="aac">AAC custom bitrate</option>
-                <option value="eac3">E-AC3 5.1 surround (640 kbps)</option>
+                <option value="eac3">Smart surround optimize (1024 kbps)</option>
                 <option value="copy" selected>Copy source audio</option>
               </select>
               <div class="help-text">Copy preserves the original format exactly. E-AC3 is the smaller surround-safe choice.</div>
@@ -1603,6 +1603,11 @@
                 <option value="192">192 kbps</option>
                 <option value="256">256 kbps</option>
                 <option value="320">320 kbps</option>
+                <option value="640">640 kbps</option>
+                <option value="768">768 kbps</option>
+                <option value="1024">1024 kbps (recommended surround)</option>
+                <option value="1280">1280 kbps</option>
+                <option value="1536">1536 kbps</option>
               </select>
               <div class="help-text">Only used when audio is converted to AAC.</div>
             </div>
@@ -1613,7 +1618,7 @@
                 <option value="first">First track</option>
                 <option value="all" selected>All tracks</option>
               </select>
-              <div class="help-text">All tracks keeps commentary and alternate language tracks that match your language filter.</div>
+              <div class="help-text">Smart optimization keeps the strongest main track for each preferred language; Latino and Castilian Spanish remain separate when their titles identify them.</div>
             </div>
           </div>
           </div>
@@ -2294,7 +2299,7 @@
       const tracks = payload.ai_mode ? payload.ai_audio_scope : payload.audio_tracks;
       const strategy = payload.smart_audio_strategy || "";
       const mode = strategy === "eac3_surround" || payload.audio_mode === "eac3"
-        ? "E-AC3 5.1 at 640 kbps"
+        ? "smart lossless optimization at up to 1024 kbps"
         : (payload.audio_mode === "copy" || payload.ai_copy_audio ? "copy original audio" : "convert to AAC");
       const trackText = tracks === "all" ? "all matching tracks" : "first matching track";
       return `${mode}, ${trackText}, ${languageText(payload.audio_languages)}`;
@@ -2324,7 +2329,7 @@
       const audioScope = payload.ai_mode ? payload.ai_audio_scope : payload.audio_tracks;
 
       if (payload.smart_audio_strategy === "eac3_surround" || payload.audio_mode === "eac3") {
-        warnings.push("Audio will be converted to E-AC3 5.1 at 640 kbps to save space while retaining surround playback.");
+        warnings.push("Large lossless audio will use a 1024 kbps surround target. Already-small AC3/E-AC3 5.1 tracks stay passthrough.");
       } else if (payload.audio_mode !== "copy" && !payload.ai_copy_audio) {
         warnings.push("Audio may be converted instead of copied.");
       }

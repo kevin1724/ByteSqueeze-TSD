@@ -421,6 +421,11 @@ abstract final class DemoData {
     'qsv_device_available': true,
     'auto_stop_large_output_enabled': true,
     'auto_stop_large_output_percent': 90.0,
+    'audio_policy_default': 'preserve',
+    'audio_optimize_codec': 'aac',
+    'audio_optimize_bitrate_kbps': 1024,
+    'audio_deduplicate_languages': true,
+    'audio_preferred_languages': ['eng', 'spa'],
   };
 
   static Map<String, dynamic> _movie(

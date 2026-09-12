@@ -100,7 +100,7 @@ class _AudioOptimizerSheetState extends State<AudioOptimizerSheet> {
       } else if (action['action'] == 'encode') {
         output += action['target_codec'] == 'flac'
             ? source * .72
-            : ((action['bitrate_kbps'] as num?)?.toDouble() ?? 256) *
+            : ((action['bitrate_kbps'] as num?)?.toDouble() ?? 1024) *
                 1000 *
                 duration /
                 8;
@@ -309,14 +309,30 @@ class _AudioTrackEditor extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final next = Map<String, dynamic>.from(action);
     final encode = action['action'] == 'encode';
     final channels = (action['channels'] as num?)?.toInt() ?? 2;
     final sourceChannels =
         (action['source_channels'] as num?)?.toInt() ?? channels;
+    final bitrate = (action['bitrate_kbps'] as num?)?.toInt() ?? 1024;
+    final bitrateChoices = <int>{
+      256,
+      320,
+      448,
+      640,
+      768,
+      1024,
+      1280,
+      1536,
+      2048,
+      bitrate,
+    }.toList()
+      ..sort();
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: ExpansionTile(
+        key: ValueKey(
+          '${action['stream_index']}-${action['action']}-${action['target_codec']}-${action['bitrate_kbps']}',
+        ),
         tilePadding: const EdgeInsets.symmetric(horizontal: 12),
         childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
         collapsedShape: RoundedRectangleBorder(
@@ -341,8 +357,7 @@ class _AudioTrackEditor extends StatelessWidget {
           ],
           onChanged: (value) {
             if (value != null) {
-              next['action'] = value;
-              onChanged(next);
+              onChanged({...action, 'action': value});
             }
           },
         ),
@@ -360,22 +375,28 @@ class _AudioTrackEditor extends StatelessWidget {
               ],
               onChanged: (value) {
                 if (value != null) {
-                  next['target_codec'] = value;
-                  onChanged(next);
+                  onChanged({...action, 'target_codec': value});
                 }
               },
             ),
             const SizedBox(height: 9),
             Row(children: [
               Expanded(
-                  child: TextFormField(
-                      initialValue: '${action['bitrate_kbps'] ?? 256}',
-                      keyboardType: TextInputType.number,
-                      decoration:
-                          const InputDecoration(labelText: 'Bitrate kbps'),
+                  child: DropdownButtonFormField<int>(
+                      initialValue: bitrate,
+                      decoration: const InputDecoration(labelText: 'Bitrate'),
+                      items: bitrateChoices
+                          .map((value) => DropdownMenuItem(
+                                value: value,
+                                child: Text(
+                                  '$value kbps${value == 1024 ? ' · safe' : ''}',
+                                ),
+                              ))
+                          .toList(),
                       onChanged: (value) {
-                        next['bitrate_kbps'] = int.tryParse(value) ?? 256;
-                        onChanged(next);
+                        if (value != null) {
+                          onChanged({...action, 'bitrate_kbps': value});
+                        }
                       })),
               const SizedBox(width: 9),
               Expanded(
@@ -388,11 +409,11 @@ class _AudioTrackEditor extends StatelessWidget {
                               value: index + 1, child: Text('${index + 1}'))),
                       onChanged: (value) {
                         if (value != null) {
-                          next['channels'] = value;
-                          if (value >= sourceChannels) {
-                            next['allow_downmix'] = false;
-                          }
-                          onChanged(next);
+                          onChanged({
+                            ...action,
+                            'channels': value,
+                            if (value >= sourceChannels) 'allow_downmix': false,
+                          });
                         }
                       })),
             ]),
@@ -404,8 +425,7 @@ class _AudioTrackEditor extends StatelessWidget {
                     '$sourceChannels → $channels channels is destructive and requires explicit approval.'),
                 value: action['allow_downmix'] == true,
                 onChanged: (value) {
-                  next['allow_downmix'] = value;
-                  onChanged(next);
+                  onChanged({...action, 'allow_downmix': value});
                 },
               ),
             Row(children: [
@@ -416,8 +436,10 @@ class _AudioTrackEditor extends StatelessWidget {
                       decoration:
                           const InputDecoration(labelText: 'Sample rate'),
                       onChanged: (value) {
-                        next['sample_rate'] = int.tryParse(value) ?? 0;
-                        onChanged(next);
+                        onChanged({
+                          ...action,
+                          'sample_rate': int.tryParse(value) ?? 0,
+                        });
                       })),
               const SizedBox(width: 9),
               Expanded(
@@ -427,8 +449,10 @@ class _AudioTrackEditor extends StatelessWidget {
                           decimal: true, signed: true),
                       decoration: const InputDecoration(labelText: 'Gain dB'),
                       onChanged: (value) {
-                        next['gain_db'] = double.tryParse(value) ?? 0;
-                        onChanged(next);
+                        onChanged({
+                          ...action,
+                          'gain_db': double.tryParse(value) ?? 0,
+                        });
                       })),
             ]),
           ],
@@ -439,8 +463,7 @@ class _AudioTrackEditor extends StatelessWidget {
             onChanged: action['action'] == 'remove'
                 ? null
                 : (value) {
-                    next['preserve_metadata'] = value;
-                    onChanged(next);
+                    onChanged({...action, 'preserve_metadata': value});
                   },
           ),
           if (action['object_audio'] == true || action['commentary'] == true)

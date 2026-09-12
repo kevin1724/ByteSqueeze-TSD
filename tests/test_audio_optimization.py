@@ -199,13 +199,60 @@ class AudioOptimizationTests(unittest.TestCase):
             {"codec": "eac3", "codec_label": "E-AC3", "channels": 6, "size_bytes": 600 * 1024**2, "lossless": False},
         )
         plan = normalize_operations(
-            {"job_type": "video_audio", "audio_policy": "optimize_lossless"},
+            {"job_type": "video_audio", "audio_policy": "optimize_lossless", "deduplicate_languages": False},
             source,
         )
         self.assertEqual(plan["audio_actions"][0]["action"], "encode")
         self.assertEqual(plan["audio_actions"][0]["channels"], 8)
+        self.assertEqual(plan["audio_actions"][0]["bitrate_kbps"], 1024)
         self.assertEqual(plan["audio_actions"][1]["action"], "copy")
         self.assertGreater(plan["estimate"]["audio_savings_bytes"], 0)
+
+    def test_smart_language_cleanup_keeps_best_english_and_each_spanish_variant(self):
+        source = inventory(
+            {"language": "eng", "codec": "ac3", "codec_label": "AC3", "channels": 6, "bitrate": 640000, "lossless": False},
+            {"language": "eng", "codec": "dts", "codec_label": "DTS-HD MA", "channels": 8, "bitrate": 4000000, "lossless": True},
+            {"language": "eng", "title": "Director commentary", "codec": "aac", "codec_label": "AAC", "channels": 2, "bitrate": 192000, "lossless": False, "commentary": True},
+            {"language": "spa", "title": "Español Latino", "codec": "eac3", "codec_label": "E-AC3", "channels": 6, "bitrate": 640000, "lossless": False},
+            {"language": "spa", "title": "Latino stereo", "codec": "aac", "codec_label": "AAC", "channels": 2, "bitrate": 192000, "lossless": False},
+            {"language": "spa", "title": "Castellano", "codec": "ac3", "codec_label": "AC3", "channels": 6, "bitrate": 640000, "lossless": False},
+            {"language": "fra", "codec": "ac3", "codec_label": "AC3", "channels": 6, "bitrate": 640000, "lossless": False},
+        )
+        plan = normalize_operations(
+            {
+                "job_type": "video_audio",
+                "audio_policy": "optimize_lossless",
+                "preferred_languages": ["eng", "spa"],
+                "deduplicate_languages": True,
+            },
+            source,
+        )
+        kept = [row for row in plan["audio_actions"] if row["action"] != "remove"]
+        self.assertEqual([row["language_group"] for row in kept], ["eng", "spa:latam", "spa:castilian"])
+        self.assertEqual(kept[0]["source_codec_label"], "DTS-HD MA")
+        self.assertEqual(kept[0]["action"], "encode")
+        self.assertEqual(kept[0]["bitrate_kbps"], 1024)
+        self.assertEqual([row["action"] for row in kept[1:]], ["copy", "copy"])
+        self.assertTrue(any("non-preferred fra" in warning for warning in plan["warnings"]))
+
+    def test_explicit_track_edits_are_not_replaced_by_language_cleanup(self):
+        source = inventory(
+            {"language": "eng"},
+            {"language": "eng", "codec": "ac3", "codec_label": "AC3", "lossless": False},
+        )
+        plan = normalize_operations(
+            {
+                "job_type": "audio_only",
+                "audio_policy": "optimize_lossless",
+                "deduplicate_languages": True,
+                "audio_actions": [
+                    {"stream_index": 1, "action": "remove"},
+                    {"stream_index": 2, "action": "copy"},
+                ],
+            },
+            source,
+        )
+        self.assertEqual([row["action"] for row in plan["audio_actions"]], ["remove", "copy"])
 
     def test_object_audio_and_commentary_are_not_changed_automatically(self):
         source = inventory(
@@ -213,7 +260,7 @@ class AudioOptimizationTests(unittest.TestCase):
             {"commentary": True, "title": "Director commentary"},
         )
         plan = normalize_operations(
-            {"job_type": "audio_only", "audio_policy": "optimize_lossless"},
+            {"job_type": "audio_only", "audio_policy": "optimize_lossless", "deduplicate_languages": False},
             source,
         )
         self.assertEqual([row["action"] for row in plan["audio_actions"]], ["copy", "copy"])

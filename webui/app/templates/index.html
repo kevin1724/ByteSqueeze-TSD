@@ -156,7 +156,7 @@
             <label for="audioPolicySelect">Audio policy</label>
             <select id="audioPolicySelect">
               <option value="preserve" selected>Preserve / Passthrough</option>
-              <option value="optimize_lossless">Optimize lossless tracks</option>
+              <option value="optimize_lossless">Smart optimize · best language tracks</option>
               <option value="custom">Custom per track</option>
             </select>
             <button id="previewAudioBtn" type="button" class="ghost-btn" disabled>Scan audio &amp; review changes</button>
@@ -1558,7 +1558,7 @@ function resetAudioPlan() {
   currentAudioPlanPath = '';
   setTextIfPresent('audioPlanSummary', selectedAudioPolicy() === 'preserve'
     ? 'Every audio track will be copied without downmixing.'
-    : 'Scan audio before queueing to review track-by-track changes.');
+    : 'Scan audio to review the strongest preferred-language tracks, passthroughs, and 1024 kbps lossless conversions.');
 }
 
 function syncAudioJobControls() {
@@ -1587,7 +1587,7 @@ function refreshAudioPlannerEstimate() {
     if (action.action === 'copy') action.estimated_output_bytes = source;
     else if (action.action === 'remove') action.estimated_output_bytes = 0;
     else if (action.target_codec === 'flac') action.estimated_output_bytes = Math.round(source * .72);
-    else action.estimated_output_bytes = Math.round(Number(action.bitrate_kbps || 256) * 1000 * duration / 8);
+    else action.estimated_output_bytes = Math.round(Number(action.bitrate_kbps || 1024) * 1000 * duration / 8);
     output += Number(action.estimated_output_bytes || 0);
   });
   const saved = current - output;
@@ -1637,7 +1637,16 @@ function renderAudioPlanner(data) {
     };
     const actionSelect = makeSelect('Action', [['copy','COPY'],['encode','ENCODE'],['remove','REMOVE']], action.action, value => { action.action = value; syncTrack(); refreshAudioPlannerEstimate(); });
     const codecSelect = makeSelect('Codec', [['aac','AAC'],['eac3','E-AC3'],['ac3','AC3'],['opus','Opus'],['flac','FLAC']], action.target_codec, value => { action.target_codec = value; refreshAudioPlannerEstimate(); });
-    const bitrate = document.createElement('label'); bitrate.textContent = 'Bitrate kbps'; const bitrateInput = document.createElement('input'); bitrateInput.type = 'number'; bitrateInput.min = '64'; bitrateInput.max = '2048'; bitrateInput.value = action.bitrate_kbps || 256; bitrateInput.oninput = () => { action.bitrate_kbps = Number(bitrateInput.value || 256); refreshAudioPlannerEstimate(); }; bitrate.appendChild(bitrateInput); controls.appendChild(bitrate);
+    const bitrate = document.createElement('label'); bitrate.textContent = 'Bitrate';
+    const bitrateInput = document.createElement('select');
+    [256, 320, 448, 640, 768, 1024, 1280, 1536, 2048].forEach(value => {
+      const option = document.createElement('option'); option.value = String(value); option.textContent = `${value} kbps${value === 1024 ? ' · recommended surround' : ''}`; bitrateInput.appendChild(option);
+    });
+    const selectedBitrate = Number(action.bitrate_kbps || 1024);
+    if (![256, 320, 448, 640, 768, 1024, 1280, 1536, 2048].includes(selectedBitrate)) {
+      const custom = document.createElement('option'); custom.value = String(selectedBitrate); custom.textContent = `${selectedBitrate} kbps · current`; bitrateInput.appendChild(custom);
+    }
+    bitrateInput.value = String(selectedBitrate); bitrateInput.onchange = () => { action.bitrate_kbps = Number(bitrateInput.value || 1024); refreshAudioPlannerEstimate(); }; bitrate.appendChild(bitrateInput); controls.appendChild(bitrate);
     const channels = document.createElement('label'); channels.textContent = 'Channels'; const channelInput = document.createElement('input'); channelInput.type = 'number'; channelInput.min = '1'; channelInput.max = '8'; channelInput.value = action.channels || action.source_channels || 2; channelInput.oninput = () => { action.channels = Number(channelInput.value || action.source_channels || 2); action.allow_downmix = action.channels < Number(action.source_channels || 0); refreshAudioPlannerEstimate(); }; channels.appendChild(channelInput); controls.appendChild(channels);
     const sample = document.createElement('label'); sample.textContent = 'Sample rate'; const sampleInput = document.createElement('input'); sampleInput.type = 'number'; sampleInput.min = '0'; sampleInput.max = '192000'; sampleInput.step = '1000'; sampleInput.value = action.sample_rate || ''; sampleInput.placeholder = 'Auto'; sampleInput.oninput = () => { action.sample_rate = Number(sampleInput.value || 0); }; sample.appendChild(sampleInput); controls.appendChild(sample);
     const gain = document.createElement('label'); gain.textContent = 'Gain dB'; const gainInput = document.createElement('input'); gainInput.type = 'number'; gainInput.min = '-20'; gainInput.max = '20'; gainInput.step = '.5'; gainInput.value = action.gain_db || 0; gainInput.oninput = () => { action.gain_db = Number(gainInput.value || 0); }; gain.appendChild(gainInput); controls.appendChild(gain);
@@ -1667,7 +1676,7 @@ async function openAudioPlanner(options = {}) {
   document.getElementById('audioPlannerReplace').closest('label').hidden = !completed && jobType !== 'audio_only';
   if (dialog.showModal) dialog.showModal(); else dialog.setAttribute('open', '');
   try {
-    const response = await fetch('/api/audio/scan', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({src, job_id: jobId, job_type: jobType, audio_policy: policy, operations: {job_type: jobType, audio_policy: policy, default_target_codec: uiSettings.audio_optimize_codec || 'aac', replace_source: jobType === 'audio_only'}}) });
+    const response = await fetch('/api/audio/scan', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({src, job_id: jobId, job_type: jobType, audio_policy: policy, operations: {job_type: jobType, audio_policy: policy, default_target_codec: uiSettings.audio_optimize_codec || 'aac', default_target_bitrate_kbps: uiSettings.audio_optimize_bitrate_kbps || 1024, deduplicate_languages: uiSettings.audio_deduplicate_languages !== false, preferred_languages: uiSettings.audio_preferred_languages || ['eng', 'spa'], replace_source: jobType === 'audio_only'}}) });
     const data = await response.json();
     if (!response.ok || data.error) throw new Error(data.error || 'Audio scan failed');
     audioPlannerContext.src = data.path || src;

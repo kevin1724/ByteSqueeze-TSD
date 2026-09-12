@@ -21,6 +21,9 @@ Map<String, dynamic> applySizeWizardOption(
     updated['ai_copy_audio'] = value == 'copy';
     updated['smart_audio_strategy'] =
         value == 'copy' ? 'copy' : (value == 'eac3' ? 'eac3_surround' : '');
+    if (value == 'eac3' && '${updated['audio_bitrate'] ?? 'auto'}' == 'auto') {
+      updated['audio_bitrate'] = '1024';
+    }
   }
   return updated;
 }
@@ -419,12 +422,34 @@ class _SizeWizardScreenState extends State<SizeWizardScreen> {
                         values: const ['copy', 'eac3', 'aac', 'auto'],
                         labels: const {
                           'copy': 'Passthrough / copy',
-                          'eac3': 'E-AC3 surround',
-                          'aac': 'AAC',
-                          'auto': 'Automatic',
+                          'eac3': 'Smart lossless optimize · 1024k',
+                          'aac': 'AAC · choose bitrate',
+                          'auto': 'Automatic · quality first',
                         },
                         onChanged: (value) => _setOption('audio_mode', value),
                       ),
+                      if ('${_options['audio_mode'] ?? 'copy'}' != 'copy') ...[
+                        const SizedBox(height: 11),
+                        _dropdown(
+                          label: 'Audio bitrate',
+                          value: '${_options['audio_bitrate'] ?? '1024'}',
+                          values: const [
+                            'auto',
+                            '640',
+                            '768',
+                            '1024',
+                            '1280',
+                            '1536',
+                            '2048',
+                          ],
+                          labels: const {
+                            'auto': 'Automatic (quality first)',
+                            '1024': '1024 kbps · recommended surround',
+                          },
+                          onChanged: (value) =>
+                              _setOption('audio_bitrate', value),
+                        ),
+                      ],
                       const SizedBox(height: 11),
                       _dropdown(
                         label: 'Subtitles',

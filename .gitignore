@@ -13,3 +13,8 @@ config/
 .idea/
 *.tar
 *.zip
+dist/
+build/
+worker/vendor/
+.build-cache/
+.codex-remote-attachments/

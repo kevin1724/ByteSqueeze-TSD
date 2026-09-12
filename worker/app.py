@@ -52,7 +52,7 @@ from webui.app.presets import guess_preset_from_filename, load_preset_config
 from webui.app.settings import load_settings, normalize_output_container, save_settings
 
 
-WORKER_RELEASE = "2.10.0"
+WORKER_RELEASE = "2.11.0"
 
 
 def _public_encoding_policy() -> dict:
@@ -79,6 +79,13 @@ def _public_encoding_policy() -> dict:
         "web_optimized": bool(
             output_container == "mp4" and settings.get("web_optimized", False)
         ),
+        "audio_policy_default": str(settings.get("audio_policy_default") or "preserve"),
+        "audio_optimize_codec": str(settings.get("audio_optimize_codec") or "aac"),
+        "audio_optimize_bitrate_kbps": int(settings.get("audio_optimize_bitrate_kbps") or 1024),
+        "audio_deduplicate_languages": bool(settings.get("audio_deduplicate_languages", True)),
+        "audio_preferred_languages": list(settings.get("audio_preferred_languages") or ["eng", "spa"]),
+        "audio_allow_downmix": bool(settings.get("audio_allow_downmix", False)),
+        "audio_allow_object_metadata_loss": bool(settings.get("audio_allow_object_metadata_loss", False)),
     }
 
 
@@ -91,6 +98,13 @@ def _apply_controller_encoding_policy(policy: dict | None) -> dict:
         "auto_stop_large_output_percent",
         "output_container",
         "web_optimized",
+        "audio_policy_default",
+        "audio_optimize_codec",
+        "audio_optimize_bitrate_kbps",
+        "audio_deduplicate_languages",
+        "audio_preferred_languages",
+        "audio_allow_downmix",
+        "audio_allow_object_metadata_loss",
     }
     updates = {key: policy[key] for key in allowed if key in policy}
     if "hardware_transcode_concurrency" in updates:
@@ -371,6 +385,13 @@ def create_worker_app(*, announce_pairing: bool = True) -> Flask:
                 "hardware_transcode_concurrency",
                 "auto_stop_large_output_enabled",
                 "auto_stop_large_output_percent",
+                "audio_policy_default",
+                "audio_optimize_codec",
+                "audio_optimize_bitrate_kbps",
+                "audio_deduplicate_languages",
+                "audio_preferred_languages",
+                "audio_allow_downmix",
+                "audio_allow_object_metadata_loss",
             )
         ):
             return jsonify(error="no supported worker settings supplied"), 400

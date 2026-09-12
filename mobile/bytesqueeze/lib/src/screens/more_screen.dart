@@ -507,6 +507,9 @@ class _OperationsSettingsPageState extends State<OperationsSettingsPage> {
   late double _stopPercent;
   late String _audioPolicy;
   late String _audioCodec;
+  late int _audioBitrate;
+  late bool _deduplicateAudio;
+  late TextEditingController _audioLanguagesController;
   late bool _allowObjectAudioLoss;
   bool _saving = false;
 
@@ -537,8 +540,25 @@ class _OperationsSettingsPageState extends State<OperationsSettingsPage> {
     if (!{'aac', 'eac3', 'ac3', 'opus', 'flac'}.contains(_audioCodec)) {
       _audioCodec = 'aac';
     }
+    _audioBitrate =
+        ((operations['audio_optimize_bitrate_kbps'] as num?)?.toInt() ?? 1024)
+            .clamp(640, 2048);
+    _deduplicateAudio = operations['audio_deduplicate_languages'] != false;
+    final languages = asList(operations['audio_preferred_languages'])
+        .map((value) => '$value'.trim())
+        .where((value) => value.isNotEmpty)
+        .toList();
+    _audioLanguagesController = TextEditingController(
+      text: (languages.isEmpty ? const ['eng', 'spa'] : languages).join(', '),
+    );
     _allowObjectAudioLoss =
         operations['audio_allow_object_metadata_loss'] == true;
+  }
+
+  @override
+  void dispose() {
+    _audioLanguagesController.dispose();
+    super.dispose();
   }
 
   @override
@@ -777,6 +797,50 @@ class _OperationsSettingsPageState extends State<OperationsSettingsPage> {
                       ? (value) => setState(() => _audioCodec = value ?? 'aac')
                       : null,
                 ),
+                const SizedBox(height: 10),
+                DropdownButtonFormField<int>(
+                  initialValue: _audioBitrate,
+                  decoration: const InputDecoration(
+                    labelText: 'Surround quality target',
+                    helperText: '1024 kbps is recommended for 5.1 and 7.1.',
+                  ),
+                  items: const [640, 768, 1024, 1280, 1536, 2048]
+                      .map((value) => DropdownMenuItem(
+                            value: value,
+                            child: Text(
+                              '$value kbps${value == 1024 ? ' · recommended' : ''}',
+                            ),
+                          ))
+                      .toList(),
+                  onChanged: controller.canControl && supported
+                      ? (value) => setState(() => _audioBitrate = value ?? 1024)
+                      : null,
+                ),
+                const SizedBox(height: 10),
+                TextFormField(
+                  controller: _audioLanguagesController,
+                  decoration: const InputDecoration(
+                    labelText: 'Preferred languages',
+                    hintText: 'eng, spa',
+                    helperText: 'Comma-separated ISO codes.',
+                  ),
+                  enabled: controller.canControl && supported,
+                ),
+                SwitchListTile.adaptive(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('One best track per language'),
+                  subtitle: const Text(
+                    'Keeps the strongest English track and separate strongest Latino and Castilian Spanish tracks when both exist.',
+                    style: TextStyle(
+                      color: ByteSqueezeColors.muted,
+                      fontSize: 12,
+                    ),
+                  ),
+                  value: _deduplicateAudio,
+                  onChanged: controller.canControl && supported
+                      ? (value) => setState(() => _deduplicateAudio = value)
+                      : null,
+                ),
                 SwitchListTile.adaptive(
                   contentPadding: EdgeInsets.zero,
                   title: const Text('Allow object-audio conversion'),
@@ -790,7 +854,7 @@ class _OperationsSettingsPageState extends State<OperationsSettingsPage> {
                       : null,
                 ),
                 const Text(
-                    'ByteSqueeze inventories every track. It never downmixes or removes audio without a per-track choice.',
+                    'Preserve copies everything. Smart optimization passes through efficient 5.1 AC3/E-AC3 tracks and shows every proposed removal before queueing.',
                     style: TextStyle(
                         color: ByteSqueezeColors.muted, fontSize: 12)),
               ],
@@ -834,6 +898,13 @@ class _OperationsSettingsPageState extends State<OperationsSettingsPage> {
         'auto_stop_large_output_percent': _stopPercent.round(),
         'audio_policy_default': _audioPolicy,
         'audio_optimize_codec': _audioCodec,
+        'audio_optimize_bitrate_kbps': _audioBitrate,
+        'audio_deduplicate_languages': _deduplicateAudio,
+        'audio_preferred_languages': _audioLanguagesController.text
+            .split(RegExp(r'[,;]+'))
+            .map((value) => value.trim().toLowerCase())
+            .where((value) => value.isNotEmpty)
+            .toList(),
         'audio_allow_object_metadata_loss': _allowObjectAudioLoss,
       });
       if (!mounted) return;

@@ -23,6 +23,7 @@ Completed output files are tagged with `-TSD`, short for "Transcoded", so the ap
 - Bounded Autopilot with observe/manage modes, schedules, queue caps, and explained decisions
 - Transactional node protocol v2 with safe pairing retries, automatic session recovery, and diagnostics
 - Universal ByteSqueeze Android, iPhone, and iPad companion with secure pairing, poster library, remote job controls, automation, and node health
+- Native Windows worker with a compact tray UI, one-time pairing, multi-GPU discovery, selectable work storage, and NVIDIA/AMD/Intel/CPU Smart-job preference
 - Versioned mobile API with hashed tokens, refresh, read/control scopes, and device revocation
 - Safer cleanup behavior for failed or canceled jobs
 
@@ -38,6 +39,13 @@ V3 is published in the standard `latest` and `main` Docker channels:
 docker pull kevina1724/handbrake-tsd-helper:latest
 docker pull kevina1724/handbrake-tsd-worker:latest
 ```
+
+Windows gaming PCs can join the same queue without Docker. Run the packaged
+`ByteSqueezeWorker.exe`, pair the URL and code shown in its compact window,
+then leave it running in the notification area. It bundles HandBrakeCLI and
+FFmpeg, detects every display adapter, verifies the encoders that HandBrake
+actually exposes, and lets Smart jobs prefer NVIDIA NVENC, AMD VCN/VCE, Intel
+Quick Sync, or the CPU. See the [Windows Worker guide](docs/WINDOWS_WORKER.md).
 
 ## Release 3.12 Autopilot Refresh
 
@@ -513,14 +521,14 @@ docker run -d \
 ```
 
 The `latest` and `main` images are published automatically from `main`. Stable
-controller releases also publish `3.24.0` and `3.24` tags.
+controller releases also publish `3.25.0` and `3.25` tags.
 
 The encoding-only worker has its own public Docker Hub image:
 
 [kevina1724/handbrake-tsd-worker on Docker Hub](https://hub.docker.com/r/kevina1724/handbrake-tsd-worker)
 
 `latest` and `main` follow the main branch. Stable worker releases also publish
-`2.10.0` and `2.10` tags:
+`2.11.0` and `2.11` tags:
 
 ```bash
 docker pull kevina1724/handbrake-tsd-worker:latest

@@ -595,7 +595,31 @@
           <option value="opus">Opus</option>
           <option value="flac">FLAC</option>
         </select>
-        <span class="small">Applied only to tracks selected for encoding. AAC defaults preserve the source channel count.</span>
+        <span class="small">Applied only to large lossless tracks. Efficient AC3/E-AC3/AAC tracks are copied.</span>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <label for="audioOptimizeBitrate"><strong>Surround quality target</strong></label>
+        <select id="audioOptimizeBitrate" style="min-width:220px;">
+          <option value="640">640 kbps (compact)</option>
+          <option value="768">768 kbps</option>
+          <option value="1024">1024 kbps (recommended)</option>
+          <option value="1280">1280 kbps</option>
+          <option value="1536">1536 kbps</option>
+          <option value="2048">2048 kbps</option>
+        </select>
+        <span class="small">1024 kbps is the safe default for 5.1/7.1. AC3 is automatically capped at its valid 640 kbps maximum.</span>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <label for="audioPreferredLanguages"><strong>Preferred audio languages</strong></label>
+        <input id="audioPreferredLanguages" type="text" inputmode="text" placeholder="eng, spa" style="min-width:220px;">
+        <span class="small">Comma-separated ISO codes. English keeps one strongest main track. Spanish Latino and Castilian are treated as separate variants and each keeps its strongest track.</span>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <label class="toggle-line" for="audioDeduplicateLanguages">
+          <input id="audioDeduplicateLanguages" type="checkbox">
+          Keep one best track per language or regional variant
+        </label>
+        <span class="small">Used by Smart / Optimize Lossless only. Preserve / Passthrough still copies every track untouched.</span>
       </div>
       <div class="row" style="margin-top:10px;">
         <label class="toggle-line" for="audioAllowObjectMetadataLoss">
@@ -738,7 +762,7 @@
       <label for="smartSettingsAudioStrategy"><strong>Audio conversion when passthrough is off</strong>
         <select id="smartSettingsAudioStrategy">
           <option value="copy">Original passthrough</option>
-          <option value="eac3_surround">E-AC3 5.1 at 640 kbps</option>
+          <option value="eac3_surround">Smart lossless optimize at 1024 kbps</option>
         </select>
       </label>
     </div>
@@ -2128,6 +2152,12 @@
       if (audioPolicyDefault) audioPolicyDefault.value = ["preserve", "optimize_lossless", "custom"].includes(initialSettings?.audio_policy_default) ? initialSettings.audio_policy_default : "preserve";
       const audioOptimizeCodec = document.getElementById("audioOptimizeCodec");
       if (audioOptimizeCodec) audioOptimizeCodec.value = ["aac", "eac3", "ac3", "opus", "flac"].includes(initialSettings?.audio_optimize_codec) ? initialSettings.audio_optimize_codec : "aac";
+      const audioOptimizeBitrate = document.getElementById("audioOptimizeBitrate");
+      if (audioOptimizeBitrate) audioOptimizeBitrate.value = String(initialSettings?.audio_optimize_bitrate_kbps || 1024);
+      const audioPreferredLanguages = document.getElementById("audioPreferredLanguages");
+      if (audioPreferredLanguages) audioPreferredLanguages.value = (initialSettings?.audio_preferred_languages || ["eng", "spa"]).join(", ");
+      const audioDeduplicateLanguages = document.getElementById("audioDeduplicateLanguages");
+      if (audioDeduplicateLanguages) audioDeduplicateLanguages.checked = initialSettings?.audio_deduplicate_languages !== false;
       const audioAllowObjectMetadataLoss = document.getElementById("audioAllowObjectMetadataLoss");
       if (audioAllowObjectMetadataLoss) audioAllowObjectMetadataLoss.checked = Boolean(initialSettings?.audio_allow_object_metadata_loss);
 
@@ -2256,6 +2286,9 @@
       const webOptimized = outputContainer === "mp4" && Boolean(document.getElementById("webOptimizedToggle")?.checked);
       const audioPolicyDefault = document.getElementById("audioPolicyDefault")?.value || "preserve";
       const audioOptimizeCodec = document.getElementById("audioOptimizeCodec")?.value || "aac";
+      const audioOptimizeBitrate = safeNumber(document.getElementById("audioOptimizeBitrate")?.value, 1024, 640, 2048);
+      const audioPreferredLanguages = (document.getElementById("audioPreferredLanguages")?.value || "eng, spa").split(/[,;]+/).map(value => value.trim().toLowerCase()).filter(Boolean);
+      const audioDeduplicateLanguages = document.getElementById("audioDeduplicateLanguages")?.checked !== false;
       const audioAllowObjectMetadataLoss = Boolean(document.getElementById("audioAllowObjectMetadataLoss")?.checked);
 
       let threads = parseInt(threadsRaw, 10);
@@ -2278,6 +2311,9 @@
             web_optimized: webOptimized,
             audio_policy_default: audioPolicyDefault,
             audio_optimize_codec: audioOptimizeCodec,
+            audio_optimize_bitrate_kbps: audioOptimizeBitrate,
+            audio_deduplicate_languages: audioDeduplicateLanguages,
+            audio_preferred_languages: audioPreferredLanguages,
             audio_allow_object_metadata_loss: audioAllowObjectMetadataLoss,
             queue_ui_mode: queueUiMode,
             ui_version: uiVersion,

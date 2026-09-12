@@ -83,7 +83,7 @@ class ApiRouteSmokeTests(unittest.TestCase):
 
         status = self.client.get("/api/autopilot/status")
         self.assertEqual(status.status_code, 200)
-        self.assertEqual(status.get_json()["release"], "3.24.0")
+        self.assertEqual(status.get_json()["release"], "3.25.0")
         self.assertIn("continuous_learning", status.get_json())
         self.assertIn("onboarding", status.get_json())
 
@@ -1208,6 +1208,38 @@ class ApiRouteSmokeTests(unittest.TestCase):
                 },
             )
 
+    def test_audio_optimization_settings_persist(self):
+        original = self.client.get("/api/settings").get_json()["settings"]
+        try:
+            saved = self.client.post(
+                "/api/settings",
+                json={
+                    "audio_policy_default": "optimize_lossless",
+                    "audio_optimize_codec": "aac",
+                    "audio_optimize_bitrate_kbps": 1024,
+                    "audio_deduplicate_languages": True,
+                    "audio_preferred_languages": ["en", "spa", "spa"],
+                },
+            ).get_json()["settings"]
+            self.assertEqual(saved["audio_optimize_bitrate_kbps"], 1024)
+            self.assertTrue(saved["audio_deduplicate_languages"])
+            self.assertEqual(saved["audio_preferred_languages"], ["eng", "spa"])
+
+            app_settings._settings_cache = None
+            reloaded = self.client.get("/api/settings").get_json()["settings"]
+            self.assertEqual(reloaded["audio_preferred_languages"], ["eng", "spa"])
+        finally:
+            self.client.post(
+                "/api/settings",
+                json={
+                    "audio_policy_default": original.get("audio_policy_default", "preserve"),
+                    "audio_optimize_codec": original.get("audio_optimize_codec", "aac"),
+                    "audio_optimize_bitrate_kbps": original.get("audio_optimize_bitrate_kbps", 1024),
+                    "audio_deduplicate_languages": original.get("audio_deduplicate_languages", True),
+                    "audio_preferred_languages": original.get("audio_preferred_languages", ["eng", "spa"]),
+                },
+            )
+
     def test_remote_transfer_output_extension_matches_container(self):
         self.assertEqual(
             app_routes._transfer_output_path_for_src(
@@ -1369,6 +1401,37 @@ class ApiRouteSmokeTests(unittest.TestCase):
             "Smart · H.265 10-bit · NVIDIA NVENC · 1080p",
         )
         self.assertEqual(derived["preset_bundle"]["name"], derived["queued_preset_name"])
+
+    def test_windows_worker_preference_moves_adaptive_job_to_requested_gpu_family(self):
+        plan = {
+            "preset": "1080",
+            "preset_bundle": self._video_preset_bundle(),
+            "extra_args": "--encoder qsv_h265_10bit --all-audio --all-subtitles",
+            "preset_selection": "smart",
+            "preset_adaptive": True,
+            "encode_metadata": {
+                "smart_preset": True,
+                "encoder": "qsv_h265_10bit",
+                "encoder_family": "qsv",
+                "video_codec": "h265",
+                "bit_depth": "10",
+            },
+        }
+        node = {
+            "id": "gaming-rig",
+            "name": "Gaming rig",
+            "hardware": {
+                "encoder_families": ["nvenc", "qsv", "software"],
+                "encoders": ["nvenc_h265_10bit", "qsv_h265_10bit", "x265_10bit"],
+                "preferred_encoder_family": "nvenc",
+            },
+        }
+
+        derived = app_routes._prepare_plan_for_node(plan, node)
+
+        self.assertEqual(derived["encode_metadata"]["encoder"], "nvenc_h265_10bit")
+        self.assertEqual(derived["preset_adaptation"]["to_family"], "nvenc")
+        self.assertIn("worker preference", derived["preset_adaptation"]["reason"])
 
     def test_supported_smart_encoder_rewrites_base_bundle_and_public_name(self):
         plan = {
@@ -3581,7 +3644,7 @@ class ApiRouteSmokeTests(unittest.TestCase):
 
         self.assertEqual(dashboard.status_code, 200, dashboard.get_data(as_text=True))
         dashboard_payload = dashboard.get_json()
-        self.assertEqual(dashboard_payload["release"], "3.24.0")
+        self.assertEqual(dashboard_payload["release"], "3.25.0")
         self.assertEqual(dashboard_payload["library"]["movies"], 1)
         self.assertIn("automation", dashboard_payload)
         self.assertIn("storage", dashboard_payload)
@@ -3896,7 +3959,7 @@ class ApiRouteSmokeTests(unittest.TestCase):
             options = candidate["options"]
             self.assertEqual(options["smart_audio_strategy"], "eac3_surround")
             self.assertEqual(options["audio_mode"], "eac3")
-            self.assertEqual(options["audio_bitrate"], "640")
+            self.assertEqual(options["audio_bitrate"], "1024")
             self.assertEqual(options["audio_tracks"], "all")
             self.assertEqual(options["audio_languages"], ["eng", "spa"])
             self.assertEqual(options["subtitle_mode"], "all")
@@ -3923,7 +3986,7 @@ class ApiRouteSmokeTests(unittest.TestCase):
         self.assertEqual(args[args.index("--audio-lang-list") + 1], "fre")
         self.assertEqual(args[args.index("--subtitle-lang-list") + 1], "fre")
         self.assertEqual(args[args.index("-E") + 1], "eac3")
-        self.assertEqual(args[args.index("-B") + 1], "640")
+        self.assertEqual(args[args.index("-B") + 1], "1024")
         self.assertEqual(args[args.index("-6") + 1], "5point1")
 
         with patch("webui.app.routes._probe_media", return_value=probe):
