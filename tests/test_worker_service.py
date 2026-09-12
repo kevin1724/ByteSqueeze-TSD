@@ -60,8 +60,8 @@ class HeadlessWorkerServiceTests(unittest.TestCase):
         original_jobs = jobs.jobs
         original_queue = jobs.job_queue
         original_threads = jobs.RUNNING_JOB_THREADS
-        original_jobs_file = jobs.JOBS_FILE
         original_queue_paused = jobs.queue_paused
+        original_jobs_file = jobs.JOBS_FILE
         jobs.jobs = {}
         jobs.job_queue = []
         jobs.RUNNING_JOB_THREADS = {}
@@ -171,6 +171,7 @@ class HeadlessWorkerServiceTests(unittest.TestCase):
         original_jobs = jobs.jobs
         original_queue = jobs.job_queue
         original_threads = jobs.RUNNING_JOB_THREADS
+        original_queue_paused = jobs.queue_paused
         jobs.jobs = {
             "pinned-local": {
                 "status": "queued",
@@ -189,6 +190,10 @@ class HeadlessWorkerServiceTests(unittest.TestCase):
         }
         jobs.job_queue = ["pinned-local", "automatic"]
         jobs.RUNNING_JOB_THREADS = {}
+        # create_app() owns a real background dispatcher during the full test
+        # suite. Pause it while this unit test inspects queue ordering so a
+        # fast Linux runner cannot claim the mocked pinned job mid-assertion.
+        jobs.queue_paused = True
         try:
             pending = jobs.get_next_auto_dispatch_job()
             self.assertIsNotNone(pending)
@@ -214,6 +219,7 @@ class HeadlessWorkerServiceTests(unittest.TestCase):
             jobs.jobs = original_jobs
             jobs.job_queue = original_queue
             jobs.RUNNING_JOB_THREADS = original_threads
+            jobs.queue_paused = original_queue_paused
 
     def test_pairing_response_marks_worker_as_transfer_only(self):
         pairing = node_linking.create_pairing_code()
