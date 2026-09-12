@@ -10,8 +10,9 @@ Docker worker.
 1. Download `ByteSqueezeWorker.exe` from the project release and run it.
 2. Allow the app through Windows Firewall on private networks when prompted.
 3. In the main ByteSqueeze server, open **Settings → Linked Nodes**.
-4. Approve the one-time Windows Firewall prompt. You can reopen it later with
-   **Allow controller access** in the worker window.
+4. Approve the one-time Windows Firewall prompt. The rule accepts only the
+   local subnet and Tailscale addresses, even when Windows labels the active
+   network Public. You can reopen it later with **Allow controller access**.
 5. Copy the worker URL shown in the app, enter its one-time pairing code, and
    pair it.
 6. Close the window when finished. The worker remains visible in the Windows

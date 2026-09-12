@@ -182,7 +182,8 @@ def windows_firewall_script(port: int) -> str:
         "if($rule){$rule|Remove-NetFirewallRule -ErrorAction Stop};"
         f"New-NetFirewallRule -DisplayName '{name}' -Direction Inbound "
         f"-Action Allow -Protocol TCP -LocalPort {safe_port} "
-        "-Profile Private,Domain -ErrorAction Stop|Out-Null"
+        "-Profile Any -RemoteAddress LocalSubnet,100.64.0.0/10 "
+        "-ErrorAction Stop|Out-Null"
     )
 
 
@@ -565,7 +566,7 @@ class WorkerWindow:
             (
                 "The ByteSqueeze controller must reach this PC on TCP port "
                 f"{int(self.config['port'])}. Allow the worker through Windows "
-                "Firewall on private and domain networks?"
+                "Firewall for the local network and Tailscale?"
             ),
         ):
             self.allow_controller_access()

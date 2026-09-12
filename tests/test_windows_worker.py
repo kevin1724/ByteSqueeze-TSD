@@ -72,12 +72,12 @@ class WindowsHardwareInventoryTests(unittest.TestCase):
             urls = local_addresses(8082)
         self.assertEqual(urls[0], "http://192.168.12.246:8082")
 
-    def test_firewall_rule_is_limited_to_worker_port_and_trusted_networks(self):
+    def test_firewall_rule_is_limited_to_worker_port_and_local_networks(self):
         script = windows_firewall_script(8082)
         self.assertIn("-LocalPort 8082", script)
         self.assertIn("-Protocol TCP", script)
-        self.assertIn("-Profile Private,Domain", script)
-        self.assertNotIn("-Profile Any", script)
+        self.assertIn("-Profile Any", script)
+        self.assertIn("-RemoteAddress LocalSubnet,100.64.0.0/10", script)
 
     def test_windows_inventory_detects_multiple_vendor_adapters(self):
         payload = [
