@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Optional release tag, for example windows-worker-v2.11.1
+        description: Optional release tag, for example windows-worker-v2.11.2
         required: false
         type: string
 
@@ -31,6 +31,9 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check flask requests
 
       - name: Run worker tests
         run: python -m unittest tests.test_windows_worker tests.test_worker_service

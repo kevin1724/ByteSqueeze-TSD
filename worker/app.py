@@ -52,7 +52,7 @@ from webui.app.presets import guess_preset_from_filename, load_preset_config
 from webui.app.settings import load_settings, normalize_output_container, save_settings
 
 
-WORKER_RELEASE = "2.11.1"
+WORKER_RELEASE = "2.11.2"
 
 
 def _public_encoding_policy() -> dict:
