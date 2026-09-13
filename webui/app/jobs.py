@@ -234,9 +234,18 @@ def _job_error_excerpt(job: dict, fallback: str = "") -> str:
     preferred = [
         line
         for line in lines
-        if "error" in line.lower() or "failed" in line.lower() or "invalid" in line.lower()
+        if any(
+            marker in line.lower()
+            for marker in ("error", "failed", "invalid", "incompatible", "unsupported", "not available")
+        )
     ]
-    value = (preferred or lines or [str(fallback or "encode failed")])[-1]
+    meaningful = [
+        line
+        for line in preferred
+        if "encode failed, output file was not created" not in line.lower()
+        and not line.lower().startswith("[bytesqueeze] error: handbrake exited")
+    ]
+    value = (meaningful or preferred or lines or [str(fallback or "encode failed")])[-1]
     return value[:500]
 
 

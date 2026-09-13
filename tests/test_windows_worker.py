@@ -26,8 +26,14 @@ class WindowsEncodeRunnerTests(unittest.TestCase):
                 "HB_PRESET_FILE": str(preset),
                 "HB_PRESET_NAME": "Smart NVENC HEVC",
                 "HB_VIDEO_ENCODER": "nvenc_h265_10bit",
-                "HB_EXTRA_ARGS": "--encoder nvenc_h265_10bit --quality 24",
-                "HB_AUDIO_POLICY_OPTS": "--all-audio --aname 'English Main' --aencoder copy",
+                "HB_EXTRA_ARGS": (
+                    "--encoder nvenc_h265_10bit -b 13467 --rate 23.976 --quality 24 "
+                    "--audio-lang-list eng,spa --all-audio -E eac3 -B 640"
+                ),
+                "HB_AUDIO_POLICY_OPTS": (
+                    "--audio 1,2 --aname 'English Main,Spanish Main' "
+                    "--aencoder copy,copy --ab auto,auto"
+                ),
                 "HB_DIMENSION_OPTS": "--maxWidth 1920 --maxHeight 1080",
                 "HB_HW_DECODE_OPTS": "--disable-hw-decoding",
                 "HB_OUTPUT_CONTAINER": "mp4",
@@ -41,7 +47,14 @@ class WindowsEncodeRunnerTests(unittest.TestCase):
             self.assertIn("nvenc_h265_10bit", command)
             self.assertIn("av_mp4", command)
             self.assertIn("--optimize", command)
-            self.assertIn("English Main", command)
+            self.assertIn("English Main,Spanish Main", command)
+            self.assertNotIn("--audio-lang-list", command)
+            self.assertNotIn("--all-audio", command)
+            self.assertEqual(command.count("--audio"), 1)
+            self.assertEqual(command[command.index("--audio") + 1], "1,2")
+            self.assertNotIn("640", command)
+            self.assertIn("13467", command)
+            self.assertIn("23.976", command)
             self.assertEqual(command[-1], str(source.with_name("Movie Source-TSD.mp4")))
 
     def test_qsv_jobs_select_adapter_and_keep_decode_request(self):
@@ -60,6 +73,19 @@ class WindowsEncodeRunnerTests(unittest.TestCase):
             self.assertEqual(command[command.index("--qsv-adapter") + 1], "2")
             self.assertEqual(command[command.index("--enable-hw-decoding") + 1], "qsv")
             self.assertIn("av_mkv", command)
+
+    def test_worker_error_excerpt_prefers_real_handbrake_cause(self):
+        job = {
+            "log": (
+                "Incompatible options: --audio-lang-list and --audio\n"
+                "ERROR: Encode failed, output file was not created.\n"
+                "[ByteSqueeze] ERROR: HandBrake exited with code 1\n"
+            )
+        }
+        self.assertEqual(
+            jobs._job_error_excerpt(job),
+            "Incompatible options: --audio-lang-list and --audio",
+        )
 
 
 class WindowsHardwareInventoryTests(unittest.TestCase):
@@ -89,6 +115,16 @@ class WindowsHardwareInventoryTests(unittest.TestCase):
             rows = node_linking._windows_gpu_inventory()
         self.assertEqual([row["vendor"] for row in rows], ["nvidia", "amd"])
         self.assertEqual(rows[0]["name"], "NVIDIA GeForce RTX 5080")
+
+    def test_mixed_nvidia_generations_get_per_gpu_av1_capabilities(self):
+        global_encoders = ["nvenc_h264", "nvenc_h265_10bit", "nvenc_av1_10bit"]
+        old_gpu = {"name": "NVIDIA GeForce RTX 3070"}
+        new_gpu = {"name": "NVIDIA GeForce RTX 5070"}
+        old_caps = node_linking._windows_gpu_encoder_capabilities(old_gpu, "nvenc", global_encoders)
+        new_caps = node_linking._windows_gpu_encoder_capabilities(new_gpu, "nvenc", global_encoders)
+        self.assertNotIn("nvenc_av1_10bit", old_caps)
+        self.assertIn("nvenc_h265_10bit", old_caps)
+        self.assertIn("nvenc_av1_10bit", new_caps)
 
     def test_environment_uses_persistent_windows_paths_and_all_families(self):
         config = default_config()
@@ -180,6 +216,44 @@ class WindowsGpuRoutingTests(unittest.TestCase):
         self.assertEqual(assignment["key"], "gpu:0")
         self.assertTrue(assignment["fallback_used"])
         self.assertEqual(assignment["encoder"], "nvenc_h265_10bit")
+
+    def test_av1_skips_rtx_3070_and_routes_to_rtx_5070(self):
+        hardware = {
+            "gpus": [
+                {
+                    "index": 0,
+                    "name": "NVIDIA GeForce RTX 3070",
+                    "vendor": "nvidia",
+                    "encoder_family": "nvenc",
+                    "memory_bytes": 8_000,
+                    "encoders": ["nvenc_h264", "nvenc_h265_10bit"],
+                },
+                {
+                    "index": 1,
+                    "name": "NVIDIA GeForce RTX 5070",
+                    "vendor": "nvidia",
+                    "encoder_family": "nvenc",
+                    "memory_bytes": 12_000,
+                    "encoders": ["nvenc_h264", "nvenc_h265_10bit", "nvenc_av1_10bit"],
+                },
+            ]
+        }
+        job = {
+            "preset": "4k",
+            "encoder": "nvenc_av1_10bit",
+            "video_codec": "av1",
+            "encoder_family": "nvenc",
+            "bit_depth": "10",
+        }
+        environment = self._environment()
+        environment["TSD_WINDOWS_GPU_ROUTES"] = json.dumps({"av1": "auto", "h265": "auto", "h264": "auto"})
+        with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+            node_linking, "encoder_hardware_profile", return_value=hardware
+        ):
+            available, assignment = jobs._assign_windows_gpu_route(job, [])
+        self.assertTrue(available)
+        self.assertEqual(assignment["key"], "gpu:1")
+        self.assertEqual(assignment["encoder"], "nvenc_av1_10bit")
 
 
 if __name__ == "__main__":

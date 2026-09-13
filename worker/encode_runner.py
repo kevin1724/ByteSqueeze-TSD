@@ -17,6 +17,23 @@ from pathlib import Path
 
 TRUE_VALUES = {"1", "true", "yes", "on"}
 
+# HandBrake rejects the language/all-track selectors produced by legacy Smart
+# Presets when the audio policy supplies an explicit per-track ``--audio``
+# plan.  The policy is the authoritative, post-ffprobe plan, so remove every
+# older audio selector/encoder option before appending it.
+_AUDIO_OPTIONS_WITH_VALUE = {
+    "--audio",
+    "--aencoder",
+    "--ab",
+    "--mixdown",
+    "--arate",
+    "--gain", "--aname",
+    "--audio-copy-mask", "--audio-fallback", "--audio-lang-list",
+    "--audio-dither", "--audio-compression", "--audio-normalize-mix",
+}
+_AUDIO_SHORT_OPTIONS_WITH_VALUE = {"-a", "-E", "-B", "-6", "-R"}
+_AUDIO_FLAG_OPTIONS = {"--all-audio", "--first-audio"}
+
 
 def _background_process_options() -> dict:
     """Prevent HandBrake from flashing a console behind the tray app."""
@@ -68,6 +85,25 @@ def _split(value: str | None) -> list[str]:
     return shlex.split(value, posix=True)
 
 
+def _without_audio_options(arguments: list[str]) -> list[str]:
+    """Remove legacy HandBrake audio options from a tokenized CLI fragment."""
+    cleaned: list[str] = []
+    skip_value = False
+    for argument in arguments:
+        if skip_value:
+            skip_value = False
+            continue
+        raw_option = str(argument).split("=", 1)[0]
+        option = raw_option.lower() if raw_option.startswith("--") else raw_option
+        if option in _AUDIO_FLAG_OPTIONS:
+            continue
+        if option in _AUDIO_OPTIONS_WITH_VALUE or raw_option in _AUDIO_SHORT_OPTIONS_WITH_VALUE:
+            skip_value = "=" not in str(argument)
+            continue
+        cleaned.append(argument)
+    return cleaned
+
+
 def _tool(name: str) -> str:
     found = shutil.which(name) or shutil.which(f"{name}.exe")
     return found or name
@@ -100,8 +136,12 @@ def build_command(env: dict[str, str] | None = None, *, disable_qsv_decode: bool
     if threads.isdigit() and int(threads) > 0:
         command += ["--encopts", f"threads={int(threads)}"]
 
-    command += _split(values.get("HB_EXTRA_ARGS"))
-    command += _split(values.get("HB_AUDIO_POLICY_OPTS"))
+    extra_args = _split(values.get("HB_EXTRA_ARGS"))
+    audio_policy_args = _split(values.get("HB_AUDIO_POLICY_OPTS"))
+    if audio_policy_args:
+        extra_args = _without_audio_options(extra_args)
+    command += extra_args
+    command += audio_policy_args
     command += _split(values.get("HB_DIMENSION_OPTS"))
 
     hw_decode = _split(values.get("HB_HW_DECODE_OPTS") or "--disable-hw-decoding")

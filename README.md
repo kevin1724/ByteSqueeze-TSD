@@ -40,8 +40,9 @@ docker pull kevina1724/handbrake-tsd-helper:latest
 docker pull kevina1724/handbrake-tsd-worker:latest
 ```
 
-Windows gaming PCs can join the same queue without Docker. Run the packaged
-`ByteSqueezeWorker.exe`, pair the URL and code shown in its compact window,
+Windows gaming PCs can join the same queue without Docker. Download and extract
+`ByteSqueeze-Windows-Worker.zip`, run `ByteSqueezeWorker.exe` from the
+extracted folder, then pair the URL and code shown in its compact window.
 then leave it running in the notification area. It bundles HandBrakeCLI and
 FFmpeg, detects every display adapter, verifies the encoders that HandBrake
 actually exposes, and lets Smart jobs prefer NVIDIA NVENC, AMD VCN/VCE, Intel
@@ -528,7 +529,7 @@ The encoding-only worker has its own public Docker Hub image:
 [kevina1724/handbrake-tsd-worker on Docker Hub](https://hub.docker.com/r/kevina1724/handbrake-tsd-worker)
 
 `latest` and `main` follow the main branch. Stable worker releases also publish
-`2.12.2` and `2.12` tags:
+`2.13.0` and `2.13` tags:
 
 ```bash
 docker pull kevina1724/handbrake-tsd-worker:latest

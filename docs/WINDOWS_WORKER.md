@@ -7,20 +7,35 @@ Docker worker.
 
 ## Install and pair
 
-1. Download `ByteSqueezeWorker.exe` from the project release and run it.
-2. Allow the app through Windows Firewall on private networks when prompted.
-3. In the main ByteSqueeze server, open **Settings → Linked Nodes**.
-4. Approve the one-time Windows Firewall prompt. The rule accepts only the
+1. Download `ByteSqueeze-Windows-Worker.zip` from the project release.
+2. Verify its published SHA-256 checksum, extract the complete archive to a
+   local folder, and run `ByteSqueezeWorker.exe` from that folder. Do not move
+   the executable away from its adjacent `_internal` runtime directory.
+3. Allow the app through Windows Firewall on private networks when prompted.
+4. In the main ByteSqueeze server, open **Settings → Linked Nodes**.
+5. Approve the one-time Windows Firewall prompt. The rule accepts only the
    local subnet and Tailscale addresses, even when Windows labels the active
    network Public. You can reopen it later with **Allow controller access**.
-5. Copy the worker URL shown in the app, enter its one-time pairing code, and
+6. Copy the worker URL shown in the app, enter its one-time pairing code, and
    pair it.
-6. Close the window when finished. The worker remains visible in the Windows
+7. Close the window when finished. The worker remains visible in the Windows
    notification area and continues accepting jobs.
 
-Run the executable from a local Windows folder. Windows can block unsigned
-executables launched directly from a NAS/UNC share; copying it locally also
-keeps the persistent Start with Windows shortcut valid.
+Run the complete extracted folder from a local Windows drive. The worker is
+deliberately distributed as an uncompressed portable application rather than a
+single self-extracting PyInstaller binary. This avoids unpacking executable
+code into a random temporary `_MEI...` folder at startup, which is a common
+source of antivirus false positives. It also keeps the persistent Start with
+Windows shortcut valid.
+
+The release workflow supports Authenticode signing when the repository secrets
+`WINDOWS_SIGNING_CERTIFICATE_BASE64` and
+`WINDOWS_SIGNING_CERTIFICATE_PASSWORD` contain a trusted PFX certificate.
+Without a trusted signing identity, Windows may still display an
+unknown-publisher SmartScreen warning because reputation is controlled by
+Microsoft rather than application code. Never disable Defender globally; use
+the official GitHub release, verify the checksum, and submit any named Defender
+detection to Microsoft as a false positive.
 
 State and pairing credentials live in
 `%LOCALAPPDATA%\ByteSqueeze Worker\state`. Incoming source copies and completed
@@ -63,10 +78,11 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-windows-worker.ps1
 
 The build downloads the official HandBrakeCLI release and a current FFmpeg
 Windows essentials build, installs the Python packaging dependencies, and
-creates:
+creates a portable application folder and release archive:
 
 ```text
-dist\windows-worker\ByteSqueezeWorker.exe
+dist\windows-worker\ByteSqueezeWorker\ByteSqueezeWorker.exe
+dist\windows-worker\ByteSqueeze-Windows-Worker.zip
 ```
 
 For an offline/local tool build, put `HandBrakeCLI.exe`, `ffmpeg.exe`, and

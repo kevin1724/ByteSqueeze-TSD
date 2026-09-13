@@ -2,7 +2,10 @@
 param(
     [string]$Python = "python",
     [string]$HandBrakeVersion = "1.11.2",
-    [switch]$UseInstalledTools
+    [switch]$UseInstalledTools,
+    [string]$SigningCertificatePath = "",
+    [string]$SigningCertificatePassword = "",
+    [string]$TimestampUrl = "http://timestamp.digicert.com"
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,6 +16,7 @@ $Downloads = Join-Path $VendorRoot "downloads"
 $BuildRoot = Join-Path $env:LOCALAPPDATA "ByteSqueezeWorkerBuild"
 $DistRoot = Join-Path $RepoRoot "dist\windows-worker"
 $LocalDistRoot = Join-Path $BuildRoot "dist"
+$BundleName = "ByteSqueezeWorker"
 
 New-Item -ItemType Directory -Force -Path $ToolsRoot, $Downloads, $BuildRoot, $DistRoot, $LocalDistRoot | Out-Null
 
@@ -84,11 +88,51 @@ try {
     Pop-Location
 }
 
-$LocalExe = Join-Path $LocalDistRoot "ByteSqueezeWorker.exe"
-$Exe = Join-Path $DistRoot "ByteSqueezeWorker.exe"
-Copy-Item -LiteralPath $LocalExe -Destination $Exe -Force
-if (-not (Test-Path -LiteralPath $Exe)) { throw "Build completed without producing $Exe" }
-$Hash = (Get-FileHash -LiteralPath $Exe -Algorithm SHA256).Hash.ToLowerInvariant()
-Set-Content -LiteralPath "$Exe.sha256" -Encoding ascii -Value "$Hash  ByteSqueezeWorker.exe"
-Write-Host "Built: $Exe"
-Write-Host "SHA256: $Hash"
+$LocalBundle = Join-Path $LocalDistRoot $BundleName
+$LocalExe = Join-Path $LocalBundle "ByteSqueezeWorker.exe"
+if (-not (Test-Path -LiteralPath $LocalExe)) { throw "Build completed without producing $LocalExe" }
+
+function Find-SignTool {
+    $command = Get-Command "signtool.exe" -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    $kitRoot = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
+    if (Test-Path -LiteralPath $kitRoot) {
+        $found = Get-ChildItem -LiteralPath $kitRoot -Filter "signtool.exe" -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '[\\/]x64[\\/]signtool\.exe$' } |
+            Sort-Object -Property FullName -Descending |
+            Select-Object -First 1
+        if ($found) { return $found.FullName }
+    }
+    return ""
+}
+
+if ($SigningCertificatePath) {
+    if (-not (Test-Path -LiteralPath $SigningCertificatePath)) {
+        throw "Signing certificate was not found: $SigningCertificatePath"
+    }
+    $SignTool = Find-SignTool
+    if (-not $SignTool) { throw "signtool.exe is required for an Authenticode release." }
+    & $SignTool sign /fd SHA256 /td SHA256 /tr $TimestampUrl /f $SigningCertificatePath /p $SigningCertificatePassword $LocalExe
+    if ($LASTEXITCODE -ne 0) { throw "Authenticode signing failed." }
+    & $SignTool verify /pa /v $LocalExe
+    if ($LASTEXITCODE -ne 0) { throw "Authenticode verification failed." }
+} else {
+    Write-Warning "No Authenticode certificate supplied. The portable layout reduces antivirus false positives, but Microsoft may still show an unknown-publisher warning."
+}
+
+$Bundle = Join-Path $DistRoot $BundleName
+if (Test-Path -LiteralPath $Bundle) { Remove-Item -LiteralPath $Bundle -Recurse -Force }
+Copy-Item -LiteralPath $LocalBundle -Destination $Bundle -Recurse -Force
+$Exe = Join-Path $Bundle "ByteSqueezeWorker.exe"
+$Archive = Join-Path $DistRoot "ByteSqueeze-Windows-Worker.zip"
+if (Test-Path -LiteralPath $Archive) { Remove-Item -LiteralPath $Archive -Force }
+Compress-Archive -Path (Join-Path $Bundle "*") -DestinationPath $Archive -CompressionLevel Optimal
+
+$ExeHash = (Get-FileHash -LiteralPath $Exe -Algorithm SHA256).Hash.ToLowerInvariant()
+$ArchiveHash = (Get-FileHash -LiteralPath $Archive -Algorithm SHA256).Hash.ToLowerInvariant()
+Set-Content -LiteralPath (Join-Path $DistRoot "ByteSqueezeWorker.exe.sha256") -Encoding ascii -Value "$ExeHash  ByteSqueezeWorker.exe"
+Set-Content -LiteralPath "$Archive.sha256" -Encoding ascii -Value "$ArchiveHash  ByteSqueeze-Windows-Worker.zip"
+Write-Host "Built portable worker: $Bundle"
+Write-Host "Built release archive: $Archive"
+Write-Host "EXE SHA256: $ExeHash"
+Write-Host "ZIP SHA256: $ArchiveHash"

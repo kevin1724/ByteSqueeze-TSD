@@ -151,6 +151,31 @@ def _windows_gpu_inventory() -> list[dict]:
     return rows
 
 
+def _windows_gpu_encoder_capabilities(gpu: dict, family: str, encoders: list[str]) -> list[str]:
+    """Return conservative per-adapter capabilities from a machine-wide probe.
+
+    HandBrake reports NVENC support for the machine, not for each physical
+    adapter.  On mixed-generation systems that made an RTX 30-series adapter
+    appear AV1-capable merely because an RTX 40/50-series adapter was also
+    installed.  Remove codecs that are known to be absent on an adapter while
+    leaving unknown/professional model names backward compatible.
+    """
+    supported = [name for name in encoders if name in HARDWARE_ENCODERS.get(family, ())]
+    name = str(gpu.get("name") or "").strip().lower()
+    if family == "nvenc":
+        # AV1 NVENC starts with Ada-generation GeForce RTX 40-series hardware.
+        # Turing (20), Ampere (30), GTX, and Quadro adapters cannot encode AV1.
+        known_without_av1 = bool(
+            re.search(r"(?:geforce\s+)?rtx\s*(?:20|30)\d{2}", name)
+            or "geforce gtx" in name
+            or "quadro" in name
+            or re.search(r"\brtx\s+a\d{3,4}\b", name)
+        )
+        if known_without_av1:
+            supported = [encoder for encoder in supported if "_av1" not in encoder]
+    return supported
+
+
 def _requested_family_order() -> list[str]:
     requested = []
     for value in re.split(r"[,;\s]+", str(os.environ.get("TSD_ENCODER_FAMILIES") or "")):
@@ -266,7 +291,7 @@ def encoder_hardware_profile(*, force: bool = False) -> dict:
         for gpu in windows_gpus:
             family = vendor_family.get(str(gpu.get("vendor") or ""), "")
             gpu["encoder_family"] = family
-            gpu["encoders"] = [name for name in encoders if name in HARDWARE_ENCODERS.get(family, ())]
+            gpu["encoders"] = _windows_gpu_encoder_capabilities(gpu, family, encoders)
         value = {
             "encoder_families": ordered_families,
             "encoders": list(dict.fromkeys(encoders)),
