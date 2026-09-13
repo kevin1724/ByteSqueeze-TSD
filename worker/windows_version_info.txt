@@ -16,12 +16,12 @@ VSVersionInfo(
         [
           StringStruct('CompanyName', 'ByteSqueeze'),
           StringStruct('FileDescription', 'ByteSqueeze Windows Worker'),
-          StringStruct('FileVersion', '2.13.3'),
+          StringStruct('FileVersion', '2.13.4'),
           StringStruct('InternalName', 'ByteSqueezeWorker'),
           StringStruct('LegalCopyright', 'ByteSqueeze contributors'),
           StringStruct('OriginalFilename', 'ByteSqueezeWorker.exe'),
           StringStruct('ProductName', 'ByteSqueeze Windows Worker'),
-          StringStruct('ProductVersion', '2.13.3'),
+          StringStruct('ProductVersion', '2.13.4'),
         ],
       )
     ]),

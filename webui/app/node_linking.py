@@ -12,6 +12,7 @@ import secrets
 import shutil
 import subprocess
 import platform
+import tempfile
 import threading
 import time
 import uuid
@@ -289,7 +290,14 @@ def verify_windows_nvenc_encoder(
     *,
     force: bool = False,
 ) -> tuple[bool, str]:
-    """Perform a cached one-frame encode on the exact NVIDIA ordinal."""
+    """Verify AV1 on the mapped adapter using the worker's real encode engine.
+
+    FFmpeg is bundled for probes and audio-only jobs, but it is not the engine
+    used by normal video jobs. A newer FFmpeg can require a newer NVENC API
+    than the bundled HandBrake build and must not incorrectly disqualify an
+    otherwise working adapter. Generate a tiny software-only source with
+    FFmpeg, then encode it through HandBrake using the exact NVENC ordinal.
+    """
     encoder = str(encoder or "").strip().lower()
     if encoder not in {"nvenc_av1", "nvenc_av1_10bit"}:
         return True, "adapter-specific probe not required"
@@ -305,51 +313,91 @@ def verify_windows_nvenc_encoder(
     )
     if not str(gpu.get("gpu_uuid") or gpu.get("pci_bus_id") or "").strip():
         return False, "NVIDIA adapter identity could not be matched by UUID or PCI bus"
-    ffmpeg = shutil.which("ffmpeg")
+    ffmpeg = shutil.which("ffmpeg") or shutil.which("ffmpeg.exe")
+    handbrake = shutil.which("HandBrakeCLI") or shutil.which("HandBrakeCLI.exe")
     if not ffmpeg:
-        return False, "FFmpeg is unavailable for the NVENC capability check"
-    pixel_format = "p010le" if encoder.endswith("_10bit") else "yuv420p"
-    cache_key = (identity, str(gpu.get("driver_version") or ""), f"av1_nvenc:{pixel_format}")
+        return False, "FFmpeg is unavailable to create the AV1 capability test source"
+    if not handbrake:
+        return False, "HandBrakeCLI is unavailable for the AV1 capability check"
+    cache_key = (identity, str(gpu.get("driver_version") or ""), f"handbrake:{encoder}")
     now = _now()
     with NVENC_PROBE_LOCK:
         cached = NVENC_PROBE_CACHE.get(cache_key)
         if not force and cached and cached[0] > now:
             return cached[1], cached[2]
-    command = [
-        ffmpeg,
-        "-hide_banner",
-        "-loglevel", "error",
-        "-f", "lavfi",
-        "-i", "color=c=black:s=64x64:r=1:d=0.1",
-        "-frames:v", "1",
-        "-an",
-        "-pix_fmt", pixel_format,
-        "-c:v", "av1_nvenc",
-        "-gpu", str(vendor_index),
-        "-f", "null",
-        "-",
-    ]
+    def failure_detail(result, fallback: str) -> str:
+        lines = [
+            line.strip()
+            for line in (result.stderr or result.stdout or "").splitlines()
+            if line.strip()
+        ]
+        preferred = next(
+            (
+                line for line in reversed(lines)
+                if any(word in line.casefold() for word in ("error", "failed", "nvenc", "capable device"))
+            ),
+            "",
+        )
+        return preferred or (lines[-1] if lines else fallback)
+
     try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=20,
-            check=False,
-            **background_process_options(),
-        )
-        ok = result.returncode == 0
-        detail = "AV1 NVENC verified" if ok else (
-            next(
-                (line.strip() for line in (result.stderr or result.stdout or "").splitlines() if line.strip()),
-                f"FFmpeg capability probe exited with code {result.returncode}",
+        with tempfile.TemporaryDirectory(prefix="bytesqueeze-nvenc-") as temp_dir:
+            source_path = os.path.join(temp_dir, "source.mkv")
+            output_path = os.path.join(temp_dir, "probe.mkv")
+            source_result = subprocess.run(
+                [
+                    ffmpeg,
+                    "-hide_banner", "-loglevel", "error", "-y",
+                    "-f", "lavfi", "-i", "color=c=black:s=128x72:r=24:d=1",
+                    "-an", "-c:v", "ffv1", source_path,
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=20,
+                check=False,
+                **background_process_options(),
             )
-        )
+            if source_result.returncode != 0:
+                ok = False
+                detail = failure_detail(
+                    source_result,
+                    f"AV1 test source creation exited with code {source_result.returncode}",
+                )
+            else:
+                command = [
+                    handbrake,
+                    "-i", source_path,
+                    "-o", output_path,
+                    "--format", "av_mkv",
+                    "--encoder", encoder,
+                    "--quality", "35",
+                    "--encopts", f"gpu={vendor_index}",
+                    "--no-markers",
+                ]
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=45,
+                    check=False,
+                    **background_process_options(),
+                )
+                ok = result.returncode == 0 and os.path.isfile(output_path) and os.path.getsize(output_path) > 0
+                detail = (
+                    f"HandBrake {encoder} verified on NVENC adapter {vendor_index}"
+                    if ok
+                    else failure_detail(
+                        result,
+                        f"HandBrake capability probe exited with code {result.returncode}",
+                    )
+                )
     except Exception as exc:
         ok = False
-        detail = f"FFmpeg capability probe failed: {exc}"
+        detail = f"HandBrake capability probe failed: {exc}"
     with NVENC_PROBE_LOCK:
         NVENC_PROBE_CACHE[cache_key] = (now + (3600.0 if ok else 300.0), ok, detail[:500])
     return ok, detail[:500]
@@ -499,7 +547,13 @@ def encoder_hardware_profile(*, force: bool = False) -> dict:
             if windows_worker and family == "nvenc":
                 av1_encoders = [name for name in gpu["encoders"] if "_av1" in name]
                 if av1_encoders:
-                    verified, reason = verify_windows_nvenc_encoder(gpu, av1_encoders[0])
+                    # Verify the most demanding advertised path. A successful
+                    # 10-bit probe also establishes ordinary AV1 availability.
+                    probe_encoder = next(
+                        (name for name in av1_encoders if name.endswith("_10bit")),
+                        av1_encoders[0],
+                    )
+                    verified, reason = verify_windows_nvenc_encoder(gpu, probe_encoder)
                     gpu["av1_nvenc_verified"] = bool(verified)
                     gpu["av1_nvenc_verification"] = str(reason or "")
                     if not verified:

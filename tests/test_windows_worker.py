@@ -223,16 +223,30 @@ class WindowsHardwareInventoryTests(unittest.TestCase):
             "driver_version": "591.86",
         }
         result = mock.Mock(returncode=0, stdout="", stderr="")
+        commands = []
+
+        def run_probe(command, **_kwargs):
+            commands.append(command)
+            if "HandBrakeCLI.exe" in command[0]:
+                Path(command[command.index("-o") + 1]).write_bytes(b"verified")
+            return result
+
+        def find_tool(name):
+            return "HandBrakeCLI.exe" if name.casefold().startswith("handbrakecli") else "ffmpeg.exe"
+
         node_linking.NVENC_PROBE_CACHE.clear()
-        with mock.patch.object(node_linking.shutil, "which", return_value="ffmpeg.exe"), mock.patch.object(
-            node_linking.subprocess, "run", return_value=result
-        ) as run:
+        with mock.patch.object(node_linking.shutil, "which", side_effect=find_tool), mock.patch.object(
+            node_linking.subprocess, "run", side_effect=run_probe
+        ):
             ok, reason = node_linking.verify_windows_nvenc_encoder(gpu, "nvenc_av1_10bit", force=True)
         self.assertTrue(ok)
-        self.assertEqual(reason, "AV1 NVENC verified")
-        command = run.call_args.args[0]
-        self.assertEqual(command[command.index("-gpu") + 1], "1")
-        self.assertEqual(command[command.index("-pix_fmt") + 1], "p010le")
+        self.assertEqual(reason, "HandBrake nvenc_av1_10bit verified on NVENC adapter 1")
+        self.assertEqual(len(commands), 2)
+        source_command, handbrake_command = commands
+        self.assertNotIn("av1_nvenc", source_command)
+        self.assertEqual(handbrake_command[handbrake_command.index("--encoder") + 1], "nvenc_av1_10bit")
+        self.assertEqual(handbrake_command[handbrake_command.index("--encopts") + 1], "gpu=1")
+        self.assertNotIn("--encoder-profile", handbrake_command)
 
     def test_av1_nvenc_probe_requires_stable_adapter_identity(self):
         ok, reason = node_linking.verify_windows_nvenc_encoder(
