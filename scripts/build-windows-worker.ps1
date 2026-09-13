@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$Python = "python",
-    [string]$HandBrakeVersion = "1.11.2",
+    [string]$HandBrakeVersion = "1.11.1",
     [switch]$UseInstalledTools,
     [string]$SigningCertificatePath = "",
     [string]$SigningCertificatePassword = "",
@@ -30,12 +30,28 @@ function Copy-InstalledTool([string]$Name) {
 }
 
 $HandBrakePath = Join-Path $ToolsRoot "HandBrakeCLI.exe"
-if (-not (Test-Path -LiteralPath $HandBrakePath)) {
+$HandBrakeVersionMarker = Join-Path $ToolsRoot "HandBrakeCLI.version"
+$InstalledHandBrakeVersion = if (Test-Path -LiteralPath $HandBrakeVersionMarker) {
+    (Get-Content -LiteralPath $HandBrakeVersionMarker -Raw).Trim()
+} else {
+    ""
+}
+$NeedsHandBrake = -not (Test-Path -LiteralPath $HandBrakePath) -or (
+    -not $UseInstalledTools -and $InstalledHandBrakeVersion -ne $HandBrakeVersion
+)
+if ($NeedsHandBrake) {
     if (-not $UseInstalledTools -or -not (Copy-InstalledTool "HandBrakeCLI.exe")) {
         $Archive = Join-Path $Downloads "HandBrakeCLI-$HandBrakeVersion-win-x86_64.zip"
         $Url = "https://github.com/HandBrake/HandBrake/releases/download/$HandBrakeVersion/HandBrakeCLI-$HandBrakeVersion-win-x86_64.zip"
         Write-Host "Downloading official HandBrakeCLI $HandBrakeVersion..."
         Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Archive
+        if ($HandBrakeVersion -eq "1.11.1") {
+            $ExpectedHash = "83f7600fb14375d1a6cb96c37d9ee20a2832afe4ce1d5453a490e08ff5859863"
+            $ActualHash = (Get-FileHash -LiteralPath $Archive -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($ActualHash -ne $ExpectedHash) {
+                throw "Official HandBrakeCLI $HandBrakeVersion checksum mismatch."
+            }
+        }
         $Extract = Join-Path $Downloads "handbrake"
         if (Test-Path -LiteralPath $Extract) { Remove-Item -LiteralPath $Extract -Recurse -Force }
         Expand-Archive -LiteralPath $Archive -DestinationPath $Extract -Force
@@ -43,6 +59,8 @@ if (-not (Test-Path -LiteralPath $HandBrakePath)) {
         if (-not $Found) { throw "HandBrakeCLI.exe was not found in the official archive." }
         Copy-Item -LiteralPath $Found.FullName -Destination $HandBrakePath -Force
     }
+    $MarkerValue = if ($UseInstalledTools) { "installed" } else { $HandBrakeVersion }
+    Set-Content -LiteralPath $HandBrakeVersionMarker -Encoding ascii -Value $MarkerValue
 }
 
 $FfmpegPath = Join-Path $ToolsRoot "ffmpeg.exe"
@@ -68,10 +86,15 @@ if (-not (Test-Path -LiteralPath $FfmpegPath) -or -not (Test-Path -LiteralPath $
 }
 
 Set-Content -LiteralPath (Join-Path $ToolsRoot "THIRD-PARTY-NOTICES.txt") -Encoding utf8 -Value @"
-ByteSqueeze Worker bundles HandBrakeCLI and FFmpeg.
+ByteSqueeze Worker bundles HandBrakeCLI $HandBrakeVersion and FFmpeg.
 HandBrake: https://handbrake.fr/ and https://github.com/HandBrake/HandBrake
 FFmpeg: https://ffmpeg.org/ (Windows binary supplied by https://www.gyan.dev/ffmpeg/builds/)
 These programs retain their respective licenses and are invoked as separate executables.
+
+The Windows worker intentionally uses HandBrakeCLI 1.11.1, which targets NVENC
+API 13.0. HandBrake/FFmpeg builds targeting NVENC API 13.1 require NVIDIA
+Windows driver 610 or newer and cannot run on otherwise valid 590-series
+drivers such as 595.79.
 "@
 
 & $Python -m pip install --disable-pip-version-check --upgrade pyinstaller pystray pillow flask

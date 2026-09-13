@@ -61,6 +61,11 @@ jobs:
       - name: Verify packaged API and bundled tools
         shell: pwsh
         run: |
+          $handbrake = ".\dist\windows-worker\ByteSqueezeWorker\_internal\tools\HandBrakeCLI.exe"
+          $handbrakeVersion = (& $handbrake --version 2>&1 | Out-String)
+          if ($handbrakeVersion -notmatch "HandBrake 1\.11\.1") {
+            throw "Driver-compatible HandBrake 1.11.1 was not packaged: $handbrakeVersion"
+          }
           $result = Join-Path $env:RUNNER_TEMP "bytesqueeze-self-test.json"
           $process = Start-Process -FilePath ".\dist\windows-worker\ByteSqueezeWorker\ByteSqueezeWorker.exe" -ArgumentList @("--self-test", $result) -Wait -PassThru -WindowStyle Hidden
           if ($process.ExitCode -ne 0) { throw "Worker self-test exited $($process.ExitCode)" }

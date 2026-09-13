@@ -4267,7 +4267,12 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
         # even when no Windows GPU route rewrite was required.
         video_encoder=selected_encoder,
         gpu_index=(
-            int(gpu_assignment.get("vendor_index") or 0)
+            (
+                0
+                if str(gpu_assignment.get("encoder_family") or "") == "nvenc"
+                and str(gpu_assignment.get("gpu_uuid") or "").strip()
+                else int(gpu_assignment.get("vendor_index") or 0)
+            )
         ) if routed_encoder.startswith(("nvenc_", "vce_")) else None,
     )
     if controlled_preset:
@@ -4347,11 +4352,18 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
     routed_family = str(gpu_assignment.get("encoder_family") or "")
     routed_vendor_index = int(gpu_assignment.get("vendor_index") or 0) if gpu_assignment else 0
     if routed_family == "nvenc":
-        # Do not renumber adapters with visibility variables. The preset uses
-        # NVIDIA's mapped ordinal directly, which was validated against the
-        # adapter UUID/PCI identity before this process can launch.
-        env.pop("CUDA_VISIBLE_DEVICES", None)
-        env.pop("NVIDIA_VISIBLE_DEVICES", None)
+        selected_uuid = str(gpu_assignment.get("gpu_uuid") or "").strip()
+        if selected_uuid:
+            # Isolate by UUID, never by ByteSqueeze/WMI ordinal. HandBrake
+            # can ignore gpu=N with multiple NVIDIA cards, but CUDA
+            # honors this stable physical identity and exposes it as gpu=0.
+            env["CUDA_VISIBLE_DEVICES"] = selected_uuid
+            env["NVIDIA_VISIBLE_DEVICES"] = selected_uuid
+            env["TSD_NVENC_LOGICAL_GPU_INDEX"] = "0"
+        else:
+            env.pop("CUDA_VISIBLE_DEVICES", None)
+            env.pop("NVIDIA_VISIBLE_DEVICES", None)
+            env["TSD_NVENC_LOGICAL_GPU_INDEX"] = str(routed_vendor_index)
         env["TSD_NVENC_GPU_INDEX"] = str(routed_vendor_index)
         env["TSD_NVENC_GPU_UUID"] = str(gpu_assignment.get("gpu_uuid") or "")
         env["TSD_NVENC_PCI_BUS_ID"] = str(gpu_assignment.get("pci_bus_id") or "")
@@ -4405,6 +4417,9 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
             f"{route_note}\n"
             f"[ByteSqueeze] GPU identity: UUID {gpu_assignment.get('gpu_uuid') or 'unknown'}; "
             f"PCI {gpu_assignment.get('pci_bus_id') or 'unknown'}\n"
+            f"[ByteSqueeze] HandBrake GPU mapping: physical NVENC adapter "
+            f"{gpu_assignment.get('vendor_index')} -> logical gpu="
+            f"{env.get('TSD_NVENC_LOGICAL_GPU_INDEX', gpu_assignment.get('vendor_index'))}\n"
             f"[ByteSqueeze] GPU capability check: "
             f"{gpu_assignment.get('capability_verification') or 'not required'}\n"
         )

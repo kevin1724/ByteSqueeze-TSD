@@ -223,10 +223,10 @@ class WindowsHardwareInventoryTests(unittest.TestCase):
             "driver_version": "591.86",
         }
         result = mock.Mock(returncode=0, stdout="", stderr="")
-        commands = []
+        calls = []
 
         def run_probe(command, **_kwargs):
-            commands.append(command)
+            calls.append((command, _kwargs))
             if "HandBrakeCLI.exe" in command[0]:
                 Path(command[command.index("-o") + 1]).write_bytes(b"verified")
             return result
@@ -240,13 +240,53 @@ class WindowsHardwareInventoryTests(unittest.TestCase):
         ):
             ok, reason = node_linking.verify_windows_nvenc_encoder(gpu, "nvenc_av1_10bit", force=True)
         self.assertTrue(ok)
-        self.assertEqual(reason, "HandBrake nvenc_av1_10bit verified on NVENC adapter 1")
-        self.assertEqual(len(commands), 2)
-        source_command, handbrake_command = commands
+        self.assertEqual(
+            reason,
+            "HandBrake nvenc_av1_10bit verified on physical NVENC adapter 1 (logical gpu=0)",
+        )
+        self.assertEqual(len(calls), 2)
+        source_command = calls[0][0]
+        handbrake_command, handbrake_kwargs = calls[1]
         self.assertNotIn("av1_nvenc", source_command)
+        self.assertIn("color=c=black:s=1920x1080:r=24:d=1", source_command)
         self.assertEqual(handbrake_command[handbrake_command.index("--encoder") + 1], "nvenc_av1_10bit")
-        self.assertEqual(handbrake_command[handbrake_command.index("--encopts") + 1], "gpu=1")
+        self.assertEqual(handbrake_command[handbrake_command.index("--encopts") + 1], "gpu=0")
+        self.assertEqual(handbrake_kwargs["env"]["CUDA_VISIBLE_DEVICES"], "GPU-5070")
+        self.assertEqual(handbrake_kwargs["env"]["NVIDIA_VISIBLE_DEVICES"], "GPU-5070")
         self.assertNotIn("--encoder-profile", handbrake_command)
+
+    def test_av1_nvenc_probe_reports_driver_api_mismatch_instead_of_error_3(self):
+        gpu = {
+            "vendor_index": 0,
+            "gpu_uuid": "GPU-5070",
+            "pci_bus_id": "00000000:0a:00.0",
+            "driver_version": "595.79",
+        }
+        source_result = mock.Mock(returncode=0, stdout="", stderr="")
+        encode_result = mock.Mock(
+            returncode=3,
+            stdout="",
+            stderr=(
+                "[av1_nvenc] Driver does not support the required nvenc API version. "
+                "Required: 13.1 Found: 13.0\n"
+                "ERROR: Failure to initialise encoder\n"
+                "Encode failed (error 3).\n"
+            ),
+        )
+
+        def find_tool(name):
+            return "HandBrakeCLI.exe" if name.casefold().startswith("handbrakecli") else "ffmpeg.exe"
+
+        node_linking.NVENC_PROBE_CACHE.clear()
+        with mock.patch.object(node_linking.shutil, "which", side_effect=find_tool), mock.patch.object(
+            node_linking.subprocess, "run", side_effect=[source_result, encode_result]
+        ):
+            ok, reason = node_linking.verify_windows_nvenc_encoder(
+                gpu, "nvenc_av1_10bit", force=True
+            )
+        self.assertFalse(ok)
+        self.assertIn("Required: 13.1 Found: 13.0", reason)
+        self.assertNotEqual(reason, "Encode failed (error 3).")
 
     def test_av1_nvenc_probe_requires_stable_adapter_identity(self):
         ok, reason = node_linking.verify_windows_nvenc_encoder(

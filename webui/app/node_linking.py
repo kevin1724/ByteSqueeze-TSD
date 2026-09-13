@@ -331,14 +331,36 @@ def verify_windows_nvenc_encoder(
             for line in (result.stderr or result.stdout or "").splitlines()
             if line.strip()
         ]
-        preferred = next(
+        # HandBrake ends most failures with the unhelpful generic
+        # "Encode failed (error 3)."  Prefer the underlying NVENC/driver line
+        # even though it appears earlier in the output.
+        specific = next(
             (
-                line for line in reversed(lines)
-                if any(word in line.casefold() for word in ("error", "failed", "nvenc", "capable device"))
+                line for line in lines
+                if any(
+                    phrase in line.casefold()
+                    for phrase in (
+                        "driver does not support",
+                        "no capable devices",
+                        "cannot load nvencode",
+                        "cannot load nvcuda",
+                        "unsupported device",
+                        "invalid param",
+                        "avcodec_open failed",
+                    )
+                )
             ),
             "",
         )
-        return preferred or (lines[-1] if lines else fallback)
+        useful = next(
+            (
+                line for line in reversed(lines)
+                if "encode failed (error " not in line.casefold()
+                and any(word in line.casefold() for word in ("error", "failed", "nvenc"))
+            ),
+            "",
+        )
+        return specific or useful or (lines[-1] if lines else fallback)
 
     try:
         with tempfile.TemporaryDirectory(prefix="bytesqueeze-nvenc-") as temp_dir:
@@ -348,7 +370,9 @@ def verify_windows_nvenc_encoder(
                 [
                     ffmpeg,
                     "-hide_banner", "-loglevel", "error", "-y",
-                    "-f", "lavfi", "-i", "color=c=black:s=128x72:r=24:d=1",
+                    # Use a normal 1080p frame. Tiny sources can be rejected by
+                    # hardware codec constraints even when the adapter works.
+                    "-f", "lavfi", "-i", "color=c=black:s=1920x1080:r=24:d=1",
                     "-an", "-c:v", "ffv1", source_path,
                 ],
                 capture_output=True,
@@ -366,6 +390,18 @@ def verify_windows_nvenc_encoder(
                     f"AV1 test source creation exited with code {source_result.returncode}",
                 )
             else:
+                # Some HandBrake NVENC builds can ignore FFmpeg's gpu=N option on a
+                # multi-NVIDIA Windows host. Restrict CUDA enumeration by the
+                # stable UUID, then address the selected device as logical
+                # gpu=0. This preserves the physical WMI/nvidia-smi mapping
+                # while avoiding HandBrake's ambiguous adapter order.
+                gpu_uuid = str(gpu.get("gpu_uuid") or "").strip()
+                probe_environment = os.environ.copy()
+                probe_index = vendor_index
+                if gpu_uuid:
+                    probe_environment["CUDA_VISIBLE_DEVICES"] = gpu_uuid
+                    probe_environment["NVIDIA_VISIBLE_DEVICES"] = gpu_uuid
+                    probe_index = 0
                 command = [
                     handbrake,
                     "-i", source_path,
@@ -373,7 +409,7 @@ def verify_windows_nvenc_encoder(
                     "--format", "av_mkv",
                     "--encoder", encoder,
                     "--quality", "35",
-                    "--encopts", f"gpu={vendor_index}",
+                    "--encopts", f"gpu={probe_index}",
                     "--no-markers",
                 ]
                 result = subprocess.run(
@@ -384,11 +420,24 @@ def verify_windows_nvenc_encoder(
                     errors="replace",
                     timeout=45,
                     check=False,
+                    env=probe_environment,
                     **background_process_options(),
                 )
                 ok = result.returncode == 0 and os.path.isfile(output_path) and os.path.getsize(output_path) > 0
+                if not ok:
+                    diagnostic_tail = "\n".join(
+                        (result.stderr or result.stdout or "").splitlines()[-80:]
+                    )
+                    print(
+                        f"[NVENC-PREFLIGHT] {encoder} adapter={vendor_index} "
+                        f"identity={identity} failed:\n{diagnostic_tail}",
+                        flush=True,
+                    )
                 detail = (
-                    f"HandBrake {encoder} verified on NVENC adapter {vendor_index}"
+                    (
+                        f"HandBrake {encoder} verified on physical NVENC adapter "
+                        f"{vendor_index} (logical gpu={probe_index})"
+                    )
                     if ok
                     else failure_detail(
                         result,
