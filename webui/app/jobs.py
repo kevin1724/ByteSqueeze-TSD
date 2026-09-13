@@ -19,6 +19,7 @@ these functions to:
 """
 
 import os
+import ntpath
 import re
 import json
 import uuid
@@ -2606,7 +2607,7 @@ def _cleanup_orphaned_windows_encoders() -> int:
         str(os.environ.get("TSD_WORKER_SCRATCH_DIR") or "").strip(),
     }
     markers = {
-        os.path.normcase(os.path.abspath(value)).rstrip("\\/")
+        ntpath.normcase(ntpath.abspath(value)).rstrip("\\/")
         for value in roots
         if value
     }
@@ -2622,7 +2623,7 @@ def _cleanup_orphaned_windows_encoders() -> int:
         ):
             text = str(value or "").strip()
             if text:
-                markers.add(os.path.normcase(os.path.abspath(text)).rstrip("\\/"))
+                markers.add(ntpath.normcase(ntpath.abspath(text)).rstrip("\\/"))
     markers = {value for value in markers if len(value) >= 3}
     command = [
         "powershell.exe",
@@ -2657,7 +2658,7 @@ def _cleanup_orphaned_windows_encoders() -> int:
     for row in payload if isinstance(payload, list) else []:
         if not isinstance(row, dict):
             continue
-        command_line = os.path.normcase(str(row.get("CommandLine") or ""))
+        command_line = ntpath.normcase(str(row.get("CommandLine") or ""))
         if not command_line or not any(marker in command_line for marker in markers):
             continue
         ok, detail = terminate_process_tree(row.get("ProcessId"), force=True)
