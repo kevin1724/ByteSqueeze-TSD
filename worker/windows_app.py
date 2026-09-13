@@ -644,7 +644,14 @@ class WorkerWindow:
         hardware = snapshot.get("hardware") or {}
         gpu_lines = []
         for gpu in hardware.get("gpus") or []:
-            gpu_lines.append(f"{gpu.get('name')}  ·  {gpu.get('driver_version') or 'driver detected'}")
+            adapter = ""
+            if str(gpu.get("encoder_family") or "") == "nvenc" and gpu.get("vendor_index") is not None:
+                adapter = f" · NVENC {gpu.get('vendor_index')}"
+            pci = f" · PCI {gpu.get('pci_bus_id')}" if gpu.get("pci_bus_id") else ""
+            gpu_lines.append(
+                f"{gpu.get('name')}  ·  {gpu.get('driver_version') or 'driver detected'}"
+                f"{adapter}{pci}"
+            )
         route_choices = {AUTO_GPU_LABEL: "auto"}
         family_by_vendor = {"nvidia": "nvenc", "amd": "vce", "intel": "qsv"}
         for gpu in hardware.get("gpus") or []:
@@ -654,6 +661,8 @@ class WorkerWindow:
                 continue
             family = str(gpu.get("encoder_family") or family_by_vendor.get(str(gpu.get("vendor") or ""), ""))
             family_label = FAMILY_LABELS.get(family, family.upper() or "GPU")
+            if family == "nvenc" and gpu.get("vendor_index") is not None:
+                family_label += f" #{gpu.get('vendor_index')}"
             label = f"GPU {index}: {gpu.get('name') or 'Display adapter'} — {family_label}"
             route_choices[label] = f"gpu:{index}"
         current_tokens = {

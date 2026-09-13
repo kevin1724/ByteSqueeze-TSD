@@ -329,6 +329,28 @@ class EncodePlanningTests(unittest.TestCase):
                 self.assertEqual(selected["VideoEncoder"], encoder)
                 self.assertNotIn("VideoProfile", selected)
 
+    def test_nvenc_route_sets_same_adapter_in_options_and_job(self):
+        payload = {
+            "PresetList": [{
+                "PresetName": "NVENC AV1",
+                "VideoEncoder": "nvenc_av1_10bit",
+                "VideoOptionExtra": "rc-lookahead=16:gpu=0",
+                "VideoAdapterIndex": -1,
+            }]
+        }
+        self.assertTrue(
+            jobs._set_preset_hardware_decode(
+                payload,
+                "NVENC AV1",
+                False,
+                video_encoder="nvenc_av1_10bit",
+                gpu_index=1,
+            )
+        )
+        selected = payload["PresetList"][0]
+        self.assertEqual(selected["VideoOptionExtra"], "rc-lookahead=16:gpu=1")
+        self.assertEqual(selected["VideoAdapterIndex"], 1)
+
     def test_valid_non_av1_nvenc_profile_is_preserved(self):
         payload = {
             "PresetList": [

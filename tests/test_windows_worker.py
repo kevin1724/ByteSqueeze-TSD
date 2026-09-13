@@ -176,6 +176,70 @@ class WindowsHardwareInventoryTests(unittest.TestCase):
         self.assertEqual([row["vendor"] for row in rows], ["nvidia", "amd"])
         self.assertEqual(rows[0]["name"], "NVIDIA GeForce RTX 5080")
 
+    def test_windows_inventory_maps_wmi_order_to_nvidia_nvenc_order_by_pci_bus(self):
+        wmi_payload = [
+            {
+                "Name": "NVIDIA GeForce RTX 5070",
+                "PNPDeviceID": "PCI\\VEN_10DE&DEV_2F04",
+                "DriverVersion": "wmi",
+                "AdapterRAM": 4_294_967_295,
+                "Status": "OK",
+                "LocationInfo": "PCI bus 9, device 0, function 0",
+            },
+            {
+                "Name": "NVIDIA GeForce RTX 3070",
+                "PNPDeviceID": "PCI\\VEN_10DE&DEV_2484",
+                "DriverVersion": "wmi",
+                "AdapterRAM": 4_294_967_295,
+                "Status": "OK",
+                "LocationInfo": "PCI bus 1, device 0, function 0",
+            },
+        ]
+        smi_output = (
+            "0, GPU-3070, 00000000:01:00.0, NVIDIA GeForce RTX 3070, 8192, 591.86\n"
+            "1, GPU-5070, 00000000:09:00.0, NVIDIA GeForce RTX 5070, 12288, 591.86\n"
+        )
+        responses = [
+            mock.Mock(returncode=0, stdout=json.dumps(wmi_payload)),
+            mock.Mock(returncode=0, stdout=smi_output),
+        ]
+        with mock.patch.object(node_linking.subprocess, "run", side_effect=responses):
+            rows = node_linking._windows_gpu_inventory()
+        self.assertEqual(rows[0]["index"], 0)  # ByteSqueeze/WMI index
+        self.assertEqual(rows[0]["vendor_index"], 1)  # NVIDIA/NVENC index
+        self.assertEqual(rows[0]["gpu_uuid"], "GPU-5070")
+        self.assertEqual(rows[0]["pci_bus_id"], "00000000:09:00.0")
+        self.assertEqual(rows[0]["identity_source"], "pci_bus_id")
+        self.assertEqual(rows[1]["vendor_index"], 0)
+        self.assertEqual(rows[1]["gpu_uuid"], "GPU-3070")
+        self.assertEqual(rows[0]["memory_bytes"], 12288 * 1024 * 1024)
+
+    def test_av1_nvenc_probe_targets_mapped_nvidia_ordinal(self):
+        gpu = {
+            "vendor_index": 1,
+            "gpu_uuid": "GPU-5070",
+            "pci_bus_id": "00000000:09:00.0",
+            "driver_version": "591.86",
+        }
+        result = mock.Mock(returncode=0, stdout="", stderr="")
+        node_linking.NVENC_PROBE_CACHE.clear()
+        with mock.patch.object(node_linking.shutil, "which", return_value="ffmpeg.exe"), mock.patch.object(
+            node_linking.subprocess, "run", return_value=result
+        ) as run:
+            ok, reason = node_linking.verify_windows_nvenc_encoder(gpu, "nvenc_av1_10bit", force=True)
+        self.assertTrue(ok)
+        self.assertEqual(reason, "AV1 NVENC verified")
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("-gpu") + 1], "1")
+
+    def test_av1_nvenc_probe_requires_stable_adapter_identity(self):
+        ok, reason = node_linking.verify_windows_nvenc_encoder(
+            {"vendor_index": 1, "name": "NVIDIA GeForce RTX 5070"},
+            "nvenc_av1_10bit",
+        )
+        self.assertFalse(ok)
+        self.assertIn("UUID or PCI", reason)
+
     def test_mixed_nvidia_generations_get_per_gpu_av1_capabilities(self):
         global_encoders = ["nvenc_h264", "nvenc_h265_10bit", "nvenc_av1_10bit"]
         old_gpu = {"name": "NVIDIA GeForce RTX 3070"}
@@ -218,10 +282,13 @@ class WindowsGpuRoutingTests(unittest.TestCase):
         "gpus": [
             {
                 "index": 0,
+                "vendor_index": 0,
                 "name": "NVIDIA GeForce RTX 5080",
                 "vendor": "nvidia",
                 "encoder_family": "nvenc",
                 "memory_bytes": 16_000,
+                "gpu_uuid": "GPU-5080",
+                "pci_bus_id": "00000000:01:00.0",
                 "encoders": ["nvenc_h265_10bit", "nvenc_av1_10bit"],
             },
             {
@@ -286,6 +353,9 @@ class WindowsGpuRoutingTests(unittest.TestCase):
                     "vendor": "nvidia",
                     "encoder_family": "nvenc",
                     "memory_bytes": 8_000,
+                    "vendor_index": 0,
+                    "gpu_uuid": "GPU-3070",
+                    "pci_bus_id": "00000000:01:00.0",
                     "encoders": ["nvenc_h264", "nvenc_h265_10bit"],
                 },
                 {
@@ -294,6 +364,9 @@ class WindowsGpuRoutingTests(unittest.TestCase):
                     "vendor": "nvidia",
                     "encoder_family": "nvenc",
                     "memory_bytes": 12_000,
+                    "vendor_index": 1,
+                    "gpu_uuid": "GPU-5070",
+                    "pci_bus_id": "00000000:09:00.0",
                     "encoders": ["nvenc_h264", "nvenc_h265_10bit", "nvenc_av1_10bit"],
                 },
             ]
@@ -309,11 +382,130 @@ class WindowsGpuRoutingTests(unittest.TestCase):
         environment["TSD_WINDOWS_GPU_ROUTES"] = json.dumps({"av1": "auto", "h265": "auto", "h264": "auto"})
         with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
             node_linking, "encoder_hardware_profile", return_value=hardware
+        ), mock.patch.object(
+            node_linking, "verify_windows_nvenc_encoder", return_value=(True, "AV1 NVENC verified")
         ):
             available, assignment = jobs._assign_windows_gpu_route(job, [])
         self.assertTrue(available)
         self.assertEqual(assignment["key"], "gpu:1")
+        self.assertEqual(assignment["vendor_index"], 1)
+        self.assertEqual(assignment["gpu_uuid"], "GPU-5070")
+        self.assertTrue(assignment["capability_verified"])
         self.assertEqual(assignment["encoder"], "nvenc_av1_10bit")
+
+    def test_auto_hevc_reserves_av1_gpu_and_uses_rtx_3070(self):
+        hardware = {
+            "gpus": [
+                {
+                    "index": 0,
+                    "vendor_index": 0,
+                    "name": "NVIDIA GeForce RTX 3070",
+                    "vendor": "nvidia",
+                    "encoder_family": "nvenc",
+                    "memory_bytes": 8_000,
+                    "gpu_uuid": "GPU-3070",
+                    "pci_bus_id": "00000000:01:00.0",
+                    "encoders": ["nvenc_h264", "nvenc_h265_10bit"],
+                },
+                {
+                    "index": 1,
+                    "vendor_index": 1,
+                    "name": "NVIDIA GeForce RTX 5070",
+                    "vendor": "nvidia",
+                    "encoder_family": "nvenc",
+                    "memory_bytes": 12_000,
+                    "gpu_uuid": "GPU-5070",
+                    "pci_bus_id": "00000000:09:00.0",
+                    "encoders": ["nvenc_h264", "nvenc_h265_10bit", "nvenc_av1_10bit"],
+                },
+            ]
+        }
+        job = {
+            "preset": "4k",
+            "encoder": "nvenc_h265_10bit",
+            "video_codec": "h265",
+            "encoder_family": "nvenc",
+            "bit_depth": "10",
+        }
+        environment = self._environment()
+        environment["TSD_WINDOWS_GPU_ROUTES"] = json.dumps(
+            {"av1": "auto", "h265": "auto", "h264": "auto"}
+        )
+        with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+            node_linking, "encoder_hardware_profile", return_value=hardware
+        ):
+            available, assignment = jobs._assign_windows_gpu_route(job, [])
+        self.assertTrue(available)
+        self.assertEqual(assignment["name"], "NVIDIA GeForce RTX 3070")
+        self.assertEqual(assignment["vendor_index"], 0)
+
+    def test_failed_av1_probe_blocks_launch_on_selected_adapter(self):
+        hardware = {
+            "gpus": [{
+                "index": 1,
+                "vendor_index": 1,
+                "name": "NVIDIA GeForce RTX 5070",
+                "vendor": "nvidia",
+                "encoder_family": "nvenc",
+                "memory_bytes": 12_000,
+                "gpu_uuid": "GPU-5070",
+                "pci_bus_id": "00000000:09:00.0",
+                "encoders": ["nvenc_av1_10bit"],
+            }]
+        }
+        job = {
+            "preset": "4k",
+            "encoder": "nvenc_av1_10bit",
+            "video_codec": "av1",
+            "encoder_family": "nvenc",
+            "bit_depth": "10",
+        }
+        environment = self._environment()
+        environment["TSD_WINDOWS_GPU_ROUTES"] = json.dumps(
+            {"av1": "auto", "h265": "auto", "h264": "auto"}
+        )
+        with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+            node_linking, "encoder_hardware_profile", return_value=hardware
+        ), mock.patch.object(
+            node_linking,
+            "verify_windows_nvenc_encoder",
+            return_value=(False, "No capable devices found"),
+        ):
+            available, assignment = jobs._assign_windows_gpu_route(job, [])
+        self.assertFalse(available)
+        self.assertIsNone(assignment)
+        self.assertIn("No capable devices found", job["gpu_route_error"])
+        self.assertNotIn("gpu_route_assignment", job)
+
+    def test_unmapped_nvidia_index_never_falls_back_to_bytesqueeze_index(self):
+        hardware = {
+            "gpus": [{
+                "index": 1,
+                "name": "NVIDIA GeForce RTX 5070",
+                "vendor": "nvidia",
+                "encoder_family": "nvenc",
+                "memory_bytes": 12_000,
+                "encoders": ["nvenc_h265_10bit", "nvenc_av1_10bit"],
+            }]
+        }
+        job = {
+            "preset": "4k",
+            "encoder": "nvenc_h265_10bit",
+            "video_codec": "h265",
+            "encoder_family": "nvenc",
+            "bit_depth": "10",
+        }
+        environment = self._environment()
+        environment["TSD_WINDOWS_GPU_ROUTES"] = json.dumps(
+            {"av1": "auto", "h265": "auto", "h264": "auto"}
+        )
+        with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+            node_linking, "encoder_hardware_profile", return_value=hardware
+        ):
+            available, assignment = jobs._assign_windows_gpu_route(job, [])
+        self.assertFalse(available)
+        self.assertIsNone(assignment)
+        self.assertIn("UUID/PCI", job["gpu_route_error"])
 
 
 if __name__ == "__main__":

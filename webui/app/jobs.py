@@ -1890,6 +1890,7 @@ def _set_preset_hardware_decode(
         parts = [part for part in existing.split(":") if part and not part.lower().startswith("gpu=")]
         parts.append(f"gpu={max(0, int(gpu_index))}")
         selected["VideoOptionExtra"] = ":".join(parts)
+        selected["VideoAdapterIndex"] = max(0, int(gpu_index))
     # HandBrake 1.x represents QSV with bit 0x02. Using 1 here means
     # software decode support and HandBrake normalizes it back to zero for a
     # QSV source, even when VideoQSVDecode is true.
@@ -2144,11 +2145,19 @@ def _assign_windows_gpu_route(job: dict, running_jobs: list[dict]) -> tuple[bool
         hardware = {}
     gpus = [row for row in hardware.get("gpus") or [] if isinstance(row, dict)]
     compatible = []
+    unmapped_nvidia = []
     family_seen: dict[str, int] = {}
     for row in gpus:
         family = str(row.get("encoder_family") or "").strip().lower()
-        vendor_index = family_seen.get(family, 0)
-        family_seen[family] = vendor_index + 1
+        fallback_vendor_index = family_seen.get(family, 0)
+        family_seen[family] = fallback_vendor_index + 1
+        try:
+            vendor_index = int(row.get("vendor_index"))
+        except (TypeError, ValueError):
+            if family == "nvenc":
+                unmapped_nvidia.append(str(row.get("name") or "Unknown NVIDIA GPU"))
+                continue
+            vendor_index = fallback_vendor_index
         routed_encoder = _windows_route_encoder(
             family,
             codec,
@@ -2172,28 +2181,82 @@ def _assign_windows_gpu_route(job: dict, running_jobs: list[dict]) -> tuple[bool
             "codec": codec,
             "bit_depth": bit_depth,
             "memory_bytes": int(row.get("memory_bytes") or 0),
+            "gpu_uuid": str(row.get("gpu_uuid") or ""),
+            "pci_bus_id": str(row.get("pci_bus_id") or ""),
+            "identity_source": str(row.get("identity_source") or ""),
+            "encoders": [str(value) for value in row.get("encoders") or []],
         })
     if not compatible:
         job.pop("gpu_route_assignment", None)
+        if unmapped_nvidia:
+            job["gpu_route_error"] = (
+                "NVIDIA GPU routing is unavailable because nvidia-smi could not map "
+                "these adapters by UUID/PCI bus: " + ", ".join(unmapped_nvidia)
+            )
+            return False, None
         return True, None
 
+    if codec == "av1":
+        try:
+            from .node_linking import verify_windows_nvenc_encoder
+        except Exception:
+            verify_windows_nvenc_encoder = None
+        verified = []
+        verification_errors = []
+        for candidate in compatible:
+            if candidate["encoder_family"] != "nvenc":
+                verified.append(candidate)
+                continue
+            if verify_windows_nvenc_encoder is None:
+                ok, reason = False, "NVENC capability verifier is unavailable"
+            else:
+                ok, reason = verify_windows_nvenc_encoder(candidate, candidate["encoder"])
+            candidate["capability_verified"] = bool(ok)
+            candidate["capability_verification"] = str(reason or "")
+            if ok:
+                verified.append(candidate)
+            else:
+                verification_errors.append(f"{candidate['name']}: {reason}")
+        compatible = verified
+        if not compatible:
+            job.pop("gpu_route_assignment", None)
+            job["gpu_route_error"] = "AV1 GPU validation failed: " + "; ".join(verification_errors)
+            return False, None
+
     busy = {
-        str((row.get("gpu_route_assignment") or {}).get("key") or "")
+        str(
+            (row.get("gpu_route_assignment") or {}).get("identity_key")
+            or (row.get("gpu_route_assignment") or {}).get("key")
+            or ""
+        )
         for row in running_jobs
         if isinstance(row.get("gpu_route_assignment"), dict)
     }
+    for row in compatible:
+        stable_identity = row.get("gpu_uuid") or row.get("pci_bus_id")
+        row["identity_key"] = f"nvidia:{stable_identity}" if stable_identity else row["key"]
     requested = routes.get(codec, "auto")
     requested_rows = [row for row in compatible if row["key"] == requested]
     preferred_family = str(method.get("encoder_family") or "")
-    idle = [row for row in compatible if row["key"] not in busy]
-    choices = [row for row in requested_rows if row["key"] not in busy]
+    idle = [row for row in compatible if row["identity_key"] not in busy and row["key"] not in busy]
+    choices = [
+        row for row in requested_rows
+        if row["identity_key"] not in busy and row["key"] not in busy
+    ]
     used_fallback = False
     if not choices and (requested == "auto" or fallback_any):
         choices = idle
         used_fallback = requested != "auto"
     if not choices:
         return False, None
-    choices.sort(key=lambda row: (row["encoder_family"] != preferred_family, -row["memory_bytes"], row["index"]))
+    # Preserve AV1-capable NVIDIA hardware for AV1 when an older NVENC GPU can
+    # handle H.264/HEVC. The reserved GPU is still used as a busy-GPU fallback.
+    choices.sort(key=lambda row: (
+        row["encoder_family"] != preferred_family,
+        codec != "av1" and any("_av1" in name for name in row.get("encoders") or []),
+        -row["memory_bytes"],
+        row["index"],
+    ))
     assignment = dict(choices[0])
     assignment.update({
         "requested": requested,
@@ -2201,6 +2264,7 @@ def _assign_windows_gpu_route(job: dict, running_jobs: list[dict]) -> tuple[bool
         "assigned_at": _now_ts(),
     })
     job["gpu_route_assignment"] = assignment
+    job.pop("gpu_route_error", None)
     routed = _encoder_method_from_encoder(assignment["encoder"], job.get("preset") or "")
     job.update({
         "encode_method": routed.get("encode_method"),
@@ -4090,9 +4154,7 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
         # even when no Windows GPU route rewrite was required.
         video_encoder=selected_encoder,
         gpu_index=(
-            0
-            if str(gpu_assignment.get("encoder_family") or "") == "nvenc"
-            else int(gpu_assignment.get("vendor_index") or 0)
+            int(gpu_assignment.get("vendor_index") or 0)
         ) if routed_encoder.startswith(("nvenc_", "vce_")) else None,
     )
     if controlled_preset:
@@ -4172,10 +4234,14 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
     routed_family = str(gpu_assignment.get("encoder_family") or "")
     routed_vendor_index = int(gpu_assignment.get("vendor_index") or 0) if gpu_assignment else 0
     if routed_family == "nvenc":
-        # Expose only the chosen physical NVIDIA adapter. It becomes logical
-        # gpu=0 inside HandBrake, avoiding ambiguous adapter ordering.
-        env["CUDA_VISIBLE_DEVICES"] = str(routed_vendor_index)
-        env["NVIDIA_VISIBLE_DEVICES"] = str(routed_vendor_index)
+        # Do not renumber adapters with visibility variables. The preset uses
+        # NVIDIA's mapped ordinal directly, which was validated against the
+        # adapter UUID/PCI identity before this process can launch.
+        env.pop("CUDA_VISIBLE_DEVICES", None)
+        env.pop("NVIDIA_VISIBLE_DEVICES", None)
+        env["TSD_NVENC_GPU_INDEX"] = str(routed_vendor_index)
+        env["TSD_NVENC_GPU_UUID"] = str(gpu_assignment.get("gpu_uuid") or "")
+        env["TSD_NVENC_PCI_BUS_ID"] = str(gpu_assignment.get("pci_bus_id") or "")
     elif routed_family == "vce":
         env["GPU_DEVICE_ORDINAL"] = str(routed_vendor_index)
         env["HIP_VISIBLE_DEVICES"] = str(routed_vendor_index)
@@ -4221,8 +4287,13 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
         gpu_route_log = (
             f"[ByteSqueeze] GPU route: {gpu_assignment.get('codec', '').upper()} -> "
             f"GPU {gpu_assignment.get('index')} {gpu_assignment.get('name')}"
-            f" [{gpu_assignment.get('encoder_family')}]"
+            f" [{gpu_assignment.get('encoder_family')}; "
+            f"NVENC adapter {gpu_assignment.get('vendor_index')}]"
             f"{route_note}\n"
+            f"[ByteSqueeze] GPU identity: UUID {gpu_assignment.get('gpu_uuid') or 'unknown'}; "
+            f"PCI {gpu_assignment.get('pci_bus_id') or 'unknown'}\n"
+            f"[ByteSqueeze] GPU capability check: "
+            f"{gpu_assignment.get('capability_verification') or 'not required'}\n"
         )
 
     # Spawn the Docker shell runner or the native Windows runner. Both consume

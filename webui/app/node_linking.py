@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import csv
+import io
 import json
 import os
 import glob
@@ -58,6 +60,8 @@ STATE_LOCK = threading.RLock()
 TRANSFER_LOCK = threading.RLock()
 HARDWARE_PROFILE_LOCK = threading.RLock()
 HARDWARE_PROFILE_CACHE = {"expires_at": 0.0, "value": None}
+NVENC_PROBE_LOCK = threading.RLock()
+NVENC_PROBE_CACHE: dict[tuple[str, str, str], tuple[float, bool, str]] = {}
 HARDWARE_ENCODERS = {
     "qsv": ("qsv_h264", "qsv_h265", "qsv_h265_10bit", "qsv_av1", "qsv_av1_10bit"),
     "nvenc": ("nvenc_h264", "nvenc_h265", "nvenc_h265_10bit", "nvenc_av1", "nvenc_av1_10bit"),
@@ -104,6 +108,127 @@ def _gpu_vendor(name: str, pnp_device_id: str = "") -> str:
     return "unknown"
 
 
+def _pci_location_key(value: str) -> tuple[int, int, int] | None:
+    """Normalize Windows location text and NVIDIA PCI bus IDs."""
+    text = str(value or "").strip()
+    windows = re.search(
+        r"pci\s+bus\s+(\d+)\s*,\s*device\s+(\d+)\s*,\s*function\s+(\d+)",
+        text,
+        re.IGNORECASE,
+    )
+    if windows:
+        return tuple(int(windows.group(index)) for index in (1, 2, 3))
+    nvidia = re.search(
+        r"(?:[0-9a-f]{4,8}:)?([0-9a-f]{2,4}):([0-9a-f]{2})\.([0-7])",
+        text,
+        re.IGNORECASE,
+    )
+    if nvidia:
+        return (
+            int(nvidia.group(1), 16),
+            int(nvidia.group(2), 16),
+            int(nvidia.group(3), 16),
+        )
+    return None
+
+
+def _normalized_gpu_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def _nvidia_smi_inventory() -> list[dict]:
+    """Return NVIDIA's own adapter ordinals and stable physical identities."""
+    command = [
+        "nvidia-smi",
+        "--query-gpu=index,uuid,pci.bus_id,name,memory.total,driver_version",
+        "--format=csv,noheader,nounits",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=12,
+            check=False,
+            **background_process_options(),
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    rows = []
+    for values in csv.reader(io.StringIO(result.stdout or ""), skipinitialspace=True):
+        if len(values) < 6:
+            continue
+        try:
+            vendor_index = int(str(values[0]).strip())
+        except (TypeError, ValueError):
+            continue
+        pci_bus_id = str(values[2]).strip().lower()
+        rows.append({
+            "vendor_index": vendor_index,
+            "gpu_uuid": str(values[1]).strip(),
+            "pci_bus_id": pci_bus_id,
+            "pci_location_key": _pci_location_key(pci_bus_id),
+            "name": str(values[3]).strip(),
+            "memory_bytes": max(0, _safe_int(values[4])) * 1024 * 1024,
+            "driver_version": str(values[5]).strip(),
+        })
+    return rows
+
+
+def _match_nvidia_identities(rows: list[dict], nvidia_rows: list[dict]) -> list[dict]:
+    """Attach NVENC ordinals to WMI adapters without equating their indexes."""
+    used: set[int] = set()
+    name_counts: dict[str, int] = {}
+    for candidate in nvidia_rows:
+        name = _normalized_gpu_name(candidate.get("name"))
+        name_counts[name] = name_counts.get(name, 0) + 1
+    for row in rows:
+        if str(row.get("vendor") or "") != "nvidia":
+            continue
+        match = None
+        source = ""
+        location = row.get("pci_location_key")
+        if location:
+            match = next(
+                (
+                    candidate for candidate in nvidia_rows
+                    if int(candidate.get("vendor_index", -1)) not in used
+                    and candidate.get("pci_location_key") == location
+                ),
+                None,
+            )
+            source = "pci_bus_id" if match else ""
+        normalized_name = _normalized_gpu_name(row.get("name"))
+        if match is None and normalized_name and name_counts.get(normalized_name) == 1:
+            match = next(
+                (
+                    candidate for candidate in nvidia_rows
+                    if int(candidate.get("vendor_index", -1)) not in used
+                    and _normalized_gpu_name(candidate.get("name")) == normalized_name
+                ),
+                None,
+            )
+            source = "unique_name" if match else ""
+        if match is None:
+            continue
+        vendor_index = int(match["vendor_index"])
+        used.add(vendor_index)
+        row.update({
+            "vendor_index": vendor_index,
+            "gpu_uuid": str(match.get("gpu_uuid") or ""),
+            "pci_bus_id": str(match.get("pci_bus_id") or ""),
+            "identity_source": source,
+            # WMI AdapterRAM is a 32-bit field and commonly reports only 4 GiB.
+            "memory_bytes": int(match.get("memory_bytes") or row.get("memory_bytes") or 0),
+            "driver_version": str(match.get("driver_version") or row.get("driver_version") or ""),
+        })
+    return rows
+
+
 def _windows_gpu_inventory() -> list[dict]:
     """Read display adapters without requiring vendor-specific SDKs."""
     command = [
@@ -112,8 +237,12 @@ def _windows_gpu_inventory() -> list[dict]:
         "-NonInteractive",
         "-Command",
         (
-            "Get-CimInstance Win32_VideoController | "
-            "Select-Object Name,PNPDeviceID,DriverVersion,AdapterRAM,Status | "
+            "Get-CimInstance Win32_VideoController | ForEach-Object { "
+            "$location=(Get-PnpDeviceProperty -InstanceId $_.PNPDeviceID "
+            "-KeyName 'DEVPKEY_Device_LocationInfo' -ErrorAction SilentlyContinue).Data; "
+            "[pscustomobject]@{Name=$_.Name;PNPDeviceID=$_.PNPDeviceID;"
+            "DriverVersion=$_.DriverVersion;AdapterRAM=$_.AdapterRAM;Status=$_.Status;"
+            "LocationInfo=$location} } | "
             "ConvertTo-Json -Compress"
         ),
     ]
@@ -139,6 +268,7 @@ def _windows_gpu_inventory() -> list[dict]:
             continue
         name = str(item.get("Name") or f"GPU {index + 1}").strip()
         pnp = str(item.get("PNPDeviceID") or "").strip()
+        location_info = str(item.get("LocationInfo") or "").strip()
         rows.append({
             "index": index,
             "name": name,
@@ -147,8 +277,80 @@ def _windows_gpu_inventory() -> list[dict]:
             "memory_bytes": max(0, _safe_int(item.get("AdapterRAM"))),
             "status": str(item.get("Status") or "").strip(),
             "pnp_device_id": pnp,
+            "location_info": location_info,
+            "pci_location_key": _pci_location_key(location_info),
         })
-    return rows
+    return _match_nvidia_identities(rows, _nvidia_smi_inventory())
+
+
+def verify_windows_nvenc_encoder(
+    gpu: dict,
+    encoder: str,
+    *,
+    force: bool = False,
+) -> tuple[bool, str]:
+    """Perform a cached one-frame encode on the exact NVIDIA ordinal."""
+    encoder = str(encoder or "").strip().lower()
+    if encoder not in {"nvenc_av1", "nvenc_av1_10bit"}:
+        return True, "adapter-specific probe not required"
+    try:
+        vendor_index = int(gpu.get("vendor_index"))
+    except (TypeError, ValueError):
+        return False, "NVIDIA adapter has no mapped NVENC index"
+    identity = str(
+        gpu.get("gpu_uuid")
+        or gpu.get("pci_bus_id")
+        or gpu.get("name")
+        or f"nvenc:{vendor_index}"
+    )
+    if not str(gpu.get("gpu_uuid") or gpu.get("pci_bus_id") or "").strip():
+        return False, "NVIDIA adapter identity could not be matched by UUID or PCI bus"
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return False, "FFmpeg is unavailable for the NVENC capability check"
+    cache_key = (identity, str(gpu.get("driver_version") or ""), "av1_nvenc")
+    now = _now()
+    with NVENC_PROBE_LOCK:
+        cached = NVENC_PROBE_CACHE.get(cache_key)
+        if not force and cached and cached[0] > now:
+            return cached[1], cached[2]
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel", "error",
+        "-f", "lavfi",
+        "-i", "color=c=black:s=64x64:r=1:d=0.1",
+        "-frames:v", "1",
+        "-an",
+        "-c:v", "av1_nvenc",
+        "-gpu", str(vendor_index),
+        "-f", "null",
+        "-",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+            check=False,
+            **background_process_options(),
+        )
+        ok = result.returncode == 0
+        detail = "AV1 NVENC verified" if ok else (
+            next(
+                (line.strip() for line in (result.stderr or result.stdout or "").splitlines() if line.strip()),
+                f"FFmpeg capability probe exited with code {result.returncode}",
+            )
+        )
+    except Exception as exc:
+        ok = False
+        detail = f"FFmpeg capability probe failed: {exc}"
+    with NVENC_PROBE_LOCK:
+        NVENC_PROBE_CACHE[cache_key] = (now + (3600.0 if ok else 300.0), ok, detail[:500])
+    return ok, detail[:500]
 
 
 def _windows_gpu_encoder_capabilities(gpu: dict, family: str, encoders: list[str]) -> list[str]:
