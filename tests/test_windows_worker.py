@@ -10,6 +10,7 @@ from worker import encode_runner
 from worker.windows_app import configure_environment, default_config, local_addresses, windows_firewall_script
 from webui.app import node_linking
 from webui.app import jobs
+from webui.app import process_utils
 from webui.app.process_utils import background_process_options
 
 
@@ -231,6 +232,7 @@ class WindowsHardwareInventoryTests(unittest.TestCase):
         self.assertEqual(reason, "AV1 NVENC verified")
         command = run.call_args.args[0]
         self.assertEqual(command[command.index("-gpu") + 1], "1")
+        self.assertEqual(command[command.index("-pix_fmt") + 1], "p010le")
 
     def test_av1_nvenc_probe_requires_stable_adapter_identity(self):
         ok, reason = node_linking.verify_windows_nvenc_encoder(
@@ -275,6 +277,73 @@ class WindowsHardwareInventoryTests(unittest.TestCase):
         options = background_process_options(process_group=True)
         self.assertTrue(options["creationflags"] & subprocess.CREATE_NO_WINDOW)
         self.assertTrue(options["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP)
+
+    def test_windows_termination_kills_entire_encoder_process_tree(self):
+        result = mock.Mock(returncode=0, stdout="SUCCESS", stderr="")
+        with mock.patch.object(process_utils.os, "name", "nt"), mock.patch.object(
+            process_utils.subprocess, "run", return_value=result
+        ) as run:
+            ok, detail = process_utils.terminate_process_tree(4242, force=True)
+        self.assertTrue(ok)
+        self.assertEqual(detail, "SUCCESS")
+        command = run.call_args.args[0]
+        self.assertEqual(command[:4], ["taskkill.exe", "/PID", "4242", "/T"])
+        self.assertIn("/F", command)
+
+    def test_worker_startup_cleans_orphaned_encoder_in_staging_folder(self):
+        payload = [{
+            "ProcessId": 5151,
+            "ParentProcessId": 5000,
+            "Name": "HandBrakeCLI.exe",
+            "CommandLine": 'HandBrakeCLI.exe -i "G:\\temp movies\\source.mkv" -o output.mkv',
+        }]
+        result = mock.Mock(returncode=0, stdout=json.dumps(payload), stderr="")
+        with mock.patch.object(jobs.os, "name", "nt"), mock.patch.dict(
+            os.environ,
+            {
+                "TSD_WINDOWS_WORKER": "1",
+                "TSD_WORKER_TEMP_DIR": "G:\\temp movies",
+                "TSD_WORKER_SCRATCH_DIR": "G:\\encoder temp",
+            },
+            clear=False,
+        ), mock.patch.object(jobs.subprocess, "run", return_value=result), mock.patch.object(
+            jobs, "terminate_process_tree", return_value=(True, "SUCCESS")
+        ) as terminate:
+            cleaned = jobs._cleanup_orphaned_windows_encoders()
+        self.assertEqual(cleaned, 1)
+        terminate.assert_called_once_with(5151, force=True)
+
+    def test_cancel_running_job_terminates_tree_and_releases_waiters(self):
+        job_id = "windows-cancel-tree"
+        original_jobs = jobs.jobs
+        original_queue = jobs.job_queue
+        try:
+            jobs.jobs = {
+                job_id: {
+                    "status": "running",
+                    "phase": "encoding",
+                    "pid": 6161,
+                    "src": "G:\\temp movies\\source.mkv",
+                    "started_at": 10.0,
+                }
+            }
+            jobs.job_queue = []
+            jobs.DISPATCH_WAKE_EVENT.clear()
+            with mock.patch.object(jobs, "terminate_process_tree", return_value=(True, "SUCCESS")) as terminate, mock.patch.object(
+                jobs, "save_jobs"
+            ), mock.patch.object(jobs, "_append_job_log"), mock.patch.object(jobs, "log_event"):
+                ok, error = jobs.cancel_job(job_id)
+            self.assertTrue(ok)
+            self.assertIsNone(error)
+            terminate.assert_called_once_with(6161, force=True)
+            self.assertEqual(jobs.jobs[job_id]["status"], "canceled")
+            self.assertEqual(jobs.jobs[job_id]["phase"], "canceled")
+            self.assertTrue(jobs.jobs[job_id]["cancel_process_tree_terminated"])
+            self.assertTrue(jobs.DISPATCH_WAKE_EVENT.is_set())
+        finally:
+            jobs.jobs = original_jobs
+            jobs.job_queue = original_queue
+            jobs.DISPATCH_WAKE_EVENT.clear()
 
 
 class WindowsGpuRoutingTests(unittest.TestCase):
@@ -506,6 +575,42 @@ class WindowsGpuRoutingTests(unittest.TestCase):
         self.assertFalse(available)
         self.assertIsNone(assignment)
         self.assertIn("UUID/PCI", job["gpu_route_error"])
+
+    def test_failed_startup_av1_advertisement_cannot_launch_job(self):
+        hardware = {
+            "gpus": [{
+                "index": 1,
+                "vendor_index": 0,
+                "name": "NVIDIA GeForce RTX 5070",
+                "vendor": "nvidia",
+                "encoder_family": "nvenc",
+                "memory_bytes": 12_000,
+                "gpu_uuid": "GPU-5070",
+                "pci_bus_id": "00000000:0a:00.0",
+                "av1_nvenc_verified": False,
+                "av1_nvenc_verification": "No capable devices found",
+                "encoders": ["nvenc_h264", "nvenc_h265_10bit"],
+            }]
+        }
+        job = {
+            "preset": "4k",
+            "encoder": "nvenc_av1_10bit",
+            "video_codec": "av1",
+            "encoder_family": "nvenc",
+            "bit_depth": "10",
+        }
+        environment = self._environment()
+        environment["TSD_WINDOWS_GPU_ROUTES"] = json.dumps(
+            {"av1": "auto", "h265": "auto", "h264": "auto"}
+        )
+        with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+            node_linking, "encoder_hardware_profile", return_value=hardware
+        ):
+            available, assignment = jobs._assign_windows_gpu_route(job, [])
+        self.assertFalse(available)
+        self.assertIsNone(assignment)
+        self.assertIn("No capable devices found", job["gpu_route_error"])
+        self.assertEqual(job["phase"], "waiting_for_av1_gpu_validation")
 
 
 if __name__ == "__main__":

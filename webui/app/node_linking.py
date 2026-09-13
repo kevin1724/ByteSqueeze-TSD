@@ -308,7 +308,8 @@ def verify_windows_nvenc_encoder(
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return False, "FFmpeg is unavailable for the NVENC capability check"
-    cache_key = (identity, str(gpu.get("driver_version") or ""), "av1_nvenc")
+    pixel_format = "p010le" if encoder.endswith("_10bit") else "yuv420p"
+    cache_key = (identity, str(gpu.get("driver_version") or ""), f"av1_nvenc:{pixel_format}")
     now = _now()
     with NVENC_PROBE_LOCK:
         cached = NVENC_PROBE_CACHE.get(cache_key)
@@ -322,6 +323,7 @@ def verify_windows_nvenc_encoder(
         "-i", "color=c=black:s=64x64:r=1:d=0.1",
         "-frames:v", "1",
         "-an",
+        "-pix_fmt", pixel_format,
         "-c:v", "av1_nvenc",
         "-gpu", str(vendor_index),
         "-f", "null",
@@ -494,6 +496,25 @@ def encoder_hardware_profile(*, force: bool = False) -> dict:
             family = vendor_family.get(str(gpu.get("vendor") or ""), "")
             gpu["encoder_family"] = family
             gpu["encoders"] = _windows_gpu_encoder_capabilities(gpu, family, encoders)
+            if windows_worker and family == "nvenc":
+                av1_encoders = [name for name in gpu["encoders"] if "_av1" in name]
+                if av1_encoders:
+                    verified, reason = verify_windows_nvenc_encoder(gpu, av1_encoders[0])
+                    gpu["av1_nvenc_verified"] = bool(verified)
+                    gpu["av1_nvenc_verification"] = str(reason or "")
+                    if not verified:
+                        gpu["encoders"] = [name for name in gpu["encoders"] if "_av1" not in name]
+                else:
+                    gpu["av1_nvenc_verified"] = False
+                    gpu["av1_nvenc_verification"] = "AV1 NVENC is not supported by this adapter model"
+        if windows_worker and any(gpu.get("encoder_family") == "nvenc" for gpu in windows_gpus):
+            if not any(
+                "_av1" in name
+                for gpu in windows_gpus
+                if gpu.get("encoder_family") == "nvenc"
+                for name in gpu.get("encoders") or []
+            ):
+                encoders = [name for name in encoders if name not in {"nvenc_av1", "nvenc_av1_10bit"}]
         value = {
             "encoder_families": ordered_families,
             "encoders": list(dict.fromkeys(encoders)),

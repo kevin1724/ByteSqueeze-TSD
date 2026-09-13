@@ -648,9 +648,16 @@ class WorkerWindow:
             if str(gpu.get("encoder_family") or "") == "nvenc" and gpu.get("vendor_index") is not None:
                 adapter = f" · NVENC {gpu.get('vendor_index')}"
             pci = f" · PCI {gpu.get('pci_bus_id')}" if gpu.get("pci_bus_id") else ""
+            av1 = ""
+            if str(gpu.get("encoder_family") or "") == "nvenc":
+                av1 = (
+                    " · AV1 verified"
+                    if gpu.get("av1_nvenc_verified")
+                    else " · AV1 unavailable"
+                )
             gpu_lines.append(
                 f"{gpu.get('name')}  ·  {gpu.get('driver_version') or 'driver detected'}"
-                f"{adapter}{pci}"
+                f"{adapter}{pci}{av1}"
             )
         route_choices = {AUTO_GPU_LABEL: "auto"}
         family_by_vendor = {"nvidia": "nvenc", "amd": "vce", "intel": "qsv"}

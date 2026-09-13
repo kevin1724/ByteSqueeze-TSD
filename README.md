@@ -529,7 +529,7 @@ The encoding-only worker has its own public Docker Hub image:
 [kevina1724/handbrake-tsd-worker on Docker Hub](https://hub.docker.com/r/kevina1724/handbrake-tsd-worker)
 
 `latest` and `main` follow the main branch. Stable worker releases also publish
-`2.13.2` and `2.13` tags:
+`2.13.3` and `2.13` tags:
 
 ```bash
 docker pull kevina1724/handbrake-tsd-worker:latest

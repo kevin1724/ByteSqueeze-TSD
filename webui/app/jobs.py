@@ -22,7 +22,6 @@ import os
 import re
 import json
 import uuid
-import signal
 import shlex
 import time
 import threading
@@ -46,7 +45,7 @@ from .config import (
 from .presets import load_preset_definition, resolve_preset_file_and_name
 from .settings import load_settings, normalize_output_container
 from .events import log_event
-from .process_utils import background_process_options
+from .process_utils import background_process_options, terminate_process_tree
 from .storage_stats import get_summary as get_storage_summary, list_encodes, record_encode
 from .audio_optimization import (
     ffmpeg_audio_only_command,
@@ -2146,6 +2145,7 @@ def _assign_windows_gpu_route(job: dict, running_jobs: list[dict]) -> tuple[bool
     gpus = [row for row in hardware.get("gpus") or [] if isinstance(row, dict)]
     compatible = []
     unmapped_nvidia = []
+    incompatible_av1_nvidia = []
     family_seen: dict[str, int] = {}
     for row in gpus:
         family = str(row.get("encoder_family") or "").strip().lower()
@@ -2165,6 +2165,11 @@ def _assign_windows_gpu_route(job: dict, running_jobs: list[dict]) -> tuple[bool
             [str(value) for value in row.get("encoders") or []],
         )
         if not routed_encoder:
+            if family == "nvenc" and codec == "av1":
+                incompatible_av1_nvidia.append(
+                    f"{row.get('name') or 'NVIDIA GPU'}: "
+                    f"{row.get('av1_nvenc_verification') or 'AV1 NVENC is not supported'}"
+                )
             continue
         try:
             index = int(row.get("index"))
@@ -2189,10 +2194,19 @@ def _assign_windows_gpu_route(job: dict, running_jobs: list[dict]) -> tuple[bool
     if not compatible:
         job.pop("gpu_route_assignment", None)
         if unmapped_nvidia:
-            job["gpu_route_error"] = (
+            message = (
                 "NVIDIA GPU routing is unavailable because nvidia-smi could not map "
                 "these adapters by UUID/PCI bus: " + ", ".join(unmapped_nvidia)
             )
+            job["gpu_route_error"] = message
+            job["error_message"] = message
+            job["phase"] = "waiting_for_gpu_mapping"
+            return False, None
+        if incompatible_av1_nvidia:
+            message = "No verified AV1 NVENC adapter is available: " + "; ".join(incompatible_av1_nvidia)
+            job["gpu_route_error"] = message
+            job["error_message"] = message
+            job["phase"] = "waiting_for_av1_gpu_validation"
             return False, None
         return True, None
 
@@ -2220,7 +2234,10 @@ def _assign_windows_gpu_route(job: dict, running_jobs: list[dict]) -> tuple[bool
         compatible = verified
         if not compatible:
             job.pop("gpu_route_assignment", None)
-            job["gpu_route_error"] = "AV1 GPU validation failed: " + "; ".join(verification_errors)
+            message = "AV1 GPU validation failed: " + "; ".join(verification_errors)
+            job["gpu_route_error"] = message
+            job["error_message"] = message
+            job["phase"] = "waiting_for_av1_gpu_validation"
             return False, None
 
     busy = {
@@ -2248,6 +2265,14 @@ def _assign_windows_gpu_route(job: dict, running_jobs: list[dict]) -> tuple[bool
         choices = idle
         used_fallback = requested != "auto"
     if not choices:
+        message = (
+            f"Waiting for the selected {codec.upper()} GPU to finish its current process-tree cleanup"
+            if requested != "auto"
+            else f"Waiting for an idle GPU compatible with {codec.upper()}"
+        )
+        job["gpu_route_error"] = message
+        job["error_message"] = message
+        job["phase"] = "waiting_for_compatible_gpu"
         return False, None
     # Preserve AV1-capable NVIDIA hardware for AV1 when an older NVENC GPU can
     # handle H.264/HEVC. The reserved GPU is still used as a busy-GPU fallback.
@@ -2264,7 +2289,12 @@ def _assign_windows_gpu_route(job: dict, running_jobs: list[dict]) -> tuple[bool
         "assigned_at": _now_ts(),
     })
     job["gpu_route_assignment"] = assignment
+    previous_gpu_error = str(job.get("gpu_route_error") or "")
     job.pop("gpu_route_error", None)
+    if previous_gpu_error and str(job.get("error_message") or "") == previous_gpu_error:
+        job["error_message"] = ""
+    if str(job.get("phase") or "").startswith("waiting_for_"):
+        job["phase"] = "queued"
     routed = _encoder_method_from_encoder(assignment["encoder"], job.get("preset") or "")
     job.update({
         "encode_method": routed.get("encode_method"),
@@ -2565,6 +2595,84 @@ def load_jobs():
         history_cleared_before = 0.0
 
 
+def _cleanup_orphaned_windows_encoders() -> int:
+    """Kill stale HandBrake/FFmpeg processes owned by this worker's folders."""
+    if os.name != "nt" or str(os.environ.get("TSD_WINDOWS_WORKER") or "").strip().lower() not in {
+        "1", "true", "yes", "on",
+    }:
+        return 0
+    roots = {
+        str(os.environ.get("TSD_WORKER_TEMP_DIR") or "").strip(),
+        str(os.environ.get("TSD_WORKER_SCRATCH_DIR") or "").strip(),
+    }
+    markers = {
+        os.path.normcase(os.path.abspath(value)).rstrip("\\/")
+        for value in roots
+        if value
+    }
+    for job in jobs.values():
+        transfer = job.get("transfer") if isinstance(job.get("transfer"), dict) else {}
+        for value in (
+            job.get("src"),
+            job.get("out_path"),
+            job.get("local_out_path"),
+            transfer.get("local_src"),
+            transfer.get("local_out"),
+            transfer.get("work_dir"),
+        ):
+            text = str(value or "").strip()
+            if text:
+                markers.add(os.path.normcase(os.path.abspath(text)).rstrip("\\/"))
+    markers = {value for value in markers if len(value) >= 3}
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        (
+            "Get-CimInstance Win32_Process | "
+            "Where-Object {$_.Name -in @('HandBrakeCLI.exe','ffmpeg.exe')} | "
+            "Select-Object ProcessId,ParentProcessId,Name,CommandLine | "
+            "ConvertTo-Json -Compress"
+        ),
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+            check=False,
+            **background_process_options(),
+        )
+        payload = json.loads(result.stdout or "[]") if result.returncode == 0 else []
+    except Exception as exc:
+        print(f"[WARN] Could not inspect orphaned Windows encoders: {exc}", flush=True)
+        return 0
+    if isinstance(payload, dict):
+        payload = [payload]
+    terminated = 0
+    for row in payload if isinstance(payload, list) else []:
+        if not isinstance(row, dict):
+            continue
+        command_line = os.path.normcase(str(row.get("CommandLine") or ""))
+        if not command_line or not any(marker in command_line for marker in markers):
+            continue
+        ok, detail = terminate_process_tree(row.get("ProcessId"), force=True)
+        if ok:
+            terminated += 1
+            print(
+                f"[RECOVERY] Terminated orphaned {row.get('Name') or 'encoder'} "
+                f"PID {row.get('ProcessId')} from a ByteSqueeze work folder.",
+                flush=True,
+            )
+        elif detail:
+            print(f"[WARN] Could not terminate orphaned encoder: {detail}", flush=True)
+    return terminated
+
+
 def initialize_jobs_system():
     """
     Call this once at app startup.
@@ -2573,6 +2681,7 @@ def initialize_jobs_system():
     - Starts dispatcher thread (which just idles if there is nothing queued)
     """
     load_jobs()
+    _cleanup_orphaned_windows_encoders()
     ensure_dispatcher()
 
 def _find_existing_active_job_for_src(src: str) -> str | None:
@@ -3001,7 +3110,11 @@ def auto_dispatch_local_available(job_id: str) -> bool:
         running_jobs = [
             jobs[running_id]
             for running_id, thread in RUNNING_JOB_THREADS.items()
-            if running_id in jobs and thread.is_alive()
+            if (
+                running_id in jobs
+                and thread.is_alive()
+                and jobs[running_id].get("status") == "running"
+            )
         ]
         return _can_dispatch_job(
             job,
@@ -3396,6 +3509,9 @@ def list_jobs_for_api(*, include_log_tail: bool = False) -> list[dict]:
                 "node_id": j.get("dispatch_node_id") or "",
                 "node_name": j.get("dispatch_node_name") or "",
                 "dispatch_error": j.get("dispatch_error") or "",
+                "gpu_route_error": j.get("gpu_route_error") or "",
+                "cancel_process_tree_terminated": j.get("cancel_process_tree_terminated"),
+                "cancel_process_detail": j.get("cancel_process_detail") or "",
                 "dispatch_attempts": int(j.get("dispatch_attempts") or 0),
                 "transfer": _remote_transfer_public(j.get("transfer")) if j.get("mode") == "remote_transfer" else None,
                 "status": j.get("status"),
@@ -3688,13 +3804,9 @@ def _run_audio_only_job(
                 except (TypeError, ValueError):
                     pass
             if job.get("status") == "canceled":
-                try:
-                    os.killpg(process.pid, signal.SIGTERM)
-                except Exception:
-                    try:
-                        process.terminate()
-                    except Exception:
-                        pass
+                terminated, detail = terminate_process_tree(process.pid, force=True)
+                job["cancel_process_tree_terminated"] = bool(terminated)
+                job["cancel_process_detail"] = str(detail or "")[:500]
                 break
         returncode = process.wait()
         job["returncode"] = returncode
@@ -4393,15 +4505,9 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
                                 src=display_src_path,
                                 extra=stop_details,
                             )
-                            try:
-                                os.killpg(proc.pid, signal.SIGTERM)
-                            except ProcessLookupError:
-                                pass
-                            except Exception:
-                                try:
-                                    os.kill(proc.pid, signal.SIGTERM)
-                                except ProcessLookupError:
-                                    pass
+                            terminated, detail = terminate_process_tree(proc.pid, force=True)
+                            job["cancel_process_tree_terminated"] = bool(terminated)
+                            job["cancel_process_detail"] = str(detail or "")[:500]
                         save_jobs()
 
             # Parse ETA from this line, if present
@@ -4413,6 +4519,10 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
 
             # If the job was canceled externally, stop reading further
             if job.get("status") == "canceled":
+                if proc.poll() is None:
+                    terminated, detail = terminate_process_tree(proc.pid, force=True)
+                    job["cancel_process_tree_terminated"] = bool(terminated)
+                    job["cancel_process_detail"] = str(detail or "")[:500]
                 break
 
     # Wait for process to exit
@@ -4814,11 +4924,14 @@ def dispatcher_loop():
                     running_jobs = [
                         jobs[job_id]
                         for job_id in RUNNING_JOB_THREADS
-                        if job_id in jobs
+                        if job_id in jobs and jobs[job_id].get("status") == "running"
                     ]
                     route_available = True
                     if next_job:
+                        previous_route_error = str(next_job.get("gpu_route_error") or "")
                         route_available, _assignment = _assign_windows_gpu_route(next_job, running_jobs)
+                        if str(next_job.get("gpu_route_error") or "") != previous_route_error:
+                            queue_changed = True
                     if next_job and route_available and _can_dispatch_job(
                         next_job,
                         running_jobs,
@@ -5009,24 +5122,39 @@ def cancel_job(job_id: str) -> tuple[bool, str | None]:
         )
         return True, None
 
-    # If it's running, try to kill the process
+    # Mark canceled before terminating so the runner cannot race the kill and
+    # convert an intentional cancellation into an encode error.
     pid = job.get("pid")
-    if pid:
-        try:
-            os.killpg(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        except Exception:
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-
     job["status"] = "canceled"
+    job["phase"] = "canceling_process_tree" if pid else "canceled"
     job["returncode"] = None
     job["progress"] = 0.0
     job["eta_seconds"] = None
+    job["finished_at"] = _now_ts()
+    if job.get("started_at") is not None:
+        try:
+            job["duration_seconds"] = max(0.0, float(job["finished_at"]) - float(job["started_at"]))
+        except Exception:
+            job["duration_seconds"] = None
     save_jobs()
+
+    terminated = True
+    termination_detail = "no active encoder pid"
+    if pid:
+        terminated, termination_detail = terminate_process_tree(pid, force=True)
+    job["phase"] = "canceled" if terminated else "cancel_cleanup_failed"
+    job["cancel_process_tree_terminated"] = bool(terminated)
+    job["cancel_process_detail"] = str(termination_detail or "")[:500]
+    _append_job_log(
+        job_id,
+        (
+            f"[ByteSqueeze] Cancellation process-tree cleanup: "
+            f"{'complete' if terminated else 'FAILED'}"
+            f"{f' ({termination_detail})' if termination_detail else ''}"
+        ),
+    )
+    save_jobs()
+    DISPATCH_WAKE_EVENT.set()
 
     _src = job.get("src")
     log_event(
