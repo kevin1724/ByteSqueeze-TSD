@@ -33,6 +33,7 @@ _AUDIO_OPTIONS_WITH_VALUE = {
 }
 _AUDIO_SHORT_OPTIONS_WITH_VALUE = {"-a", "-E", "-B", "-6", "-R"}
 _AUDIO_FLAG_OPTIONS = {"--all-audio", "--first-audio"}
+_NVENC_AV1_ENCODERS = {"nvenc_av1", "nvenc_av1_10bit"}
 
 
 def _background_process_options() -> dict:
@@ -104,6 +105,71 @@ def _without_audio_options(arguments: list[str]) -> list[str]:
     return cleaned
 
 
+def _argument_value(arguments: list[str], name: str) -> str:
+    value = ""
+    for index, argument in enumerate(arguments):
+        text = str(argument)
+        if text == name and index + 1 < len(arguments):
+            value = str(arguments[index + 1])
+        elif text.startswith(name + "="):
+            value = text.split("=", 1)[1]
+    return value
+
+
+def _selected_preset_definition(preset_file: str, preset_name: str) -> dict:
+    if not preset_file or not os.path.isfile(preset_file):
+        return {}
+    import json
+
+    with open(preset_file, "r", encoding="utf-8") as stream:
+        data = json.load(stream)
+    candidates: list[dict] = []
+
+    def walk(value) -> None:
+        if isinstance(value, dict):
+            if str(value.get("VideoEncoder") or "").strip():
+                candidates.append(value)
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(data)
+    expected = str(preset_name or "").strip().casefold()
+    return next(
+        (
+            item for item in candidates
+            if str(item.get("PresetName") or item.get("Name") or "").strip().casefold() == expected
+        ),
+        candidates[0] if candidates else {},
+    )
+
+
+def _validate_encoder_profile(
+    video_encoder: str,
+    preset_file: str,
+    preset_name: str,
+    extra_args: list[str],
+) -> None:
+    """Reject known-invalid encoder/profile combinations before launching."""
+    preset = _selected_preset_definition(preset_file, preset_name)
+    encoder = (
+        _argument_value(extra_args, "--encoder")
+        or video_encoder
+        or str(preset.get("VideoEncoder") or "")
+    ).strip().lower()
+    profile = (
+        _argument_value(extra_args, "--encoder-profile")
+        or str(preset.get("VideoProfile") or "")
+    ).strip().lower()
+    if encoder in _NVENC_AV1_ENCODERS and profile not in {"", "auto"}:
+        raise ValueError(
+            f"Unsupported profile {profile!r} for {encoder}; "
+            "AV1 NVENC must use HandBrake Auto/default."
+        )
+
+
 def _tool(name: str) -> str:
     found = shutil.which(name) or shutil.which(f"{name}.exe")
     return found or name
@@ -140,6 +206,8 @@ def build_command(env: dict[str, str] | None = None, *, disable_qsv_decode: bool
     audio_policy_args = _split(values.get("HB_AUDIO_POLICY_OPTS"))
     if audio_policy_args:
         extra_args = _without_audio_options(extra_args)
+    video_encoder = str(values.get("HB_VIDEO_ENCODER") or "").lower()
+    _validate_encoder_profile(video_encoder, preset_file, preset_name, extra_args)
     command += extra_args
     command += audio_policy_args
     command += _split(values.get("HB_DIMENSION_OPTS"))
@@ -147,7 +215,6 @@ def build_command(env: dict[str, str] | None = None, *, disable_qsv_decode: bool
     hw_decode = _split(values.get("HB_HW_DECODE_OPTS") or "--disable-hw-decoding")
     if disable_qsv_decode:
         hw_decode = ["--disable-hw-decoding"]
-    video_encoder = str(values.get("HB_VIDEO_ENCODER") or "").lower()
     if video_encoder.startswith("qsv_") or hw_decode == ["--enable-hw-decoding", "qsv"]:
         adapter = str(values.get("TSD_QSV_ADAPTER") or "0").strip()
         if not adapter.isdigit():

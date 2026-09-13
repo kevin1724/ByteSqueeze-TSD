@@ -304,6 +304,53 @@ class EncodePlanningTests(unittest.TestCase):
         self.assertEqual(selected["VideoAdapterIndex"], 0)
         self.assertNotIn("VideoHWDecode", selected["AudioList"][0])
 
+    def test_nvenc_av1_route_omits_software_av1_profile(self):
+        for encoder in ("nvenc_av1", "nvenc_av1_10bit"):
+            with self.subTest(encoder=encoder):
+                payload = {
+                    "PresetList": [
+                        {
+                            "PresetName": "Software AV1 base",
+                            "VideoEncoder": "svt_av1_10bit",
+                            "VideoProfile": "main",
+                        }
+                    ]
+                }
+                self.assertTrue(
+                    jobs._set_preset_hardware_decode(
+                        payload,
+                        "Software AV1 base",
+                        False,
+                        video_encoder=encoder,
+                        gpu_index=0,
+                    )
+                )
+                selected = payload["PresetList"][0]
+                self.assertEqual(selected["VideoEncoder"], encoder)
+                self.assertNotIn("VideoProfile", selected)
+
+    def test_valid_non_av1_nvenc_profile_is_preserved(self):
+        payload = {
+            "PresetList": [
+                {
+                    "PresetName": "NVENC HEVC",
+                    "VideoEncoder": "nvenc_h265_10bit",
+                    "VideoProfile": "main10",
+                }
+            ]
+        }
+        self.assertTrue(jobs._set_preset_hardware_decode(payload, "NVENC HEVC", False))
+        self.assertEqual(payload["PresetList"][0]["VideoProfile"], "main10")
+
+    def test_nvenc_av1_stale_cli_profile_is_removed(self):
+        cleaned, removed = jobs._sanitize_encoder_profile_args(
+            "--quality 28 --encoder-profile main --encoder nvenc_av1_10bit",
+            "nvenc_av1_10bit",
+        )
+        self.assertNotIn("--encoder-profile", cleaned)
+        self.assertEqual(removed, "main")
+        self.assertIn("--quality 28", cleaned)
+
     def test_materialized_preset_enforces_qsv_decode_for_handbrake_import(self):
         source = {
             "PresetList": [

@@ -1812,6 +1812,38 @@ def _qsv_adapter_index() -> int:
     return index if index >= 0 else 0
 
 
+NVENC_AV1_ENCODERS = {"nvenc_av1", "nvenc_av1_10bit"}
+
+
+def _uses_default_encoder_profile(encoder: str) -> bool:
+    """Return whether HandBrake must choose the encoder profile itself."""
+    return str(encoder or "").strip().lower() in NVENC_AV1_ENCODERS
+
+
+def _sanitize_encoder_profile_args(extra_args: str, encoder: str) -> tuple[str, str]:
+    """Remove stale profile overrides that are invalid for the routed encoder."""
+    if not _uses_default_encoder_profile(encoder):
+        return str(extra_args or ""), ""
+    args = _split_extra_args(extra_args)
+    clean: list[str] = []
+    removed = ""
+    skip_value = False
+    for token in args:
+        if skip_value:
+            removed = str(token)
+            skip_value = False
+            continue
+        text = str(token)
+        if text == "--encoder-profile":
+            skip_value = True
+            continue
+        if text.startswith("--encoder-profile="):
+            removed = text.split("=", 1)[1]
+            continue
+        clean.append(text)
+    return shlex.join(clean), removed
+
+
 def _set_preset_hardware_decode(
     data,
     preset_name: str,
@@ -1847,6 +1879,12 @@ def _set_preset_hardware_decode(
     routed_encoder = str(video_encoder or "").strip().lower()
     if routed_encoder:
         selected["VideoEncoder"] = routed_encoder
+    effective_encoder = str(selected.get("VideoEncoder") or "").strip().lower()
+    if _uses_default_encoder_profile(effective_encoder):
+        # HandBrake 1.11.2 forwards AV1 NVENC's preset profile string to
+        # FFmpeg. av1_nvenc does not accept the software AV1 preset's "main"
+        # value, so omit the field and let HandBrake/FFmpeg choose Auto.
+        selected.pop("VideoProfile", None)
     if gpu_index is not None and routed_encoder.startswith(("nvenc_", "vce_")):
         existing = str(selected.get("VideoOptionExtra") or "").strip()
         parts = [part for part in existing.split(":") if part and not part.lower().startswith("gpu=")]
@@ -3999,6 +4037,23 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
         preset_definition = load_preset_definition(preset_file, preset_name)
     except Exception:
         preset_definition = {}
+    launch_extra_args, removed_cli_profile = _sanitize_encoder_profile_args(
+        launch_extra_args,
+        selected_encoder,
+    )
+    source_profile = str(preset_definition.get("VideoProfile") or "").strip()
+    encoder_profile_log = ""
+    if _uses_default_encoder_profile(selected_encoder):
+        details = []
+        if source_profile:
+            details.append(f"preset {source_profile}")
+        if removed_cli_profile:
+            details.append(f"CLI {removed_cli_profile}")
+        repaired = f"; removed {' and '.join(details)}" if details else ""
+        encoder_profile_log = (
+            "[ByteSqueeze] Encoder profile: Auto/default "
+            f"(AV1 NVENC profile field omitted{repaired})\n"
+        )
     output_plan = _output_container_plan(
         job_policy,
         source_video,
@@ -4030,7 +4085,10 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
         preset_name,
         hardware_decode["enabled"],
         preset_work_dir,
-        video_encoder=routed_encoder,
+        # Always snapshot the effective encoder. A CLI/manual NVENC selection
+        # can otherwise inherit an incompatible profile from the base preset
+        # even when no Windows GPU route rewrite was required.
+        video_encoder=selected_encoder,
         gpu_index=(
             0
             if str(gpu_assignment.get("encoder_family") or "") == "nvenc"
@@ -4188,6 +4246,7 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
             f"{frame_rate_log}"
             f"{qsv_diagnostics_log}"
             f"{gpu_route_log}"
+            f"{encoder_profile_log}"
             f"[ByteSqueeze] Preset decode policy: {preset_decode_policy}\n"
             f"[ByteSqueeze] Encoder launch: {launch_label}\n"
             f"[ByteSqueeze] Preset file: {preset_file}\n"

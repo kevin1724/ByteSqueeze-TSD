@@ -74,6 +74,66 @@ class WindowsEncodeRunnerTests(unittest.TestCase):
             self.assertEqual(command[command.index("--enable-hw-decoding") + 1], "qsv")
             self.assertIn("av_mkv", command)
 
+    def test_nvenc_av1_rejects_invalid_imported_profile_before_launch(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            source = Path(tempdir) / "Movie.mkv"
+            source.write_bytes(b"source")
+            preset = Path(tempdir) / "preset.json"
+            preset.write_text(
+                json.dumps(
+                    {
+                        "PresetList": [
+                            {
+                                "PresetName": "Routed AV1",
+                                "VideoEncoder": "nvenc_av1_10bit",
+                                "VideoProfile": "main",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            env = {
+                "SRC": str(source),
+                "HB_PRESET_FILE": str(preset),
+                "HB_PRESET_NAME": "Routed AV1",
+                "HB_VIDEO_ENCODER": "nvenc_av1_10bit",
+            }
+            with mock.patch.object(encode_runner, "_tool", return_value="HandBrakeCLI.exe"):
+                with self.assertRaisesRegex(ValueError, "Auto/default"):
+                    encode_runner.build_command(env)
+
+    def test_nvenc_av1_allows_default_profile_and_hevc_keeps_main10(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            source = Path(tempdir) / "Movie.mkv"
+            source.write_bytes(b"source")
+            for encoder, profile in (
+                ("nvenc_av1", ""),
+                ("nvenc_av1_10bit", "auto"),
+                ("nvenc_h265_10bit", "main10"),
+            ):
+                with self.subTest(encoder=encoder, profile=profile):
+                    preset = Path(tempdir) / f"{encoder}.json"
+                    definition = {
+                        "PresetName": encoder,
+                        "VideoEncoder": encoder,
+                    }
+                    if profile:
+                        definition["VideoProfile"] = profile
+                    preset.write_text(
+                        json.dumps({"PresetList": [definition]}),
+                        encoding="utf-8",
+                    )
+                    env = {
+                        "SRC": str(source),
+                        "HB_PRESET_FILE": str(preset),
+                        "HB_PRESET_NAME": encoder,
+                        "HB_VIDEO_ENCODER": encoder,
+                    }
+                    with mock.patch.object(encode_runner, "_tool", return_value="HandBrakeCLI.exe"):
+                        command = encode_runner.build_command(env)
+                    self.assertIn(encoder, command)
+
     def test_worker_error_excerpt_prefers_real_handbrake_cause(self):
         job = {
             "log": (
