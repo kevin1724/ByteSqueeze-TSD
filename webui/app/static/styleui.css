@@ -1791,6 +1791,28 @@ body.settings-subpage-automation .smart-settings-section {
   gap: 8px;
 }
 
+.mobile-pair-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.mobile-pair-actions [hidden] {
+  display: none !important;
+}
+
+.mobile-quick-pair {
+  color: #031014;
+  border-color: transparent;
+  background: var(--primary);
+}
+
+.compact-actions {
+  gap: 6px;
+  margin: 0;
+}
+
 .button-link {
   display: inline-flex;
   min-height: 38px;

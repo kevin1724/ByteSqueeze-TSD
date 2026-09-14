@@ -372,79 +372,127 @@ class _JobCard extends StatelessWidget {
     final terminal = {'done', 'error', 'canceled'}.contains(status);
     if (terminal) {
       final savings = asMap(job['storage_breakdown']);
-      return Material(
-        color: ByteSqueezeColors.surface,
-        borderRadius: BorderRadius.circular(12),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 8, 6, 8),
-          child: Row(
-            children: [
-              Icon(
-                status == 'done'
-                    ? Icons.check_circle_rounded
-                    : (status == 'error'
-                        ? Icons.error_rounded
-                        : Icons.cancel_rounded),
-                color: color,
-                size: 20,
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      fileName(job['src']),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w700,
-                        fontSize: 13,
+      final canOptimize = status == 'done' &&
+          controller.canControl &&
+          job['is_worker_job'] != true;
+      return AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        curve: Curves.easeOutCubic,
+        decoration: BoxDecoration(
+          color: ByteSqueezeColors.surface,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: color.withValues(alpha: .12)),
+        ),
+        child: Material(
+          color: Colors.transparent,
+          borderRadius: BorderRadius.circular(12),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: status == 'done'
+                ? () => _showCompletedDetails(context, canOptimize)
+                : null,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      Icon(
+                        status == 'done'
+                            ? Icons.check_circle_rounded
+                            : (status == 'error'
+                                ? Icons.error_rounded
+                                : Icons.cancel_rounded),
+                        color: color,
+                        size: 20,
                       ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              fileName(job['out_path'] ?? job['src']),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w700,
+                                fontSize: 13,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              status == 'done' && job['saved_bytes'] != null
+                                  ? '${formatBytes(job['saved_bytes'])} saved · ${job['node_name'] ?? 'Main controller'}'
+                                  : '${job['node_name'] ?? 'Main controller'} · ${status.replaceAll('_', ' ')}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: ByteSqueezeColors.muted,
+                                fontSize: 10.5,
+                              ),
+                            ),
+                            if (status == 'done' && savings.isNotEmpty)
+                              Text(
+                                'Video ${formatBytes(savings['video_saved_bytes'])} · Audio ${formatBytes(savings['audio_saved_bytes'])}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: ByteSqueezeColors.muted,
+                                  fontSize: 10.5,
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                      StatusPill(
+                        label: status.replaceAll('_', ' '),
+                        color: color,
+                      ),
+                      if (status == 'done')
+                        const Padding(
+                          padding: EdgeInsets.only(left: 2),
+                          child: Icon(Icons.chevron_right_rounded,
+                              color: ByteSqueezeColors.muted),
+                        ),
+                    ],
+                  ),
+                  if (status == 'done') ...[
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        MediaOperationTag(
+                          label: jobVideoProcessingLabel(job),
+                          icon: Icons.movie_outlined,
+                        ),
+                        MediaOperationTag(
+                          label: jobAudioProcessingLabel(job),
+                          icon: Icons.graphic_eq_rounded,
+                          color: jobAudioWasProcessed(job)
+                              ? ByteSqueezeColors.cyan
+                              : ByteSqueezeColors.softInk,
+                        ),
+                        if (canOptimize)
+                          TextButton.icon(
+                            onPressed: () => _openAudioOptimizer(context),
+                            icon: const Icon(Icons.tune_rounded, size: 17),
+                            label: const Text('Optimize audio only'),
+                            style: TextButton.styleFrom(
+                              visualDensity: VisualDensity.compact,
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 9, vertical: 5),
+                            ),
+                          ),
+                      ],
                     ),
-                    const SizedBox(height: 2),
-                    Text(
-                      status == 'done' && job['saved_bytes'] != null
-                          ? '${formatBytes(job['saved_bytes'])} saved · ${job['node_name'] ?? 'Main controller'}'
-                          : '${job['node_name'] ?? 'Main controller'} · ${status.replaceAll('_', ' ')}',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: ByteSqueezeColors.muted,
-                        fontSize: 10.5,
-                      ),
-                    ),
-                    if (status == 'done' && savings.isNotEmpty)
-                      Text(
-                        'Video ${formatBytes(savings['video_saved_bytes'])} · Audio ${formatBytes(savings['audio_saved_bytes'])}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                            color: ByteSqueezeColors.muted, fontSize: 10.5),
-                      ),
                   ],
-                ),
+                ],
               ),
-              StatusPill(label: status.replaceAll('_', ' '), color: color),
-              if (status == 'done' &&
-                  controller.canControl &&
-                  job['is_worker_job'] != true)
-                IconButton(
-                  tooltip: 'Optimize audio without re-encoding video',
-                  icon: const Icon(Icons.graphic_eq_rounded,
-                      color: ByteSqueezeColors.cyan),
-                  onPressed: () async {
-                    final queued = await showAudioOptimizerSheet(context,
-                        controller: controller, job: job);
-                    if (queued == true && context.mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                          content: Text(
-                              'Audio-only job queued. Video will be copied.')));
-                    }
-                  },
-                ),
-              const SizedBox(width: 6),
-            ],
+            ),
           ),
         ),
       );
@@ -490,6 +538,24 @@ class _JobCard extends StatelessWidget {
                         color: ByteSqueezeColors.muted,
                         fontSize: 12,
                       ),
+                    ),
+                    const SizedBox(height: 7),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 5,
+                      children: [
+                        MediaOperationTag(
+                          label: jobVideoProcessingLabel(job),
+                          icon: Icons.movie_outlined,
+                        ),
+                        MediaOperationTag(
+                          label: jobAudioProcessingLabel(job),
+                          icon: Icons.graphic_eq_rounded,
+                          color: jobAudioWasProcessed(job)
+                              ? ByteSqueezeColors.cyan
+                              : ByteSqueezeColors.softInk,
+                        ),
+                      ],
                     ),
                   ],
                 ),
@@ -584,11 +650,16 @@ class _JobCard extends StatelessWidget {
           ),
           if (status == 'running') ...[
             const SizedBox(height: 11),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(999),
-              child: LinearProgressIndicator(
-                value: progress / 100,
-                minHeight: 8,
+            TweenAnimationBuilder<double>(
+              tween: Tween<double>(end: progress / 100),
+              duration: const Duration(milliseconds: 420),
+              curve: Curves.easeOutCubic,
+              builder: (context, value, _) => ClipRRect(
+                borderRadius: BorderRadius.circular(999),
+                child: LinearProgressIndicator(
+                  value: value,
+                  minHeight: 8,
+                ),
               ),
             ),
           ],
@@ -606,4 +677,159 @@ class _JobCard extends StatelessWidget {
       ),
     );
   }
+
+  Future<void> _openAudioOptimizer(BuildContext context) async {
+    final queued = await showAudioOptimizerSheet(
+      context,
+      controller: controller,
+      job: job,
+    );
+    if (queued == true && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Audio-only job queued. The video will be copied.'),
+        ),
+      );
+    }
+  }
+
+  Future<void> _showCompletedDetails(
+    BuildContext context,
+    bool canOptimize,
+  ) async {
+    final savings = asMap(job['storage_breakdown']);
+    final openOptimizer = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (sheetContext) => Padding(
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Center(
+              child: Container(
+                width: 42,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: ByteSqueezeColors.line,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+              ),
+            ),
+            const SizedBox(height: 18),
+            Text(
+              fileName(job['out_path'] ?? job['src']),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+            const SizedBox(height: 5),
+            Text(
+              '${job['queued_preset_name'] ?? job['preset_name'] ?? job['preset'] ?? 'Completed encode'} · ${job['node_name'] ?? 'Main controller'}',
+              style: const TextStyle(color: ByteSqueezeColors.muted),
+            ),
+            const SizedBox(height: 14),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                MediaOperationTag(
+                  label: jobVideoProcessingLabel(job),
+                  icon: Icons.movie_outlined,
+                  color: ByteSqueezeColors.mint,
+                ),
+                MediaOperationTag(
+                  label: jobAudioProcessingLabel(job),
+                  icon: Icons.graphic_eq_rounded,
+                  color: jobAudioWasProcessed(job)
+                      ? ByteSqueezeColors.cyan
+                      : ByteSqueezeColors.softInk,
+                ),
+              ],
+            ),
+            if (savings.isNotEmpty) ...[
+              const SizedBox(height: 18),
+              _SavingsRow(
+                label: 'Video saved',
+                value: formatBytes(savings['video_saved_bytes']),
+              ),
+              _SavingsRow(
+                label: 'Audio saved',
+                value: formatBytes(savings['audio_saved_bytes']),
+              ),
+              _SavingsRow(
+                label: 'Total saved',
+                value: formatBytes(
+                    job['saved_bytes'] ?? savings['total_saved_bytes']),
+                emphasized: true,
+              ),
+            ],
+            if (canOptimize) ...[
+              const SizedBox(height: 20),
+              FilledButton.icon(
+                onPressed: () => Navigator.pop(sheetContext, true),
+                icon: const Icon(Icons.graphic_eq_rounded),
+                label: const Text('Optimize audio only'),
+              ),
+              const SizedBox(height: 7),
+              const Text(
+                'Scans the current transcoded file and copies its video without re-encoding it.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: ByteSqueezeColors.muted,
+                  fontSize: 11.5,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+    if (openOptimizer == true && context.mounted) {
+      await _openAudioOptimizer(context);
+    }
+  }
+}
+
+class _SavingsRow extends StatelessWidget {
+  const _SavingsRow({
+    required this.label,
+    required this.value,
+    this.emphasized = false,
+  });
+
+  final String label;
+  final String value;
+  final bool emphasized;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 5),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                label,
+                style: TextStyle(
+                  color: emphasized
+                      ? ByteSqueezeColors.ink
+                      : ByteSqueezeColors.muted,
+                  fontWeight: emphasized ? FontWeight.w700 : FontWeight.w500,
+                ),
+              ),
+            ),
+            Text(
+              value,
+              style: TextStyle(
+                color: emphasized
+                    ? ByteSqueezeColors.mint
+                    : ByteSqueezeColors.softInk,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
+        ),
+      );
 }

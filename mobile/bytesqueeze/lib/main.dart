@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'src/app_controller.dart';
 import 'src/app_meta.dart';
@@ -8,11 +9,34 @@ import 'src/screens/app_shell.dart';
 import 'src/screens/pairing_screen.dart';
 import 'src/theme.dart';
 
+const _pairingLinkChannel = MethodChannel('com.kevina1724.bytesqueeze/links');
+
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   final controller = AppController();
+  _pairingLinkChannel.setMethodCallHandler((call) async {
+    if (call.method == 'pairingLink' && call.arguments is String) {
+      await controller.handleQuickPairingLink(call.arguments as String);
+    }
+  });
   runApp(ByteSqueezeApp(controller: controller));
-  unawaited(controller.bootstrap());
+  unawaited(_initializeApp(controller));
+}
+
+Future<void> _initializeApp(AppController controller) async {
+  String initialLink = '';
+  try {
+    initialLink =
+        await _pairingLinkChannel.invokeMethod<String>('getInitialLink') ?? '';
+  } on MissingPluginException {
+    // The shared iOS/desktop build can continue without Android link delivery.
+  } on PlatformException {
+    // Manual pairing remains available if Android cannot provide the intent.
+  }
+  await controller.bootstrap();
+  if (initialLink.isNotEmpty) {
+    await controller.handleQuickPairingLink(initialLink);
+  }
 }
 
 class ByteSqueezeApp extends StatelessWidget {

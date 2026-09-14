@@ -330,3 +330,41 @@ def revoke_mobile_device(device_id: str) -> bool:
         return True
 
     return _mutate(apply)
+
+
+def forget_mobile_device(device_id: str) -> bool:
+    """Permanently remove a paired app and invalidate its credentials."""
+    device_id = str(device_id or "").strip()
+
+    def apply(data):
+        devices = data.setdefault("devices", {})
+        row = devices.get(device_id)
+        if not isinstance(row, dict):
+            return False
+        # Deleting the only persisted token hashes invalidates both access and
+        # refresh credentials immediately.
+        devices.pop(device_id, None)
+        return True
+
+    return _mutate(apply)
+
+
+def clear_mobile_devices(*, inactive_only: bool = True) -> int:
+    """Forget revoked/expired app records, or every app when explicitly asked."""
+
+    def apply(data):
+        devices = data.setdefault("devices", {})
+        now = _now()
+        remove_ids = []
+        for device_id, row in devices.items():
+            if not isinstance(row, dict):
+                remove_ids.append(device_id)
+                continue
+            inactive = bool(row.get("revoked_at")) or float(row.get("refresh_expires_at") or 0) <= now
+            if not inactive_only or inactive:
+                remove_ids.append(device_id)
+        for device_id in remove_ids:
+            devices.pop(device_id, None)
+        return len(remove_ids)
+
+    return _mutate(apply)

@@ -65,12 +65,14 @@ class _AppShellState extends State<AppShell> {
 
   Timer? _operationsTimer;
   bool _polling = false;
+  late final PageController _pageController;
 
   AppController get controller => widget.controller;
 
   @override
   void initState() {
     super.initState();
+    _pageController = PageController(initialPage: controller.selectedTab);
     if (!controller.demoMode) {
       _operationsTimer = Timer.periodic(
         const Duration(seconds: 15),
@@ -82,7 +84,33 @@ class _AppShellState extends State<AppShell> {
   @override
   void dispose() {
     _operationsTimer?.cancel();
+    _pageController.dispose();
     super.dispose();
+  }
+
+  Widget _animatedV3Pages(BuildContext context, List<Widget> pages) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_pageController.hasClients) return;
+      final current =
+          (_pageController.page ?? _pageController.initialPage).round();
+      if (current == controller.selectedTab) return;
+      final reduceMotion =
+          MediaQuery.maybeOf(context)?.disableAnimations ?? false;
+      if (reduceMotion) {
+        _pageController.jumpToPage(controller.selectedTab);
+      } else {
+        _pageController.animateToPage(
+          controller.selectedTab,
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOutCubic,
+        );
+      }
+    });
+    return PageView(
+      controller: _pageController,
+      physics: const NeverScrollableScrollPhysics(),
+      children: pages,
+    );
   }
 
   Future<void> _refreshOperations() async {
@@ -155,11 +183,10 @@ class _AppShellState extends State<AppShell> {
     final workIsActive = summaryCount(summary, 'running') > 0;
     // Queue already has full live status, and Settings should never have
     // controls obscured by operational chrome.
-    final showDock =
-        workIsActive &&
+    final showDock = workIsActive &&
         controller.selectedTab != 2 &&
         controller.selectedTab != 4;
-    final page = IndexedStack(index: controller.selectedTab, children: pages);
+    final page = _animatedV3Pages(context, pages);
 
     if (wide) {
       return Scaffold(
@@ -387,16 +414,17 @@ class _AppShellState extends State<AppShell> {
   }
 
   Widget _errorBanner() => MaterialBanner(
-    backgroundColor: ByteSqueezeColors.danger.withValues(alpha: .10),
-    leading: const Icon(
-      Icons.cloud_off_rounded,
-      color: ByteSqueezeColors.danger,
-    ),
-    content: Text(controller.error!),
-    actions: [
-      TextButton(onPressed: controller.refreshAll, child: const Text('Retry')),
-    ],
-  );
+        backgroundColor: ByteSqueezeColors.danger.withValues(alpha: .10),
+        leading: const Icon(
+          Icons.cloud_off_rounded,
+          color: ByteSqueezeColors.danger,
+        ),
+        content: Text(controller.error!),
+        actions: [
+          TextButton(
+              onPressed: controller.refreshAll, child: const Text('Retry')),
+        ],
+      );
 
   Future<void> _openCommandCenter(BuildContext context) async {
     final queue = asMap(controller.dashboard['queue']);
@@ -597,9 +625,8 @@ class _SidebarDestination extends StatelessWidget {
               Icon(
                 selected ? destination.selectedIcon : destination.icon,
                 size: 21,
-                color: selected
-                    ? ByteSqueezeColors.cyan
-                    : ByteSqueezeColors.muted,
+                color:
+                    selected ? ByteSqueezeColors.cyan : ByteSqueezeColors.muted,
               ),
               const SizedBox(width: 12),
               Expanded(
@@ -789,8 +816,7 @@ class _CommandButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final showShortcut =
-            expanded &&
+        final showShortcut = expanded &&
             (!constraints.hasBoundedWidth || constraints.maxWidth >= 250);
         return OutlinedButton.icon(
           onPressed: onPressed,

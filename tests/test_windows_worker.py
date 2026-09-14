@@ -306,6 +306,35 @@ class WindowsHardwareInventoryTests(unittest.TestCase):
         self.assertIn("nvenc_h265_10bit", old_caps)
         self.assertIn("nvenc_av1_10bit", new_caps)
 
+    def test_windows_intel_and_amd_av1_capabilities_are_generation_aware(self):
+        qsv_encoders = ["qsv_h265_10bit", "qsv_av1_10bit"]
+        self.assertNotIn(
+            "qsv_av1_10bit",
+            node_linking._windows_gpu_encoder_capabilities(
+                {"name": "Intel(R) UHD Graphics 770"}, "qsv", qsv_encoders
+            ),
+        )
+        self.assertIn(
+            "qsv_av1_10bit",
+            node_linking._windows_gpu_encoder_capabilities(
+                {"name": "Intel(R) Arc(TM) A770 Graphics"}, "qsv", qsv_encoders
+            ),
+        )
+
+        vce_encoders = ["vce_h265_10bit", "vce_av1_10bit"]
+        self.assertNotIn(
+            "vce_av1_10bit",
+            node_linking._windows_gpu_encoder_capabilities(
+                {"name": "AMD Radeon RX 6800 XT"}, "vce", vce_encoders
+            ),
+        )
+        self.assertIn(
+            "vce_av1_10bit",
+            node_linking._windows_gpu_encoder_capabilities(
+                {"name": "AMD Radeon RX 9070 XT"}, "vce", vce_encoders
+            ),
+        )
+
     def test_environment_uses_persistent_windows_paths_and_all_families(self):
         config = default_config()
         with tempfile.TemporaryDirectory() as tempdir:

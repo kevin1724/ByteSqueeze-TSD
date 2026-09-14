@@ -51,7 +51,7 @@
     const brand = nav.querySelector(".app-brand");
     if (brand) {
       brand.setAttribute("aria-label", "ByteSqueeze overview");
-      brand.innerHTML = '<span class="brand-mark">BS</span><span class="brand-copy"><strong>ByteSqueeze</strong><span>Media operations</span></span>';
+      brand.innerHTML = '<span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span class="brand-copy"><strong>ByteSqueeze</strong><span>Media operations</span></span>';
     }
 
     const navLinks = nav.querySelector(".nav-links");
@@ -608,6 +608,65 @@
     update();
   }
 
+  function initializeInterfaceMotion() {
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reducedMotion) {
+      body.classList.add("v3-reduced-motion");
+      return;
+    }
+
+    body.classList.add("v3-motion-ready");
+    const seen = new WeakSet();
+    const observer = "IntersectionObserver" in window
+      ? new IntersectionObserver(entries => {
+          entries.forEach(entry => {
+            if (!entry.isIntersecting) return;
+            entry.target.classList.add("is-visible");
+            observer.unobserve(entry.target);
+          });
+        }, { rootMargin: "0px 0px -5%", threshold: 0.04 })
+      : null;
+
+    const register = (element, delay = 0) => {
+      if (!(element instanceof HTMLElement) || seen.has(element)) return;
+      seen.add(element);
+      element.classList.add("v3-reveal");
+      element.style.setProperty("--v3-reveal-delay", `${Math.min(delay, 220)}ms`);
+      window.requestAnimationFrame(() => {
+        const bounds = element.getBoundingClientRect();
+        if (!observer || bounds.top < window.innerHeight * 1.04) element.classList.add("is-visible");
+        else observer.observe(element);
+      });
+    };
+
+    const sectionSelectors = [
+      "main > .page-hero", "main > .home-hero", "main > .auto-hero", "main > .wizard-heading",
+      "main > .home-metrics", "main > .home-grid", "main > .library-control-card",
+      "main > .library-view-tabs", "main > .beta-layout", "main > .library-release-section",
+      "main > .v3-running-section", "main > .v3-queue-overview", "main > .jobs-history-card",
+      "main > .v3-queue-compose", "main > .v3-worker-overview", "main > .auto-card",
+      "main > .auto-layout", "main > .wizard-ai-setup-card", "main > .wizard-mode-card",
+      "main > .smart-preset-card", "main > .wizard-layout", "main > .settings-section-nav",
+      "main > .v3-settings-search", "main > .settings-grid"
+    ];
+    document.querySelectorAll(sectionSelectors.join(",")).forEach((element, index) => register(element, index * 32));
+
+    const dynamicSelector = ".beta-card, .v3-running-card, .node-status-box, .linked-node-job-row, .home-job, .home-event";
+    const registerDynamic = root => {
+      const elements = [];
+      if (root instanceof HTMLElement && root.matches(dynamicSelector)) elements.push(root);
+      if (root instanceof Element) elements.push(...root.querySelectorAll(dynamicSelector));
+      elements.forEach((element, index) => register(element, (index % 8) * 24));
+    };
+    registerDynamic(document.querySelector("main"));
+
+    const main = document.querySelector("main");
+    if (main) {
+      new MutationObserver(records => records.forEach(record => record.addedNodes.forEach(registerDynamic)))
+        .observe(main, { childList: true, subtree: true });
+    }
+  }
+
   decorateNavigation();
   injectTopbar();
   injectOperationsDock();
@@ -619,6 +678,7 @@
   applyLibrarySearch();
   addWizardProgress();
   enhanceWizardPage();
+  initializeInterfaceMotion();
   document.title = `ByteSqueeze · ${currentRoute.label}`;
   body.classList.add("v3-ready");
 })();

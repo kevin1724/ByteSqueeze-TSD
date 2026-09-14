@@ -474,7 +474,60 @@ def _windows_gpu_encoder_capabilities(gpu: dict, family: str, encoders: list[str
         )
         if known_without_av1:
             supported = [encoder for encoder in supported if "_av1" not in encoder]
+    elif family == "qsv":
+        # Intel Arc-class graphics expose AV1 encode. UHD/Iris generations can
+        # commonly decode AV1 but must not be advertised as AV1 encoders.
+        if "arc" not in name:
+            supported = [encoder for encoder in supported if "_av1" not in encoder]
+    elif family == "vce":
+        # RDNA2 and older consumer Radeon parts do not provide AV1 encoding.
+        known_without_av1 = bool(
+            re.search(r"(?:radeon\s+)?rx\s*(?:4|5|6)\d{3}", name)
+            or any(token in name for token in ("vega", " r9 ", " r7 "))
+        )
+        if known_without_av1:
+            supported = [encoder for encoder in supported if "_av1" not in encoder]
     return supported
+
+
+def _linux_qsv_av1_capability(render_devices: list[str]) -> tuple[bool, str]:
+    """Verify AV1 encode support from the active Intel VA driver.
+
+    HandBrake's help output describes what the binary was compiled to support,
+    not what an older Intel GPU can encode.  `vainfo` is fast and reports the
+    profiles exposed by the actual render node/driver, so it prevents AV1 Smart
+    jobs from being routed to HEVC-only Quick Sync nodes.
+    """
+    vainfo = shutil.which("vainfo")
+    if not vainfo:
+        return False, "vainfo is unavailable; AV1 QSV was not advertised"
+    if not render_devices:
+        return False, "no Intel DRM render device is available"
+    failures = []
+    for render_device in render_devices:
+        try:
+            result = subprocess.run(
+                [vainfo, "--display", "drm", "--device", render_device],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=8,
+                check=False,
+                **background_process_options(),
+            )
+        except Exception as exc:
+            failures.append(f"{render_device}: {exc}")
+            continue
+        output = f"{result.stdout}\n{result.stderr}"
+        if result.returncode == 0 and re.search(
+            r"VAProfileAV1[^\r\n]*VAEntrypointEncSlice",
+            output,
+            flags=re.IGNORECASE,
+        ):
+            return True, f"AV1 encode profile verified on {render_device}"
+        failures.append(f"{render_device}: VA driver exposes no AV1 encode profile")
+    return False, "; ".join(failures)[:500]
 
 
 def _requested_family_order() -> list[str]:
@@ -499,6 +552,12 @@ def encoder_hardware_profile(*, force: bool = False) -> dict:
         # Keep probing Unix device paths even on Windows. They are normally an
         # empty set there, and doing so keeps WSL/mocked diagnostics useful.
         render_devices = sorted(glob.glob("/dev/dri/renderD*"))
+        render_vendors = {
+            path: _read_gpu_vendor(
+                f"/sys/class/drm/{os.path.basename(path)}/device/vendor"
+            )
+            for path in render_devices
+        }
         vendors = {
             vendor
             for vendor in (
@@ -516,6 +575,13 @@ def encoder_hardware_profile(*, force: bool = False) -> dict:
                 vendors.add("intel")
             elif driver in {"radeonsi", "amd"}:
                 vendors.add("amd")
+        intel_render_devices = [
+            path for path in render_devices if render_vendors.get(path) == "intel"
+        ]
+        if not intel_render_devices and "intel" in vendors and str(
+            os.environ.get("LIBVA_DRIVER_NAME") or ""
+        ).strip().lower() == "ihd":
+            intel_render_devices = list(render_devices)
 
         nvidia_devices = sorted(glob.glob("/dev/nvidia[0-9]*"))
         if nvidia_devices:
@@ -618,6 +684,12 @@ def encoder_hardware_profile(*, force: bool = False) -> dict:
                 for name in gpu.get("encoders") or []
             ):
                 encoders = [name for name in encoders if name not in {"nvenc_av1", "nvenc_av1_10bit"}]
+        qsv_av1_verified = None
+        qsv_av1_verification = ""
+        if not windows and "qsv" in usable_families and any(name.startswith("qsv_av1") for name in encoders):
+            qsv_av1_verified, qsv_av1_verification = _linux_qsv_av1_capability(intel_render_devices)
+            if not qsv_av1_verified:
+                encoders = [name for name in encoders if not name.startswith("qsv_av1")]
         value = {
             "encoder_families": ordered_families,
             "encoders": list(dict.fromkeys(encoders)),
@@ -626,6 +698,8 @@ def encoder_hardware_profile(*, force: bool = False) -> dict:
             "render_devices": render_devices,
             "nvidia_devices": nvidia_devices,
             "preferred_encoder_family": preferred,
+            "qsv_av1_verified": qsv_av1_verified,
+            "qsv_av1_verification": qsv_av1_verification,
             "cpu": {
                 "name": platform.processor() or os.environ.get("PROCESSOR_IDENTIFIER") or "Unknown CPU",
                 "logical_cores": os.cpu_count() or 1,
@@ -1663,6 +1737,55 @@ def get_transfer(transfer_id: str) -> dict | None:
     data = _load_transfers()
     row = (data.get("transfers") or {}).get(str(transfer_id or ""))
     return row if isinstance(row, dict) else None
+
+
+def find_active_transfer_for_src(src: str, *, retention_seconds: int = 7 * 24 * 60 * 60) -> dict | None:
+    """Return a durable in-flight remote transfer reservation for ``src``.
+
+    The controller queue placeholder is removed after a worker accepts a job,
+    while the transfer ledger remains until the worker returns the result.  A
+    library scan during that window must still see the source as busy or it can
+    dispatch the same episode twice and let the first result delete the source
+    out from under the second upload.
+    """
+    value = str(src or "").strip()
+    if not value:
+        return None
+    try:
+        target = os.path.normcase(os.path.realpath(value))
+    except Exception:
+        target = os.path.normcase(os.path.abspath(value))
+    now = _now()
+    data = _load_transfers()
+    rows = (data.get("transfers") or {}).values()
+    candidates = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("status") or "").strip().lower()
+        if row.get("completed_at") or status in {"complete", "completed", "canceled", "cancelled", "expired"}:
+            continue
+        row_src = str(row.get("src") or "").strip()
+        if not row_src:
+            continue
+        try:
+            row_target = os.path.normcase(os.path.realpath(row_src))
+        except Exception:
+            row_target = os.path.normcase(os.path.abspath(row_src))
+        if row_target != target:
+            continue
+        last_activity = max(
+            float(row.get("created_at") or 0),
+            float(row.get("renewed_at") or 0),
+            float(row.get("download_used_at") or 0),
+            float(row.get("upload_used_at") or 0),
+        )
+        if last_activity and now - last_activity > max(TRANSFER_TTL_SECONDS, int(retention_seconds)):
+            continue
+        candidates.append(row)
+    if not candidates:
+        return None
+    return deepcopy(max(candidates, key=lambda item: float(item.get("created_at") or 0)))
 
 
 def save_transfer(row: dict) -> dict:

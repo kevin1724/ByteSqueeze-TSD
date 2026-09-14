@@ -115,6 +115,9 @@ class ApiRouteSmokeTests(unittest.TestCase):
         self.assertIn(b"analyze every episode", smart_settings.data)
         ai_settings = self.client.get("/settings/ai")
         self.assertIn(b"representative low-detail JPEG", ai_settings.data)
+        linked_settings = self.client.get("/settings/nodes")
+        self.assertIn(b"Open app &amp; pair", linked_settings.data)
+        self.assertIn(b'id="clearInactiveMobileDevicesBtn"', linked_settings.data)
 
         job_id = "jobs-dashboard-route-regression"
         app_jobs.jobs[job_id] = {
@@ -204,6 +207,21 @@ class ApiRouteSmokeTests(unittest.TestCase):
         self.assertEqual(call.kwargs["dispatch_mode"], "auto")
         self.assertEqual(call.kwargs["operations"]["video_action"], "copy")
         self.assertTrue(call.kwargs["operations"]["replace_source"])
+
+    def test_mobile_device_admin_can_forget_one_or_clear_inactive_records(self):
+        with patch.object(app_routes, "forget_mobile_device", return_value=True) as forget:
+            response = self.client.delete("/api/mobile/devices/phone-old/forget")
+        self.assertEqual(response.status_code, 200)
+        forget.assert_called_once_with("phone-old")
+
+        with patch.object(app_routes, "clear_mobile_devices", return_value=3) as clear:
+            response = self.client.post(
+                "/api/mobile/devices/clear",
+                json={"target": "inactive"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["removed"], 3)
+        clear.assert_called_once_with(inactive_only=True)
 
     def test_main_jobs_api_combines_worker_rows_and_clear_proxies_to_workers(self):
         worker_jobs = [
@@ -1057,9 +1075,14 @@ class ApiRouteSmokeTests(unittest.TestCase):
                 app_node_linking.get_node_private(node_id)["hardware_transcode_concurrency"],
                 5,
             )
-            self.assertEqual(signed_request.call_args.args[1], "/api/node/config")
+            config_calls = [
+                call
+                for call in signed_request.call_args_list
+                if len(call.args) > 1 and call.args[1] == "/api/node/config"
+            ]
+            self.assertEqual(len(config_calls), 1)
             self.assertEqual(
-                signed_request.call_args.kwargs["body"]["hardware_transcode_concurrency"],
+                config_calls[0].kwargs["body"]["hardware_transcode_concurrency"],
                 5,
             )
 
@@ -1377,6 +1400,123 @@ class ApiRouteSmokeTests(unittest.TestCase):
         self.assertEqual(app_routes._resolved_transfer_output_container("auto", "invalid"), "mkv")
         self.assertEqual(app_routes._resolved_transfer_output_container("mkv", "mp4"), "mkv")
 
+    def test_remote_transfer_ledger_reserves_source_after_queue_placeholder_is_removed(self):
+        source = os.path.join(TEST_MEDIA, "Reserved.Episode.mkv")
+        row = {
+            "id": "active-transfer",
+            "src": source,
+            "status": "waiting_for_upload",
+            "created_at": 100,
+            "renewed_at": 101,
+            "completed_at": 0,
+        }
+        with (
+            patch.object(app_node_linking, "_load_transfers", return_value={"transfers": {row["id"]: row}}),
+            patch.object(app_node_linking, "_now", return_value=102),
+        ):
+            self.assertEqual(
+                app_jobs._find_existing_active_job_for_src(source),
+                "remote-transfer:active-transfer",
+            )
+            row["status"] = "complete"
+            row["completed_at"] = 102
+            self.assertIsNone(app_jobs._find_existing_active_job_for_src(source))
+
+    def test_remote_video_upload_is_installed_when_source_disappeared_after_dispatch(self):
+        source = os.path.join(TEST_MEDIA, "Returned.After.Delete.mkv")
+        upload = os.path.join(TEST_MEDIA, "returned-upload.tmp")
+        with open(upload, "wb") as stream:
+            stream.write(b"validated-worker-output")
+        output = app_routes._transfer_output_path_for_src(source, "mkv")
+        row = {
+            "id": "missing-source-transfer",
+            "src": source,
+            "source_size": 1000,
+            "worker_node_id": "worker-one",
+            "preset": "smart",
+            "operations": {"job_type": "video_preserve_audio"},
+            "job_type": "video_preserve_audio",
+            "input_inventory": {"video_streams": [{"codec": "hevc"}], "audio_streams": []},
+            "output_container": "mkv",
+        }
+        inventory = {"video_streams": [{"codec": "hevc"}], "audio_streams": []}
+        try:
+            with (
+                self.app.test_request_context(headers={"X-Worker-Job-Id": "worker-job"}),
+                patch.object(app_routes, "scan_media", return_value=inventory),
+                patch.object(app_routes, "normalize_operations", return_value=row["operations"]),
+                patch.object(app_routes, "_encoded_output_is_valid", return_value=(True, "ok")),
+                patch.object(app_routes, "storage_breakdown", return_value={"total_saved_bytes": 977}),
+                patch.object(app_routes, "record_encode") as record,
+                patch.object(app_routes, "save_transfer") as save,
+                patch.object(app_routes, "get_node_private", return_value={}),
+                patch.object(app_routes, "log_event"),
+            ):
+                result = app_routes._finalize_transfer_output(row, upload)
+            self.assertTrue(os.path.isfile(output))
+            self.assertTrue(result["warning"])
+            self.assertFalse(result["source_deleted"])
+            self.assertTrue(row["source_missing_at_return"])
+            record.assert_called_once()
+            save.assert_called_once()
+        finally:
+            for path in (upload, output):
+                if os.path.isfile(path):
+                    os.remove(path)
+
+    def test_remote_duplicate_upload_is_acknowledged_without_overwriting_existing_output(self):
+        source = os.path.join(TEST_MEDIA, "Duplicate.Return.mkv")
+        output = app_routes._transfer_output_path_for_src(source, "mkv")
+        upload = os.path.join(TEST_MEDIA, "duplicate-upload.tmp")
+        with open(output, "wb") as stream:
+            stream.write(b"already-installed-output")
+        with open(upload, "wb") as stream:
+            stream.write(b"later-duplicate-output")
+        row = {
+            "id": "duplicate-transfer",
+            "src": source,
+            "source_size": 1000,
+            "worker_node_id": "worker-two",
+            "operations": {"job_type": "video_preserve_audio"},
+            "job_type": "video_preserve_audio",
+            "input_inventory": {},
+            "output_container": "mkv",
+        }
+        try:
+            with (
+                self.app.test_request_context(),
+                patch.object(app_routes, "scan_media", return_value={}),
+                patch.object(app_routes, "normalize_operations", return_value=row["operations"]),
+                patch.object(app_routes, "_encoded_output_is_valid", return_value=(True, "ok")),
+                patch.object(app_routes, "storage_breakdown", return_value={}),
+                patch.object(app_routes, "record_encode") as record,
+                patch.object(app_routes, "save_transfer"),
+                patch.object(app_routes, "log_event"),
+            ):
+                result = app_routes._finalize_transfer_output(row, upload)
+            self.assertTrue(result["deduplicated"])
+            with open(output, "rb") as stream:
+                self.assertEqual(stream.read(), b"already-installed-output")
+            record.assert_not_called()
+        finally:
+            for path in (upload, output):
+                if os.path.isfile(path):
+                    os.remove(path)
+
+    def test_audio_only_transfer_still_requires_current_source(self):
+        source = os.path.join(TEST_MEDIA, "Missing.Audio.Source.mkv")
+        with self.app.test_request_context():
+            with self.assertRaisesRegex(RuntimeError, "audio-only source is missing"):
+                app_routes._finalize_transfer_output(
+                    {
+                        "id": "audio-missing",
+                        "src": source,
+                        "job_type": "audio_only",
+                        "operations": {"job_type": "audio_only"},
+                    },
+                    os.path.join(TEST_MEDIA, "unused-upload.tmp"),
+                )
+
     def test_mobile_next_available_distributes_a_show_as_independent_jobs(self):
         paths = []
         for episode in range(1, 4):
@@ -1622,6 +1762,163 @@ class ApiRouteSmokeTests(unittest.TestCase):
         self.assertIn("--encoder x265_10bit", derived["extra_args"])
         self.assertIn("--all-audio", derived["extra_args"])
 
+    def test_av1_smart_plan_uses_hevc_gpu_on_node_without_av1(self):
+        plan = {
+            "preset": "4k",
+            "preset_bundle": self._video_preset_bundle(
+                encoder="nvenc_av1_10bit",
+                name="Smart Detail AV1",
+            ),
+            "extra_args": (
+                "--encoder nvenc_av1_10bit --encoder-preset medium "
+                "--encoder-profile main --multi-pass --rate 23.976 --cfr "
+                "--all-audio --all-subtitles"
+            ),
+            "preset_selection": "smart",
+            "preset_adaptive": True,
+            "preset_preferences": {
+                "video_codec": "av1",
+                "bit_depth": "10",
+                "audio_mode": "copy",
+                "smart_lock_source_framerate": True,
+            },
+            "encode_metadata": {
+                "smart_preset": True,
+                "smart_candidate_id": "detail",
+                "encoder": "nvenc_av1_10bit",
+                "encoder_family": "nvenc",
+                "video_codec": "av1",
+                "bit_depth": "10",
+                "is_hdr": True,
+            },
+        }
+        node = {
+            "id": "intel-hevc-worker",
+            "name": "Intel HEVC worker",
+            "hardware": {
+                "encoder_families": ["qsv", "software"],
+                "encoders": ["qsv_h264", "qsv_h265", "qsv_h265_10bit", "x265_10bit"],
+            },
+        }
+
+        derived = app_routes._prepare_plan_for_node(plan, node)
+        preset = json.loads(derived["preset_bundle"]["contents"])["PresetList"][0]
+
+        self.assertEqual(derived["encode_metadata"]["encoder"], "qsv_h265_10bit")
+        self.assertEqual(derived["encode_metadata"]["video_codec"], "h265")
+        self.assertEqual(derived["preset_adaptation"]["from_codec"], "av1")
+        self.assertEqual(derived["preset_adaptation"]["to_codec"], "h265")
+        self.assertIn("--encoder qsv_h265_10bit", derived["extra_args"])
+        self.assertNotIn("--encoder-profile", derived["extra_args"])
+        self.assertNotIn("--multi-pass", derived["extra_args"])
+        self.assertIn("--rate 23.976 --cfr", derived["extra_args"])
+        self.assertIn("--all-audio --all-subtitles", derived["extra_args"])
+        self.assertEqual(preset["VideoEncoder"], "qsv_h265_10bit")
+        self.assertIn("H.265 10-bit", derived["queued_preset_name"])
+        self.assertIn("Intel QSV", derived["queued_preset_name"])
+
+    def test_av1_requires_verified_per_gpu_capability_when_gpu_rows_exist(self):
+        hardware = {
+            "encoder_families": ["nvenc", "software"],
+            # HandBrake's machine-wide list can include AV1 because another
+            # adapter/build exposed it; the physical adapter list is decisive.
+            "encoders": ["nvenc_av1_10bit", "nvenc_h265_10bit", "x265_10bit"],
+            "gpus": [{
+                "name": "NVIDIA GeForce RTX 3070",
+                "encoder_family": "nvenc",
+                "encoders": ["nvenc_h264", "nvenc_h265", "nvenc_h265_10bit"],
+            }],
+        }
+        self.assertFalse(
+            app_routes._node_supports_encoder(
+                hardware, "nvenc_av1_10bit", "nvenc", "av1"
+            )
+        )
+        self.assertTrue(
+            app_routes._node_supports_encoder(
+                hardware, "nvenc_h265_10bit", "nvenc", "h265"
+            )
+        )
+
+    def test_exact_av1_node_wins_smart_fit_tie_but_hevc_node_remains_eligible(self):
+        plan = {
+            "preset": "1080",
+            "preset_bundle": self._video_preset_bundle(
+                encoder="nvenc_av1_10bit", name="Smart AV1"
+            ),
+            "extra_args": "--encoder nvenc_av1_10bit --all-audio",
+            "preset_selection": "smart",
+            "preset_adaptive": True,
+            "encode_metadata": {
+                "smart_preset": True,
+                "encoder": "nvenc_av1_10bit",
+                "encoder_family": "nvenc",
+                "video_codec": "av1",
+                "bit_depth": "10",
+            },
+        }
+        av1_node = {
+            "hardware": {
+                "encoder_families": ["nvenc", "software"],
+                "encoders": ["nvenc_av1_10bit", "nvenc_h265_10bit", "x265_10bit"],
+            }
+        }
+        hevc_node = {
+            "hardware": {
+                "encoder_families": ["qsv", "software"],
+                "encoders": ["qsv_h265_10bit", "x265_10bit"],
+            }
+        }
+
+        exact = app_routes._prepare_plan_for_node(plan, av1_node)
+        fallback = app_routes._prepare_plan_for_node(plan, hevc_node)
+
+        self.assertEqual(app_routes._plan_encoder(exact)[0], "nvenc_av1_10bit")
+        self.assertEqual(app_routes._plan_encoder(fallback)[0], "qsv_h265_10bit")
+        self.assertLess(
+            app_routes._adaptive_plan_fit_score(plan, exact),
+            app_routes._adaptive_plan_fit_score(plan, fallback),
+        )
+
+    def test_legacy_qsv_family_does_not_imply_av1_support(self):
+        encoder, family, codec, depth = app_routes._select_smart_encoder_for_node(
+            {"encoder_families": ["qsv", "software"], "encoders": []},
+            "av1",
+            "10",
+        )
+        self.assertEqual((encoder, family, codec, depth), ("qsv_h265_10bit", "qsv", "h265", "10"))
+
+    def test_linux_qsv_av1_capability_requires_va_encode_profile(self):
+        supported = unittest.mock.Mock(
+            return_value=unittest.mock.Mock(
+                returncode=0,
+                stdout="VAProfileAV1Profile0 : VAEntrypointEncSliceLP\n",
+                stderr="",
+            )
+        )
+        with (
+            patch.object(app_node_linking.shutil, "which", return_value="/usr/bin/vainfo"),
+            patch.object(app_node_linking.subprocess, "run", supported),
+        ):
+            ok, detail = app_node_linking._linux_qsv_av1_capability(["/dev/dri/renderD128"])
+        self.assertTrue(ok)
+        self.assertIn("renderD128", detail)
+
+        hevc_only = unittest.mock.Mock(
+            return_value=unittest.mock.Mock(
+                returncode=0,
+                stdout="VAProfileHEVCMain10 : VAEntrypointEncSliceLP\n",
+                stderr="",
+            )
+        )
+        with (
+            patch.object(app_node_linking.shutil, "which", return_value="/usr/bin/vainfo"),
+            patch.object(app_node_linking.subprocess, "run", hevc_only),
+        ):
+            ok, detail = app_node_linking._linux_qsv_av1_capability(["/dev/dri/renderD128"])
+        self.assertFalse(ok)
+        self.assertIn("no AV1 encode profile", detail)
+
     def test_locked_preset_is_rejected_instead_of_rewritten(self):
         plan = {
             "preset": "1080",
@@ -1789,6 +2086,70 @@ class ApiRouteSmokeTests(unittest.TestCase):
         claim.assert_called_once_with("oldest-job", "next-worker", "Next worker")
         self.assertEqual(dispatch.call_args.kwargs["require_available_for"], claimed)
         complete.assert_called_once_with("oldest-job")
+
+    def test_auto_dispatch_materializes_av1_smart_job_as_hevc_for_selected_worker(self):
+        plan = {
+            "preset": "1080",
+            "preset_bundle": self._video_preset_bundle(
+                encoder="nvenc_av1_10bit", name="Smart AV1"
+            ),
+            "extra_args": "--encoder nvenc_av1_10bit --rate 23.976 --cfr --all-audio",
+            "preset_selection": "smart",
+            "preset_adaptive": True,
+            "encode_metadata": {
+                "smart_preset": True,
+                "encoder": "nvenc_av1_10bit",
+                "encoder_family": "nvenc",
+                "video_codec": "av1",
+                "bit_depth": "10",
+            },
+        }
+        pending_job = {
+            "src": os.path.join(TEST_MEDIA, "Adaptive.Show.S01E01.mkv"),
+            "preset": "1080",
+            "encoder": "nvenc_av1_10bit",
+            "encoder_family": "nvenc",
+            "preset_adaptive": True,
+            "dispatch_plan": plan,
+        }
+        claimed = {**pending_job, "status": "dispatching"}
+        worker = {
+            "id": "hevc-worker",
+            "name": "HEVC worker",
+            "online": True,
+            "status": "idle",
+            "last_heartbeat": app_routes.time.time(),
+            "jobs": [],
+            "summary": {"counts": {"queued": 0, "running": 0}},
+            "hardware": {
+                "encoder_families": ["qsv", "software"],
+                "encoders": ["qsv_h265_10bit", "x265_10bit"],
+            },
+        }
+        stop = unittest.mock.Mock()
+        stop.is_set.side_effect = [False, True]
+        with (
+            patch.object(app_routes, "AUTO_NODE_DISPATCH_STOP", stop),
+            patch.object(app_routes, "get_queue_state", return_value=False),
+            patch.object(app_routes, "get_next_auto_dispatch_job", return_value=("adaptive-job", pending_job)),
+            patch.object(app_routes, "auto_dispatch_local_available", return_value=False),
+            patch.object(app_routes, "list_nodes_private", return_value=[worker]),
+            patch.object(app_routes, "claim_auto_dispatch_job", return_value=claimed),
+            patch.object(
+                app_routes,
+                "_dispatch_plan_to_worker",
+                return_value=(worker, {"ok": True, "count": 1}, "remote"),
+            ) as dispatch,
+            patch.object(app_routes, "complete_auto_dispatch_job", return_value=True),
+            patch.object(app_routes, "_refresh_linked_node", return_value=worker),
+            patch.object(app_routes, "log_event"),
+        ):
+            app_routes._auto_node_dispatch_loop()
+
+        dispatched_plan = dispatch.call_args.args[2]
+        self.assertEqual(dispatched_plan["encode_metadata"]["encoder"], "qsv_h265_10bit")
+        self.assertEqual(dispatched_plan["encode_metadata"]["video_codec"], "h265")
+        self.assertIn("--rate 23.976 --cfr --all-audio", dispatched_plan["extra_args"])
 
     def test_auto_dispatch_wake_restarts_a_missing_coordinator(self):
         class DeadThread:

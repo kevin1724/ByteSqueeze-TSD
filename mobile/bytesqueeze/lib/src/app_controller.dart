@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
 import 'api_client.dart';
 import 'demo_data.dart';
+import 'quick_pairing.dart';
 import 'session_store.dart';
 
 class AppController extends ChangeNotifier {
@@ -23,6 +26,9 @@ class AppController extends ChangeNotifier {
   String interfaceDensity = 'comfortable';
   bool showSecondaryUi = false;
   bool statsForNerds = false;
+  String quickPairServer = '';
+  String quickPairCode = '';
+  QuickPairingRequest? _pendingQuickPairing;
 
   Map<String, dynamic> dashboard = {};
   Map<String, dynamic> jobs = {};
@@ -62,6 +68,43 @@ class AppController extends ChangeNotifier {
     }
     booting = false;
     notifyListeners();
+    final pending = _pendingQuickPairing;
+    _pendingQuickPairing = null;
+    if (pending != null) {
+      unawaited(_connectQuickPairing(pending));
+    }
+  }
+
+  Future<void> handleQuickPairingLink(String value) async {
+    final request = QuickPairingRequest.tryParse(value);
+    if (request == null) {
+      error = 'This ByteSqueeze quick-pair link is invalid or incomplete.';
+      notifyListeners();
+      return;
+    }
+    quickPairServer = request.server;
+    quickPairCode = request.code;
+    error = null;
+    notifyListeners();
+    if (booting) {
+      _pendingQuickPairing = request;
+      return;
+    }
+    await _connectQuickPairing(request);
+  }
+
+  Future<void> _connectQuickPairing(QuickPairingRequest request) async {
+    try {
+      await pair(
+        baseUrl: request.server,
+        code: request.code,
+        deviceName: session?.deviceName ?? 'ByteSqueeze Android',
+      );
+      quickPairCode = '';
+    } catch (_) {
+      // PairingScreen keeps the server/code filled in so the user can retry or
+      // add an away/Tailscale address without generating another code.
+    }
   }
 
   Future<void> pair(

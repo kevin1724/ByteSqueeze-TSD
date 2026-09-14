@@ -460,12 +460,20 @@
           <button id="generateMobilePairingBtn" type="button">Generate phone code</button>
         </div>
         <div id="mobilePairingCodeBox" class="pairing-code-box">No active phone code</div>
+        <div class="mobile-pair-actions">
+          <a id="openMobilePairingBtn" class="button-link mobile-quick-pair" href="#" hidden>Open app &amp; pair</a>
+          <button id="copyMobilePairingLinkBtn" class="ghost-btn" type="button" hidden>Copy quick-pair link</button>
+        </div>
+        <p class="small">On Android, <b>Open app &amp; pair</b> launches ByteSqueeze with this controller and one-time code filled in, then connects automatically.</p>
         <div id="mobilePairingStatus" class="small"></div>
       </div>
       <div class="node-link-panel">
         <div class="section-heading-row">
           <h3>Authorized devices</h3>
-          <button id="refreshMobileDevicesBtn" class="ghost-btn" type="button">Refresh</button>
+          <div class="button-row compact-actions">
+            <button id="clearInactiveMobileDevicesBtn" class="ghost-btn" type="button">Clear old</button>
+            <button id="refreshMobileDevicesBtn" class="ghost-btn" type="button">Refresh</button>
+          </div>
         </div>
         <div id="mobileDeviceList" class="mobile-device-list"><div class="node-empty">Loading devices…</div></div>
       </div>
@@ -3105,6 +3113,13 @@
           revoke.textContent = "Revoke";
           revoke.onclick = () => revokeMobileDevice(device.id, device.name);
           actions.appendChild(revoke);
+        } else {
+          const forget = document.createElement("button");
+          forget.type = "button";
+          forget.className = "ghost-btn";
+          forget.textContent = "Forget";
+          forget.onclick = () => forgetMobileDevice(device.id, device.name);
+          actions.appendChild(forget);
         }
         row.append(copy, actions);
         list.appendChild(row);
@@ -3126,6 +3141,8 @@
     async function generateMobilePairing() {
       const box = document.getElementById("mobilePairingCodeBox");
       const status = document.getElementById("mobilePairingStatus");
+      const openButton = document.getElementById("openMobilePairingBtn");
+      const copyButton = document.getElementById("copyMobilePairingLinkBtn");
       try {
         const res = await fetch("/api/mobile/pairing_code", {
           method: "POST",
@@ -3134,7 +3151,17 @@
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Could not create phone code");
-        if (box) box.textContent = data.pairing?.code || "";
+        const code = data.pairing?.code || "";
+        const quickLink = `bytesqueeze://pair?server=${encodeURIComponent(location.origin)}&code=${encodeURIComponent(code)}`;
+        if (box) box.textContent = code;
+        if (openButton) {
+          openButton.href = quickLink;
+          openButton.hidden = false;
+        }
+        if (copyButton) {
+          copyButton.dataset.quickPairLink = quickLink;
+          copyButton.hidden = false;
+        }
         if (status) status.textContent = `Expires ${fmtNodeTime(data.pairing?.expires_at)} · pair at ${location.origin}/api/mobile/v1/pair`;
       } catch (err) {
         if (status) status.textContent = err.message || "Could not create phone code.";
@@ -3151,6 +3178,46 @@
       }
       if (window.appToast) appToast("Mobile access revoked.", "success");
       await loadMobileDevices();
+    }
+
+    async function forgetMobileDevice(id, name) {
+      if (!confirm(`Forget ${name || "this app"}? Its saved credentials will stop working immediately.`)) return;
+      const res = await fetch(`/api/mobile/devices/${encodeURIComponent(id)}/forget`, { method: "DELETE" });
+      const data = await res.json();
+      if (!res.ok) {
+        if (window.appToast) appToast(data.error || "Could not forget app.", "error");
+        return;
+      }
+      if (window.appToast) appToast("Paired app removed from this controller.", "success");
+      await loadMobileDevices();
+    }
+
+    async function clearInactiveMobileDevices() {
+      if (!confirm("Clear all revoked and expired app records?")) return;
+      const res = await fetch("/api/mobile/devices/clear", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target: "inactive" })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        if (window.appToast) appToast(data.error || "Could not clear old apps.", "error");
+        return;
+      }
+      if (window.appToast) appToast(`${data.removed || 0} old app record(s) cleared.`, "success");
+      await loadMobileDevices();
+    }
+
+    async function copyMobilePairingLink() {
+      const button = document.getElementById("copyMobilePairingLinkBtn");
+      const value = button?.dataset?.quickPairLink || "";
+      if (!value) return;
+      try {
+        await navigator.clipboard.writeText(value);
+        if (window.appToast) appToast("Quick-pair link copied.", "success");
+      } catch (_) {
+        window.prompt("Copy this quick-pair link", value);
+      }
     }
 
     // -------------------------------
@@ -3847,6 +3914,10 @@
       if (generateMobilePairingBtn) generateMobilePairingBtn.onclick = generateMobilePairing;
       const refreshMobileDevicesBtn = document.getElementById("refreshMobileDevicesBtn");
       if (refreshMobileDevicesBtn) refreshMobileDevicesBtn.onclick = loadMobileDevices;
+      const clearInactiveMobileDevicesBtn = document.getElementById("clearInactiveMobileDevicesBtn");
+      if (clearInactiveMobileDevicesBtn) clearInactiveMobileDevicesBtn.onclick = clearInactiveMobileDevices;
+      const copyMobilePairingLinkBtn = document.getElementById("copyMobilePairingLinkBtn");
+      if (copyMobilePairingLinkBtn) copyMobilePairingLinkBtn.onclick = copyMobilePairingLink;
 
       const saveLocalNodeNameBtn = document.getElementById("saveLocalNodeNameBtn");
       if (saveLocalNodeNameBtn) saveLocalNodeNameBtn.onclick = saveLocalNodeName;

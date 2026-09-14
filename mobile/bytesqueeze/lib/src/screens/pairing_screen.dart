@@ -21,6 +21,20 @@ class _PairingScreenState extends State<PairingScreen> {
   final _code = TextEditingController();
   final _name = TextEditingController(text: 'ByteSqueeze phone');
   bool _showAdvanced = false;
+  String _appliedQuickPair = '';
+
+  void _syncQuickPairing() {
+    final quickKey =
+        '${widget.controller.quickPairServer}|${widget.controller.quickPairCode}';
+    if (quickKey == _appliedQuickPair ||
+        widget.controller.quickPairServer.isEmpty ||
+        widget.controller.quickPairCode.isEmpty) {
+      return;
+    }
+    _appliedQuickPair = quickKey;
+    _server.text = widget.controller.quickPairServer;
+    _code.text = widget.controller.quickPairCode;
+  }
 
   @override
   void dispose() {
@@ -50,6 +64,7 @@ class _PairingScreenState extends State<PairingScreen> {
 
   @override
   Widget build(BuildContext context) {
+    _syncQuickPairing();
     return Scaffold(
       body: ColoredBox(
         color: ByteSqueezeColors.canvas,
@@ -93,6 +108,34 @@ class _PairingScreenState extends State<PairingScreen> {
                         textAlign: TextAlign.center,
                       ),
                       const SizedBox(height: 20),
+                      if (widget.controller.quickPairCode.isNotEmpty) ...[
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color:
+                                ByteSqueezeColors.cyan.withValues(alpha: .08),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color:
+                                  ByteSqueezeColors.cyan.withValues(alpha: .24),
+                            ),
+                          ),
+                          child: const Row(
+                            children: [
+                              Icon(Icons.mobile_friendly_rounded,
+                                  color: ByteSqueezeColors.cyan),
+                              SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  'Quick pairing received. Connecting securely…',
+                                  style: TextStyle(fontWeight: FontWeight.w700),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                      ],
                       SurfaceCard(
                         padding: const EdgeInsets.all(16),
                         borderColor: ByteSqueezeColors.cyan.withValues(
@@ -111,9 +154,8 @@ class _PairingScreenState extends State<PairingScreen> {
                                 Expanded(
                                   child: Text(
                                     'Server connection',
-                                    style: Theme.of(context)
-                                        .textTheme
-                                        .titleMedium,
+                                    style:
+                                        Theme.of(context).textTheme.titleMedium,
                                   ),
                                 ),
                               ],
@@ -131,8 +173,8 @@ class _PairingScreenState extends State<PairingScreen> {
                               ),
                               validator: (value) =>
                                   (value ?? '').trim().length < 4
-                                  ? 'Enter the server address.'
-                                  : null,
+                                      ? 'Enter the server address.'
+                                      : null,
                             ),
                             const SizedBox(height: 12),
                             TextFormField(
@@ -152,8 +194,8 @@ class _PairingScreenState extends State<PairingScreen> {
                               ),
                               validator: (value) =>
                                   (value ?? '').replaceAll('-', '').length != 8
-                                  ? 'Enter the eight-character code.'
-                                  : null,
+                                      ? 'Enter the eight-character code.'
+                                      : null,
                               onFieldSubmitted: (_) => _pair(),
                             ),
                             const SizedBox(height: 8),
@@ -186,12 +228,14 @@ class _PairingScreenState extends State<PairingScreen> {
                                             keyboardType: TextInputType.url,
                                             autocorrect: false,
                                             decoration: const InputDecoration(
-                                              labelText: 'Away / Tailscale address (optional)',
+                                              labelText:
+                                                  'Away / Tailscale address (optional)',
                                               hintText: 'http://100.x.x.x:8080',
                                               prefixIcon: Icon(
                                                 Icons.route_rounded,
                                               ),
-                                              helperText: 'Used automatically when the home address cannot be reached.',
+                                              helperText:
+                                                  'Used automatically when the home address cannot be reached.',
                                             ),
                                           ),
                                           const SizedBox(height: 12),
@@ -227,6 +271,17 @@ class _PairingScreenState extends State<PairingScreen> {
                           ],
                         ),
                       ),
+                      if (widget.controller.error != null) ...[
+                        const SizedBox(height: 12),
+                        Text(
+                          widget.controller.error!,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            color: ByteSqueezeColors.danger,
+                            fontSize: 12.5,
+                          ),
+                        ),
+                      ],
                       const SizedBox(height: 16),
                       OutlinedButton.icon(
                         onPressed: widget.controller.busy

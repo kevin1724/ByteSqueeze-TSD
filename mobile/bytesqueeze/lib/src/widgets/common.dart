@@ -62,6 +62,43 @@ String relativeTime(dynamic timestamp) {
   return '${difference.inDays}d ago';
 }
 
+bool jobAudioWasProcessed(Map<String, dynamic> job) {
+  if (job['audio_processed'] is bool) return job['audio_processed'] == true;
+  final operations = asMap(job['operations']);
+  final jobType =
+      '${job['job_type'] ?? operations['job_type'] ?? ''}'.trim().toLowerCase();
+  final policy = '${operations['audio_policy'] ?? 'preserve'}'.toLowerCase();
+  final changedTrack = asList(operations['audio_actions']).map(asMap).any(
+        (row) => {'encode', 'remove'}
+            .contains('${row['action'] ?? 'copy'}'.toLowerCase()),
+      );
+  return jobType == 'audio_only' || policy != 'preserve' || changedTrack;
+}
+
+String jobVideoProcessingLabel(Map<String, dynamic> job) {
+  final supplied = '${job['video_processing_label'] ?? ''}'.trim();
+  if (supplied.isNotEmpty) return supplied;
+  final operations = asMap(job['operations']);
+  final jobType =
+      '${job['job_type'] ?? operations['job_type'] ?? ''}'.trim().toLowerCase();
+  return jobType == 'audio_only' || operations['video_action'] == 'copy'
+      ? 'Video copied'
+      : 'Video encoded';
+}
+
+String jobAudioProcessingLabel(Map<String, dynamic> job) {
+  final supplied = '${job['audio_processing_label'] ?? ''}'.trim();
+  if (supplied.isNotEmpty) return supplied;
+  final actions = asList(asMap(job['operations'])['audio_actions']).map(asMap);
+  if (actions.any((row) => '${row['action']}' == 'encode')) {
+    return 'Audio encoded';
+  }
+  if (actions.any((row) => '${row['action']}' == 'remove')) {
+    return 'Audio tracks changed';
+  }
+  return jobAudioWasProcessed(job) ? 'Audio optimized' : 'Audio copied';
+}
+
 Color statusColor(String status) {
   switch (status.toLowerCase()) {
     case 'running':
@@ -329,6 +366,46 @@ class StatusPill extends StatelessWidget {
       ),
     );
   }
+}
+
+class MediaOperationTag extends StatelessWidget {
+  const MediaOperationTag({
+    super.key,
+    required this.label,
+    required this.icon,
+    this.color = ByteSqueezeColors.softInk,
+  });
+
+  final String label;
+  final IconData icon;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => DecoratedBox(
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: .08),
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(color: color.withValues(alpha: .22)),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 13, color: color),
+              const SizedBox(width: 5),
+              Text(
+                label,
+                style: TextStyle(
+                  color: color,
+                  fontSize: 10.5,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
 }
 
 class OperationsDock extends StatelessWidget {

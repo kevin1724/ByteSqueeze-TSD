@@ -2699,6 +2699,17 @@ def _find_existing_active_job_for_src(src: str) -> str | None:
     for jid, j in jobs.items():
         if j.get("src") == src and j.get("status") in ("queued", "dispatching", "running", "waiting_to_upload"):
             return jid
+    # A controller-side queue placeholder is intentionally removed as soon as
+    # a linked worker accepts it.  The persisted transfer grant is the durable
+    # source reservation until that worker returns the completed output.
+    try:
+        from .node_linking import find_active_transfer_for_src
+
+        transfer = find_active_transfer_for_src(src)
+        if transfer:
+            return f"remote-transfer:{transfer.get('id') or 'active'}"
+    except Exception as exc:
+        print(f"[WARN] Could not inspect remote transfer reservations: {exc}", flush=True)
     return None
 
 
@@ -3451,6 +3462,31 @@ def get_job(job_id: str) -> dict | None:
     return jobs.get(job_id)
 
 
+def _job_operation_labels(job: dict) -> dict:
+    """Expose durable, additive media-operation tags for every client."""
+    operations = job.get("operations") if isinstance(job.get("operations"), dict) else {}
+    job_type = str(job.get("job_type") or operations.get("job_type") or "video_preserve_audio").strip().lower()
+    audio_actions = operations.get("audio_actions") if isinstance(operations.get("audio_actions"), list) else []
+    audio_encoded = any(str(row.get("action") or "copy").lower() == "encode" for row in audio_actions if isinstance(row, dict))
+    audio_removed = any(str(row.get("action") or "copy").lower() == "remove" for row in audio_actions if isinstance(row, dict))
+    audio_policy = str(operations.get("audio_policy") or "preserve").strip().lower()
+    audio_processed = bool(job_type == "audio_only" or audio_encoded or audio_removed or audio_policy != "preserve")
+    if audio_encoded:
+        audio_label = "Audio encoded"
+    elif audio_removed:
+        audio_label = "Audio tracks changed"
+    elif audio_processed:
+        audio_label = "Audio optimized"
+    else:
+        audio_label = "Audio copied"
+    video_copied = job_type == "audio_only" or str(operations.get("video_action") or "encode").lower() == "copy"
+    return {
+        "video_processing_label": "Video copied" if video_copied else "Video encoded",
+        "audio_processing_label": audio_label,
+        "audio_processed": audio_processed,
+    }
+
+
 def list_jobs_for_api(*, include_log_tail: bool = False) -> list[dict]:
     """
     Build a list of job dictionaries suitable for JSON responses.
@@ -3482,6 +3518,7 @@ def list_jobs_for_api(*, include_log_tail: bool = False) -> list[dict]:
             {
                 "id": jid,
                 "src": j.get("src"),
+                "out_path": j.get("out_path"),
                 "preset": j.get("preset"),
                 "preset_name": j.get("preset_name") or "",
                 "preset_selection": j.get("preset_selection") or j.get("preset") or "1080",
@@ -3501,6 +3538,7 @@ def list_jobs_for_api(*, include_log_tail: bool = False) -> list[dict]:
                 "audio_inventory": j.get("audio_inventory") if isinstance(j.get("audio_inventory"), dict) else None,
                 "output_inventory": j.get("output_inventory") if isinstance(j.get("output_inventory"), dict) else None,
                 "storage_breakdown": j.get("storage_breakdown") if isinstance(j.get("storage_breakdown"), dict) else None,
+                **_job_operation_labels(j),
                 "uses_hardware_encoder": _job_uses_hardware_encoder(j),
                 **_job_learning_metadata(j),
                 "mode": j.get("mode", "local"),
@@ -3638,6 +3676,7 @@ def _encode_history_job(row: dict, index: int) -> dict:
         "audio_inventory": row.get("input_inventory") if isinstance(row.get("input_inventory"), dict) else None,
         "output_inventory": row.get("output_inventory") if isinstance(row.get("output_inventory"), dict) else None,
         "storage_breakdown": row.get("storage_breakdown") if isinstance(row.get("storage_breakdown"), dict) else None,
+        **_job_operation_labels(row),
         "mode": "linked_node" if row.get("node_id") else "local",
         "node_id": row.get("node_id") or "",
         "node_name": row.get("node_name") or "",

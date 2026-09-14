@@ -119,7 +119,9 @@ from .settings import (
 from .mobile_linking import (
     accept_mobile_pairing,
     authenticate_mobile_token,
+    clear_mobile_devices,
     create_mobile_pairing,
+    forget_mobile_device,
     list_mobile_devices,
     mobile_discovery,
     refresh_mobile_token,
@@ -7948,17 +7950,64 @@ def _plan_encoder(plan: dict) -> tuple[str, str, str, str]:
 
 
 def _hardware_supports_plan(plan: dict, hardware: dict) -> bool:
-    encoder, family, _codec, _depth = _plan_encoder(plan)
+    encoder, family, codec, _depth = _plan_encoder(plan)
+    return _node_supports_encoder(hardware, encoder, family, codec)
+
+
+def _node_supports_encoder(hardware: dict, encoder: str, family: str, codec: str = "") -> bool:
+    """Return whether a node can actually launch one encoder.
+
+    Newer Windows workers publish capabilities for every physical GPU.  Prefer
+    those adapter-specific results over the machine-wide HandBrake encoder
+    list, which can otherwise make an older GPU look AV1-capable merely because
+    a newer GPU is installed in the same machine.  AV1 always requires an
+    explicit encoder advertisement; family-only legacy reports are not enough.
+    """
+    hardware = hardware if isinstance(hardware, dict) else {}
+    encoder = str(encoder or "").strip().lower()
+    family = str(family or "software").strip().lower()
+    codec = str(codec or ("av1" if "av1" in encoder else "")).strip().lower()
     families = {str(value).lower() for value in hardware.get("encoder_families") or []}
     encoders = {str(value).lower() for value in hardware.get("encoders") or []}
     if not families and not encoders:
-        return True  # Older workers did not report a hardware profile.
+        # Legacy workers predate hardware capability reports. Preserve their
+        # existing H.264/HEVC behavior, but never assume the much less common
+        # AV1 encoder is present.
+        return codec != "av1"
     if family == "software":
-        return True
+        if codec == "av1":
+            return bool(encoder and encoder in encoders)
+        return bool((encoder and encoder in encoders) or family in families and not encoders)
+
+    gpu_rows = [
+        row for row in hardware.get("gpus") or []
+        if isinstance(row, dict)
+        and str(row.get("encoder_family") or "").strip().lower() == family
+    ]
+    if gpu_rows:
+        per_gpu_encoders = {
+            str(value).lower()
+            for row in gpu_rows
+            for value in row.get("encoders") or []
+        }
+        if per_gpu_encoders:
+            return encoder in per_gpu_encoders
+        if codec == "av1":
+            return False
+
+    if codec == "av1":
+        return bool(encoder and encoder in encoders)
     return bool((encoder and encoder in encoders) or family in families and not encoders)
 
 
-def _replace_plan_encoder_args(extra_args: str, encoder: str) -> str:
+def _replace_plan_encoder_args(
+    extra_args: str,
+    encoder: str,
+    *,
+    codec_changed: bool = False,
+    family_changed: bool = False,
+    hardware_encoder: bool = False,
+) -> str:
     try:
         args = shlex.split(str(extra_args or ""))
     except Exception:
@@ -7986,6 +8035,40 @@ def _replace_plan_encoder_args(extra_args: str, encoder: str) -> str:
             index += 2
             continue
         if arg.startswith("--encoder-preset="):
+            index += 1
+            continue
+        reset_encoder_options = codec_changed or family_changed
+        if reset_encoder_options and arg in {
+            "--encoder-profile",
+            "--encoder-level",
+            "--encoder-tune",
+            "--encopts",
+            "-x",
+            "--qsv-adapter",
+            "--qsv-async-depth",
+            "--enable-hw-decoding",
+        }:
+            # Profiles, levels, tunes, and advanced encoder options are codec
+            # specific.  Keeping AV1's `main` profile on an HEVC fallback (or
+            # the reverse) can make HandBrake reject the job before it starts.
+            index += 2
+            continue
+        if reset_encoder_options and any(
+            arg.startswith(prefix)
+            for prefix in (
+                "--encoder-profile=",
+                "--encoder-level=",
+                "--encoder-tune=",
+                "--encopts=",
+                "-x=",
+                "--qsv-adapter=",
+                "--qsv-async-depth=",
+                "--enable-hw-decoding=",
+            )
+        ):
+            index += 1
+            continue
+        if hardware_encoder and arg in {"--multi-pass", "--two-pass", "--turbo"}:
             index += 1
             continue
         out.append(arg)
@@ -8034,6 +8117,20 @@ def _derived_preset_bundle(
     original_name = str(bundle.get("name") or selected.get("PresetName") or "Smart preset")
     derived_name = str(display_name or f"{original_name} [Smart {family_label}]")[:160]
     selected["VideoEncoder"] = encoder
+    # Imported preset fields are allowed to omit encoder-specific defaults.
+    # Remove settings whose vocabulary differs between AV1, HEVC, QSV, NVENC,
+    # VCE, and software encoders so HandBrake can choose valid defaults.
+    for key in (
+        "VideoPreset",
+        "VideoProfile",
+        "VideoLevel",
+        "VideoTune",
+        "VideoOptionExtra",
+        "VideoMultiPass",
+        "VideoTurboMultiPass",
+        "VideoTwoPass",
+    ):
+        selected.pop(key, None)
     selected["VideoHWDecode"] = 0
     selected["VideoQSVDecode"] = False
     selected["VideoAdapterIndex"] = -1
@@ -8047,8 +8144,84 @@ def _derived_preset_bundle(
     return out
 
 
+def _smart_codec_ladder(codec: str, depth: str, *, preserve_hdr: bool = False) -> list[tuple[str, str]]:
+    """Order codec/depth alternatives by how closely they preserve Smart intent."""
+    codec = str(codec or "h265").strip().lower()
+    depth = "10" if str(depth or "8") == "10" else "8"
+    if codec == "av1":
+        rows = [("av1", depth), ("h265", depth)]
+        if depth == "10" and not preserve_hdr:
+            rows.extend([("av1", "8"), ("h265", "8")])
+        if not preserve_hdr:
+            rows.append(("h264", "8"))
+    elif codec == "h265":
+        rows = [("h265", depth)]
+        if depth == "10" and not preserve_hdr:
+            rows.append(("h265", "8"))
+        if not preserve_hdr:
+            rows.append(("h264", "8"))
+    else:
+        rows = [("h264", "8"), ("h265", depth)]
+    return list(dict.fromkeys(rows))
+
+
+def _select_smart_encoder_for_node(
+    hardware: dict,
+    codec: str,
+    depth: str,
+    *,
+    preserve_hdr: bool = False,
+) -> tuple[str, str, str, str]:
+    """Choose the closest usable encoder, preferring this node's accelerators."""
+    hardware = hardware if isinstance(hardware, dict) else {}
+    advertised_families = [
+        str(value).strip().lower()
+        for value in hardware.get("encoder_families") or []
+        if str(value).strip().lower() in NODE_ENCODERS
+    ]
+    for candidate_family, mappings in NODE_ENCODERS.items():
+        if candidate_family == "software":
+            continue
+        if any(
+            str(value).strip().lower() in set(mappings.values())
+            for value in hardware.get("encoders") or []
+        ) and candidate_family not in advertised_families:
+            advertised_families.append(candidate_family)
+    preferred = str(hardware.get("preferred_encoder_family") or "auto").strip().lower()
+    accelerated = [family for family in advertised_families if family != "software"]
+    if preferred in accelerated:
+        accelerated = [preferred, *[family for family in accelerated if family != preferred]]
+    codec_ladder = _smart_codec_ladder(codec, depth, preserve_hdr=preserve_hdr)
+
+    # A Smart queue sent to Next Available should use a compatible GPU even if
+    # that means HEVC instead of AV1.  Software is the final fallback, not the
+    # first answer when the chosen node lacks the originally planned hardware.
+    for target_codec, target_depth in codec_ladder:
+        for family in accelerated:
+            candidate = NODE_ENCODERS.get(family, {}).get((target_codec, target_depth))
+            if candidate and _node_supports_encoder(hardware, candidate, family, target_codec):
+                return candidate, family, target_codec, target_depth
+
+    software_ladder = codec_ladder
+    if preserve_hdr:
+        # HEVC 10-bit software is a much more practical and broadly available
+        # HDR fallback than software AV1 while retaining HDR-capable depth.
+        software_ladder = [("h265", "10"), *[row for row in codec_ladder if row != ("h265", "10")]]
+    for target_codec, target_depth in software_ladder:
+        candidate = NODE_ENCODERS["software"].get((target_codec, target_depth))
+        if candidate and _node_supports_encoder(hardware, candidate, "software", target_codec):
+            return candidate, "software", target_codec, target_depth
+
+    # Legacy/unknown nodes get the conservative baseline rather than an AV1
+    # preset that their HandBrake build or GPU may not support.
+    fallback_codec = "h265" if codec in {"av1", "h265"} or preserve_hdr else "h264"
+    fallback_depth = "10" if preserve_hdr or (depth == "10" and fallback_codec == "h265") else "8"
+    fallback = NODE_ENCODERS["software"].get((fallback_codec, fallback_depth)) or "x264"
+    return fallback, "software", fallback_codec, fallback_depth
+
+
 def _adapt_smart_plan_for_node(plan: dict, node: dict) -> dict:
-    """Derive only the encoder for Smart jobs; locked presets stay byte-for-byte."""
+    """Materialize an adaptive Smart plan for one node; locked presets stay exact."""
     out = deepcopy(plan if isinstance(plan, dict) else {})
     metadata = out.get("encode_metadata") if isinstance(out.get("encode_metadata"), dict) else {}
     original_bundle = out.get("preset_bundle") if isinstance(out.get("preset_bundle"), dict) else {}
@@ -8080,54 +8253,50 @@ def _adapt_smart_plan_for_node(plan: dict, node: dict) -> dict:
     metadata["queued_preset_name"] = display_name
     out["encode_metadata"] = metadata
     hardware = node.get("hardware") if isinstance(node.get("hardware"), dict) else {}
-    families = [str(value).lower() for value in hardware.get("encoder_families") or []]
-    supported = {str(value).lower() for value in hardware.get("encoders") or []}
-    preferred_family = str(hardware.get("preferred_encoder_family") or "auto").strip().lower()
-    preferred_candidate = NODE_ENCODERS.get(preferred_family, {}).get((codec, depth))
-    force_preferred = bool(
-        preferred_family != "auto"
-        and preferred_family != old_family
-        and preferred_family in families
-        and preferred_candidate
-        and (not supported or preferred_candidate in supported)
+    episode_plan = metadata.get("smart_episode_plan") if isinstance(metadata.get("smart_episode_plan"), dict) else {}
+    source = episode_plan.get("source") if isinstance(episode_plan.get("source"), dict) else {}
+    preserve_hdr = bool(metadata.get("is_hdr") or source.get("is_hdr"))
+    selected_encoder, selected_family, selected_codec, selected_depth = _select_smart_encoder_for_node(
+        hardware,
+        codec,
+        depth,
+        preserve_hdr=preserve_hdr,
     )
-    if not hardware or (_hardware_supports_plan(out, hardware) and not force_preferred):
+    preferred_family = str(hardware.get("preferred_encoder_family") or "auto").strip().lower()
+    if (
+        selected_encoder == old_encoder
+        and selected_family == old_family
+        and selected_codec == codec
+        and selected_depth == depth
+    ):
         return out
-
-    selected_encoder = ""
-    selected_family = "software"
-    candidate_families = [value for value in families if value != "software"] + ["software"]
-    if force_preferred:
-        candidate_families = [preferred_family] + [value for value in candidate_families if value != preferred_family]
-    for family in candidate_families:
-        candidate = NODE_ENCODERS.get(family, {}).get((codec, depth))
-        if candidate and (not supported or candidate in supported):
-            selected_encoder = candidate
-            selected_family = family
-            break
-    if not selected_encoder:
-        selected_encoder = NODE_ENCODERS["software"].get((codec, depth)) or (
-            "svt_av1_10bit" if codec == "av1" else ("x265_10bit" if codec == "h265" else "x264")
-        )
-        selected_family = "software"
 
     metadata = dict(metadata)
     metadata.update({
         "encode_method": selected_encoder,
         "encoder": selected_encoder,
         "encoder_family": selected_family,
+        "video_codec": selected_codec,
+        "bit_depth": selected_depth,
     })
     adaptation = {
         "node_id": str(node.get("id") or ""),
         "node_name": str(node.get("name") or "Worker"),
         "from_encoder": old_encoder,
         "from_family": old_family,
+        "from_codec": codec,
+        "from_bit_depth": depth,
         "to_encoder": selected_encoder,
         "to_family": selected_family,
+        "to_codec": selected_codec,
+        "to_bit_depth": selected_depth,
         "reason": (
-            f"worker preference selected {preferred_family} for adaptive Smart jobs"
-            if force_preferred
-            else f"{old_family or 'requested'} encoder is unavailable on the selected node"
+            f"worker preference selected {preferred_family} for this adaptive Smart job"
+            if preferred_family == selected_family and preferred_family not in {"", "auto", old_family}
+            else (
+                f"{old_encoder or old_family or 'requested encoder'} is unavailable on this node; "
+                f"selected the closest supported {selected_codec.upper()} preset"
+            )
         ),
         "adapted_at": time.time(),
     }
@@ -8136,7 +8305,13 @@ def _adapt_smart_plan_for_node(plan: dict, node: dict) -> dict:
     metadata["preset_adaptive"] = True
     metadata["preset_preferences"] = out.get("preset_preferences") if isinstance(out.get("preset_preferences"), dict) else metadata.get("preset_preferences", {})
     out["encode_metadata"] = metadata
-    out["extra_args"] = _replace_plan_encoder_args(str(out.get("extra_args") or ""), selected_encoder)
+    out["extra_args"] = _replace_plan_encoder_args(
+        str(out.get("extra_args") or ""),
+        selected_encoder,
+        codec_changed=selected_codec != codec,
+        family_changed=selected_family != old_family,
+        hardware_encoder=selected_family != "software",
+    )
     display_name = _queued_preset_display_name(
         str(out.get("preset") or "1080"),
         out.get("preset_bundle"),
@@ -8296,6 +8471,10 @@ def _dispatch_plan_to_worker(
         transfer_row["operations"] = plan.get("operations") if isinstance(plan.get("operations"), dict) else encode_metadata.get("operations", {})
         transfer_row["job_type"] = str(plan.get("job_type") or (transfer_row["operations"].get("job_type") if transfer_row["operations"] else "") or "video_preserve_audio")
         transfer_row["parent_job_id"] = str(plan.get("parent_job_id") or "")
+        try:
+            transfer_row["input_inventory"] = scan_media(src, exact=False)
+        except Exception as exc:
+            transfer_row["input_inventory_error"] = str(exc)[:240]
         save_transfer(transfer_row)
         return {
             "src": src,
@@ -8478,6 +8657,20 @@ def _worker_available_for_auto(row: dict, job: dict) -> tuple[bool, float]:
     return len(active) < limit, min(1.0, len(active) / max(1, limit))
 
 
+def _adaptive_plan_fit_score(original: dict, prepared: dict) -> float:
+    """Small tie-breaker that keeps an exact Smart match ahead of a fallback."""
+    old_encoder, old_family, old_codec, old_depth = _plan_encoder(original)
+    new_encoder, new_family, new_codec, new_depth = _plan_encoder(prepared)
+    if old_encoder and old_encoder == new_encoder:
+        return 0.0
+    score = 0.08 if old_codec == new_codec else 0.28
+    if old_depth != new_depth:
+        score += 0.12
+    if new_family == "software" and old_family != "software":
+        score += 0.35
+    return score
+
+
 def _auto_node_dispatch_loop() -> None:
     while not AUTO_NODE_DISPATCH_STOP.is_set():
         try:
@@ -8512,15 +8705,20 @@ def _auto_node_dispatch_loop() -> None:
                             "name": local.get("name") or "Main controller",
                             "load": min(1.0, local_active / local_limit),
                             "plan": prepared_local_plan,
+                            "fit": _adaptive_plan_fit_score(local_plan, prepared_local_plan),
                         })
             for row in list_nodes_private():
                 available, load = _worker_available_for_auto(row, job)
                 if available:
+                    worker_plan = job.get("dispatch_plan") if isinstance(job.get("dispatch_plan"), dict) else {}
+                    prepared_worker_plan = _prepare_plan_for_node(worker_plan, public_node(row))
                     candidates.append({
                         "kind": "worker",
                         "id": str(row.get("id") or ""),
                         "name": row.get("name") or "Worker",
                         "load": load,
+                        "fit": _adaptive_plan_fit_score(worker_plan, prepared_worker_plan),
+                        "plan": prepared_worker_plan,
                         "row": row,
                     })
             if not candidates:
@@ -8529,6 +8727,7 @@ def _auto_node_dispatch_loop() -> None:
                 continue
             candidates.sort(key=lambda item: (
                 float(item.get("load") or 0.0),
+                float(item.get("fit") or 0.0),
                 float(AUTO_NODE_LAST_ASSIGNMENT.get(str(item.get("id") or ""), 0.0)),
                 str(item.get("name") or "").casefold(),
             ))
@@ -8553,12 +8752,14 @@ def _auto_node_dispatch_loop() -> None:
             claimed = claim_auto_dispatch_job(job_id, selected["id"], selected["name"])
             if not claimed:
                 continue
-            plan = claimed.get("dispatch_plan") if isinstance(claimed.get("dispatch_plan"), dict) else {
+            plan = selected.get("plan") if isinstance(selected.get("plan"), dict) else (
+                claimed.get("dispatch_plan") if isinstance(claimed.get("dispatch_plan"), dict) else {
                 "preset": claimed.get("preset"),
                 "preset_bundle": claimed.get("preset_bundle"),
                 "extra_args": claimed.get("extra_args") or "",
                 "encode_metadata": {},
-            }
+                }
+            )
             try:
                 refreshed, _result, transfer_mode = _dispatch_plan_to_worker(
                     selected["row"],
@@ -8731,12 +8932,19 @@ def _finalize_transfer_output(row: dict, upload_tmp: str) -> dict:
     operations = row.get("operations") if isinstance(row.get("operations"), dict) else {}
     job_type = str(row.get("job_type") or operations.get("job_type") or "video_preserve_audio").strip().lower()
     audio_only = job_type == "audio_only"
-    if not src or not is_allowed_path(src) or not os.path.isfile(src):
-        raise RuntimeError("original source is missing or not allowed")
+    if not src or not is_allowed_path(src):
+        raise RuntimeError("original source path is missing or not allowed")
+    source_exists = os.path.isfile(src)
+    if audio_only and not source_exists:
+        raise RuntimeError("audio-only source is missing; refusing an unsafe replacement")
     if os.path.splitext(os.path.basename(src))[0].lower().endswith("-tsd") and not audio_only:
         raise RuntimeError("refusing to replace an already tagged -TSD source")
 
-    input_inventory = scan_media(src, exact=True)
+    input_inventory = (
+        scan_media(src, exact=True)
+        if source_exists
+        else (row.get("input_inventory") if isinstance(row.get("input_inventory"), dict) else {})
+    )
     normalized_operations = normalize_operations(operations, input_inventory)
     output_inventory = scan_media(upload_tmp, exact=True, force=True)
     if audio_only:
@@ -8760,8 +8968,67 @@ def _finalize_transfer_output(row: dict, upload_tmp: str) -> dict:
         selected_container = "mp4" if os.path.splitext(src)[1].lower() in {".mp4", ".m4v"} else "mkv"
     container_reason = str(request.headers.get("X-Output-Container-Reason") or "").strip()[:240]
     out_path = src if audio_only else _transfer_output_path_for_src(src, selected_container)
-    if not audio_only and os.path.exists(out_path):
+    if not audio_only and source_exists and os.path.exists(out_path):
         raise RuntimeError(f"output already exists: {out_path}")
+
+    # A prior duplicate transfer may already have returned and removed the
+    # shared original.  Validate both this upload and the installed output,
+    # then acknowledge the retry without overwriting or double-counting it.
+    if not audio_only and not source_exists and os.path.isfile(out_path):
+        existing_ok, existing_reason = _encoded_output_is_valid(out_path)
+        if not existing_ok:
+            raise RuntimeError(f"existing output failed validation: {existing_reason}")
+        existing_inventory = scan_media(out_path, exact=True, force=True)
+        try:
+            src_bytes = int(row.get("source_size") or 0)
+        except Exception:
+            src_bytes = 0
+        out_bytes = int(os.path.getsize(out_path))
+        saved_bytes = max(0, src_bytes - out_bytes)
+        actual_breakdown = storage_breakdown(
+            input_inventory,
+            existing_inventory,
+            src_bytes,
+            out_bytes,
+        )
+        warning = "Original source was already finalized by another transfer; this validated duplicate was discarded."
+        row.update({
+            "status": "complete",
+            "completed_at": time.time(),
+            "out_path": out_path,
+            "output_container_selected": selected_container,
+            "output_container_reason": container_reason,
+            "out_bytes": out_bytes,
+            "saved_bytes": saved_bytes,
+            "source_deleted": True,
+            "source_missing_at_return": True,
+            "deduplicated": True,
+            "warning": warning,
+            "job_type": job_type,
+            "operations": normalized_operations,
+            "input_inventory": input_inventory,
+            "output_inventory": existing_inventory,
+            "storage_breakdown": actual_breakdown,
+        })
+        save_transfer(row)
+        log_event(
+            "node_transfer_deduplicated",
+            f"Validated duplicate worker output discarded: {os.path.basename(src)}",
+            level="warn",
+            src=src,
+            extra={"out_path": out_path, "transfer_id": transfer_id},
+        )
+        return {
+            "out_path": out_path,
+            "output_container": selected_container,
+            "out_bytes": out_bytes,
+            "saved_bytes": saved_bytes,
+            "source_deleted": True,
+            "deduplicated": True,
+            "warning": warning,
+            "output_inventory": existing_inventory,
+            "storage_breakdown": actual_breakdown,
+        }
 
     final_part = f"{out_path}.transfer-{transfer_id}.part"
     backup_path = f"{src}.bytesqueeze-audio-backup-{transfer_id}" if audio_only else ""
@@ -8772,7 +9039,7 @@ def _finalize_transfer_output(row: dict, upload_tmp: str) -> dict:
         part_ok, part_reason = _encoded_output_is_valid(final_part)
         if not part_ok:
             raise RuntimeError(f"copied output failed validation: {part_reason}")
-        if not audio_only and os.path.exists(out_path):
+        if not audio_only and source_exists and os.path.exists(out_path):
             raise RuntimeError(f"output already exists: {out_path}")
         if audio_only:
             if os.path.exists(backup_path):
@@ -8860,7 +9127,11 @@ def _finalize_transfer_output(row: dict, upload_tmp: str) -> dict:
     )
 
     source_deleted = False
-    warning = ""
+    warning = (
+        "Original source disappeared after dispatch; the validated worker output was installed without deleting a source."
+        if not source_exists and not audio_only
+        else ""
+    )
     try:
         if not audio_only and os.path.isfile(src):
             os.remove(src)
@@ -8884,6 +9155,7 @@ def _finalize_transfer_output(row: dict, upload_tmp: str) -> dict:
         "out_bytes": out_bytes,
         "saved_bytes": saved_bytes,
         "source_deleted": source_deleted,
+        "source_missing_at_return": bool(not source_exists and not audio_only),
         "warning": warning,
         "job_type": job_type,
         "operations": normalized_operations,
@@ -10530,6 +10802,27 @@ def register_routes(app):
         log_event("mobile_revoked", f"Revoked mobile device {device_id}.", level="warn")
         return jsonify(ok=True)
 
+    @app.route("/api/mobile/devices/<device_id>/forget", methods=["DELETE"])
+    def mobile_device_forget_admin_api(device_id):
+        if not forget_mobile_device(device_id):
+            return jsonify(error="mobile device not found"), 404
+        log_event("mobile_forgotten", f"Forgot mobile device {device_id}.", level="warn")
+        return jsonify(ok=True)
+
+    @app.route("/api/mobile/devices/clear", methods=["POST"])
+    def mobile_devices_clear_admin_api():
+        data = request.get_json(silent=True) or {}
+        target = str(data.get("target") or "inactive").strip().lower()
+        if target not in {"inactive", "all"}:
+            return jsonify(error="target must be inactive or all"), 400
+        removed = clear_mobile_devices(inactive_only=target != "all")
+        log_event(
+            "mobile_devices_cleared",
+            f"Forgot {removed} {'inactive' if target == 'inactive' else 'paired'} mobile device(s).",
+            level="warn" if target == "all" else "info",
+        )
+        return jsonify(ok=True, removed=removed, target=target)
+
     # ------------- Multi-node linking -------------
 
     @app.route("/api/node/local", methods=["GET", "POST"])
@@ -11336,6 +11629,10 @@ def register_routes(app):
                 transfer_row["operations"] = plan.get("operations") if isinstance(plan.get("operations"), dict) else encode_metadata.get("operations", {})
                 transfer_row["job_type"] = str(plan.get("job_type") or transfer_row["operations"].get("job_type") or "video_preserve_audio")
                 transfer_row["parent_job_id"] = str(plan.get("parent_job_id") or "")
+                try:
+                    transfer_row["input_inventory"] = scan_media(src, exact=False)
+                except Exception as exc:
+                    transfer_row["input_inventory_error"] = str(exc)[:240]
                 save_transfer(transfer_row)
                 transfer_payload = {
                     "id": grant["id"],

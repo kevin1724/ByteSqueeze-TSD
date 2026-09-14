@@ -375,6 +375,19 @@ class MobilePairingProtocolTests(unittest.TestCase):
         self.assertIsNotNone(mobile_linking.authenticate_mobile_token(credentials["access_token"], required_scope="read"))
         self.assertIsNone(mobile_linking.authenticate_mobile_token(credentials["access_token"], required_scope="control"))
 
+    def test_forgotten_and_inactive_mobile_devices_can_be_cleared(self):
+        first_pairing = mobile_linking.create_mobile_pairing(scope="control")
+        first = mobile_linking.accept_mobile_pairing(first_pairing["code"], {"device_id": "phone-old"})
+        self.assertTrue(mobile_linking.revoke_mobile_device(first["device_id"]))
+        self.assertEqual(mobile_linking.clear_mobile_devices(inactive_only=True), 1)
+        self.assertEqual(mobile_linking.list_mobile_devices(), [])
+
+        second_pairing = mobile_linking.create_mobile_pairing(scope="control")
+        second = mobile_linking.accept_mobile_pairing(second_pairing["code"], {"device_id": "phone-forget"})
+        self.assertTrue(mobile_linking.forget_mobile_device(second["device_id"]))
+        self.assertFalse(mobile_linking.forget_mobile_device(second["device_id"]))
+        self.assertIsNone(mobile_linking.authenticate_mobile_token(second["access_token"]))
+
 
 if __name__ == "__main__":
     unittest.main()
