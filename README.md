@@ -8,6 +8,27 @@ Completed output files are tagged with `-TSD`, short for "Transcoded", so the ap
 
 [![Docker Pulls](https://img.shields.io/docker/pulls/kevina1724/bytesqueeze-tsd?style=for-the-badge&logo=docker)](https://hub.docker.com/r/kevina1724/bytesqueeze-tsd)
 
+## Docker Image Handles
+
+| Component | Current image | Legacy image (still supported) |
+| --- | --- | --- |
+| Controller and Web UI | [`kevina1724/bytesqueeze-tsd`](https://hub.docker.com/r/kevina1724/bytesqueeze-tsd) | [`kevina1724/handbrake-tsd-helper`](https://hub.docker.com/r/kevina1724/handbrake-tsd-helper) |
+| Headless worker | [`kevina1724/bytesqueeze-tsd-worker`](https://hub.docker.com/r/kevina1724/bytesqueeze-tsd-worker) | [`kevina1724/handbrake-tsd-worker`](https://hub.docker.com/r/kevina1724/handbrake-tsd-worker) |
+
+New installations should use the current ByteSqueeze image handles. The legacy
+handles are published from the same builds with matching tags and image digests,
+so existing Compose files and deployments will continue receiving updates.
+
+```bash
+# Current image handles
+docker pull kevina1724/bytesqueeze-tsd:latest
+docker pull kevina1724/bytesqueeze-tsd-worker:latest
+
+# Legacy-compatible image handles
+docker pull kevina1724/handbrake-tsd-helper:latest
+docker pull kevina1724/handbrake-tsd-worker:latest
+```
+
 ## Highlights
 
 - Web dashboard for local and remote HandBrake encoding
@@ -501,12 +522,20 @@ existing AV1/H.265/H.264 output can be improved without re-encoding video.
 ByteSqueeze validates the temporary output before installing it and records
 measured video, audio, and total storage savings separately.
 
-## Official Image
+## Official Docker Images
 
-Pull:
+### Controller and Web UI
+
+Current handle:
 
 ```bash
 docker pull kevina1724/bytesqueeze-tsd:latest
+```
+
+Legacy-compatible handle:
+
+```bash
+docker pull kevina1724/handbrake-tsd-helper:latest
 ```
 
 Run:
@@ -527,6 +556,8 @@ controller releases also publish `3.25.0` and `3.25` tags. The legacy
 `kevina1724/handbrake-tsd-helper` name is published from the same build and will
 continue receiving identical updates, so existing installations do not break.
 
+### Headless Worker
+
 The encoding-only worker has its own public Docker Hub image:
 
 [kevina1724/bytesqueeze-tsd-worker on Docker Hub](https://hub.docker.com/r/kevina1724/bytesqueeze-tsd-worker)
@@ -536,6 +567,12 @@ The encoding-only worker has its own public Docker Hub image:
 
 ```bash
 docker pull kevina1724/bytesqueeze-tsd-worker:latest
+```
+
+Legacy-compatible handle:
+
+```bash
+docker pull kevina1724/handbrake-tsd-worker:latest
 ```
 
 It needs one writable mount and no media mounts:
