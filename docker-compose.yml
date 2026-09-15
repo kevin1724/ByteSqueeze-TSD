@@ -3,7 +3,7 @@ services:
   # 1) HandBrake TSD Helper Web UI (Flask app + queue)
   # ====================================================
   hb-web:
-    image: kevina1724/handbrake-tsd-helper:latest
+    image: kevina1724/bytesqueeze-tsd:latest
     pull_policy: always
     container_name: hb-web
     restart: unless-stopped

@@ -149,7 +149,7 @@ def _http_json(url: str, *, timeout: int = 10) -> dict | list:
             url,
             headers={
                 "accept": "application/json",
-                "user-agent": "ByteSqueeze/3.12 (+https://github.com/kevina1724/handbrake-tsd-helper)",
+                "user-agent": "ByteSqueeze/3.12 (+https://github.com/kevin1724/ByteSqueeze-TSD)",
             },
         )
         try:

@@ -1,6 +1,6 @@
 services:
   bytesqueeze-worker:
-    image: kevina1724/handbrake-tsd-worker:latest
+    image: kevina1724/bytesqueeze-tsd-worker:latest
     pull_policy: always
     container_name: bytesqueeze-worker
     restart: unless-stopped

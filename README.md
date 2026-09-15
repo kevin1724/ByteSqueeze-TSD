@@ -6,7 +6,7 @@ ByteSqueeze-TSD is built for Plex, Jellyfin, Emby, NAS, and homelab users who wa
 
 Completed output files are tagged with `-TSD`, short for "Transcoded", so the app can skip media that has already been processed.
 
-[![Docker Pulls](https://img.shields.io/docker/pulls/kevina1724/handbrake-tsd-helper?style=for-the-badge&logo=docker)](https://hub.docker.com/r/kevina1724/handbrake-tsd-helper)
+[![Docker Pulls](https://img.shields.io/docker/pulls/kevina1724/bytesqueeze-tsd?style=for-the-badge&logo=docker)](https://hub.docker.com/r/kevina1724/bytesqueeze-tsd)
 
 ## Highlights
 
@@ -36,8 +36,8 @@ V2 Classic remains available as an option. Open **Settings > Interface**, select
 V3 is published in the standard `latest` and `main` Docker channels:
 
 ```bash
-docker pull kevina1724/handbrake-tsd-helper:latest
-docker pull kevina1724/handbrake-tsd-worker:latest
+docker pull kevina1724/bytesqueeze-tsd:latest
+docker pull kevina1724/bytesqueeze-tsd-worker:latest
 ```
 
 Windows gaming PCs can join the same queue without Docker. Download and extract
@@ -506,34 +506,36 @@ measured video, audio, and total storage savings separately.
 Pull:
 
 ```bash
-docker pull kevina1724/handbrake-tsd-helper:latest
+docker pull kevina1724/bytesqueeze-tsd:latest
 ```
 
 Run:
 
 ```bash
 docker run -d \
-  --name handbrake-tsd-helper \
+  --name bytesqueeze-tsd \
   -p 8081:8080 \
   -v /path/to/media:/media/Media \
   -v /path/to/data:/app/data \
   -v /path/to/presets:/presets \
   --device /dev/dri:/dev/dri \
-  kevina1724/handbrake-tsd-helper:latest
+  kevina1724/bytesqueeze-tsd:latest
 ```
 
 The `latest` and `main` images are published automatically from `main`. Stable
-controller releases also publish `3.25.0` and `3.25` tags.
+controller releases also publish `3.25.0` and `3.25` tags. The legacy
+`kevina1724/handbrake-tsd-helper` name is published from the same build and will
+continue receiving identical updates, so existing installations do not break.
 
 The encoding-only worker has its own public Docker Hub image:
 
-[kevina1724/handbrake-tsd-worker on Docker Hub](https://hub.docker.com/r/kevina1724/handbrake-tsd-worker)
+[kevina1724/bytesqueeze-tsd-worker on Docker Hub](https://hub.docker.com/r/kevina1724/bytesqueeze-tsd-worker)
 
 `latest` and `main` follow the main branch. Stable worker releases also publish
 `2.13.5` and `2.13` tags:
 
 ```bash
-docker pull kevina1724/handbrake-tsd-worker:latest
+docker pull kevina1724/bytesqueeze-tsd-worker:latest
 ```
 
 It needs one writable mount and no media mounts:
@@ -544,10 +546,13 @@ docker run -d \
   -p 8082:8080 \
   -e TSD_WORKER_NAME="Garage Worker" \
   -v /path/to/fast/transcode-drive:/work \
-  kevina1724/handbrake-tsd-worker:latest
+  kevina1724/bytesqueeze-tsd-worker:latest
 
 docker logs bytesqueeze-worker
 ```
+
+The legacy `kevina1724/handbrake-tsd-worker` name is also published from the
+same worker build for backward compatibility.
 
 ## Runtime Data
 

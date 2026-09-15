@@ -59,7 +59,7 @@ The web form is the easiest option. For deployment-managed secrets, set one prov
 ```yaml
 services:
   handbrake-tsd-helper:
-    image: kevina1724/handbrake-tsd-helper:latest
+    image: kevina1724/bytesqueeze-tsd:latest
     environment:
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       # Or use OpenAI instead:

@@ -36,8 +36,12 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  IMAGE_NAME: kevina1724/handbrake-tsd-helper
-  WORKER_IMAGE_NAME: kevina1724/handbrake-tsd-worker
+  CONTROLLER_IMAGES: |
+    kevina1724/bytesqueeze-tsd
+    kevina1724/handbrake-tsd-helper
+  WORKER_IMAGES: |
+    kevina1724/bytesqueeze-tsd-worker
+    kevina1724/handbrake-tsd-worker
   CONTROLLER_VERSION: 3.25.0
   WORKER_VERSION: 2.13.5
 
@@ -64,7 +68,7 @@ jobs:
         if: ${{ github.event_name != 'push' || !contains(github.event.head_commit.message, '[worker-only]') }}
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.IMAGE_NAME }}
+          images: ${{ env.CONTROLLER_IMAGES }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=main,enable={{is_default_branch}}
@@ -99,7 +103,7 @@ jobs:
         id: worker-meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.WORKER_IMAGE_NAME }}
+          images: ${{ env.WORKER_IMAGES }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=main,enable={{is_default_branch}}
