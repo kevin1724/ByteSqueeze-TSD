@@ -40,6 +40,8 @@ class WindowsEncodeRunnerTests(unittest.TestCase):
                 "HB_OUTPUT_CONTAINER": "mp4",
                 "HB_WEB_OPTIMIZED": "1",
             }
+            canonical_output = source.with_name("controller-selected-output.mp4")
+            env["HB_OUTPUT_PATH"] = str(canonical_output)
             with mock.patch.object(encode_runner, "_tool", return_value="HandBrakeCLI.exe"):
                 command = encode_runner.build_command(env)
 
@@ -56,7 +58,19 @@ class WindowsEncodeRunnerTests(unittest.TestCase):
             self.assertNotIn("640", command)
             self.assertIn("13467", command)
             self.assertIn("23.976", command)
-            self.assertEqual(command[-1], str(source.with_name("Movie Source-TSD.mp4")))
+            self.assertEqual(command[-1], str(canonical_output))
+
+    def test_canonical_output_path_rejects_container_extension_drift(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            source = Path(tempdir) / "Episode.mkv"
+            source.write_bytes(b"source")
+            env = {
+                "SRC": str(source),
+                "HB_OUTPUT_CONTAINER": "mp4",
+                "HB_OUTPUT_PATH": str(source.with_name("Episode-TSD.mkv")),
+            }
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                encode_runner.output_path(str(source), env)
 
     def test_qsv_jobs_select_adapter_and_keep_decode_request(self):
         with tempfile.TemporaryDirectory() as tempdir:

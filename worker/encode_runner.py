@@ -181,6 +181,15 @@ def output_path(source: str, env: dict[str, str] | None = None) -> Path:
     suffix = str(values.get("SUFFIX") or "TSD").strip() or "TSD"
     container = str(values.get("HB_OUTPUT_CONTAINER") or "mkv").strip().lower()
     extension = "mp4" if container == "mp4" else "mkv"
+    canonical = str(values.get("HB_OUTPUT_PATH") or "").strip()
+    if canonical:
+        out = Path(canonical)
+        if out.suffix.lower() != f".{extension}":
+            raise ValueError(
+                "HB_OUTPUT_PATH extension does not match HB_OUTPUT_CONTAINER: "
+                f"{canonical!r} is not .{extension}"
+            )
+        return out
     return src.with_name(f"{src.stem}-{suffix}.{extension}")
 
 

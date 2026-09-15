@@ -150,8 +150,15 @@ QSV_DECODE_POSITIVE_RE = re.compile(
     r'(?:"(?:HWDecode|HardwareDecode)"\s*:\s*(?!0\b)-?\d+|"Decode"\s*:\s*true|using full QSV|QSV hardware decode and QSV hardware encode|decoder:\s*(?:qsv\s+)?(?:h264|hevc)(?:_qsv)?|(?:h264|hevc)_qsv-decoder)',
     re.IGNORECASE,
 )
+QSV_DECODE_COMPLETION_RE = re.compile(
+    r'(?:h264|hevc)_qsv-decoder(?:\s*:\s*|\s+)done\b',
+    re.IGNORECASE,
+)
 QSV_DECODE_FALLBACK_RE = re.compile(
-    r'(?:"Decode"\s*:\s*false|(?:qsv[_ -])?decoder[^\n]*(?:failed|error)|Hardware decode:\s*software fallback)',
+    r'(?:"Decode"\s*:\s*false|Hardware decode:\s*software fallback|'
+    r'(?:h264|hevc)_qsv-decoder[^\n]*(?:\bfailed\b|\bfailure\b|\berror\s*:)|'
+    r'(?:qsv[_ -])?decoder[^\n]*(?:\bfailed\b|\bfailure\b|\bunable\b|\bcould not\b)|'
+    r'(?:No VA display found|failed to create hwdevice))',
     re.IGNORECASE,
 )
 
@@ -1038,6 +1045,40 @@ def _output_path_for_source(
     return os.path.join(folder, f"{name}-{suffix}{plan['extension']}")
 
 
+def _canonical_output_plan(
+    src: str,
+    suffix: str,
+    policy: dict | None = None,
+    source: dict | None = None,
+    *,
+    job: dict | None = None,
+    preset_definition: dict | None = None,
+    selected_encoder: str = "",
+) -> dict:
+    """Resolve the muxer and its one authoritative destination together."""
+    plan = _output_container_plan(
+        policy,
+        source,
+        job=job,
+        preset_definition=preset_definition,
+        selected_encoder=selected_encoder,
+    )
+    return {
+        **plan,
+        "output_path": _output_path_for_source(src, suffix, policy, plan=plan),
+    }
+
+
+def _alternate_container_output_path(path: str) -> str:
+    """Return the opposite MP4/MKV sibling used only for success recovery."""
+    root, extension = os.path.splitext(str(path or ""))
+    if extension.lower() == ".mp4":
+        return root + ".mkv"
+    if extension.lower() == ".mkv":
+        return root + ".mp4"
+    return ""
+
+
 def _estimated_output_stop_guard(job: dict) -> dict | None:
     """Return stop details when a reliable checkpoint crosses the configured limit."""
     if job.get("auto_stop_triggered"):
@@ -1851,8 +1892,10 @@ def _set_preset_hardware_decode(
     *,
     video_encoder: str = "",
     gpu_index: int | None = None,
+    output_container: str = "",
+    web_optimized: bool = False,
 ) -> bool:
-    """Set per-job decode, encoder, and adapter policy on one video preset."""
+    """Set the per-job video, adapter, and muxer policy on one preset."""
     candidates = []
 
     def walk(value):
@@ -1891,6 +1934,12 @@ def _set_preset_hardware_decode(
         parts.append(f"gpu={max(0, int(gpu_index))}")
         selected["VideoOptionExtra"] = ":".join(parts)
         selected["VideoAdapterIndex"] = max(0, int(gpu_index))
+    selected_container = str(output_container or "").strip().lower()
+    if selected_container in {"mp4", "mkv"}:
+        # Keep the imported preset consistent with the authoritative CLI and
+        # destination path. A bundled MKV preset must not undo AUTO -> MP4.
+        selected["FileFormat"] = "av_mp4" if selected_container == "mp4" else "av_mkv"
+        selected["Optimize"] = bool(selected_container == "mp4" and web_optimized)
     # HandBrake 1.x represents QSV with bit 0x02. Using 1 here means
     # software decode support and HandBrake normalizes it back to zero for a
     # QSV source, even when VideoQSVDecode is true.
@@ -1912,8 +1961,10 @@ def _materialize_decode_policy_preset(
     *,
     video_encoder: str = "",
     gpu_index: int | None = None,
+    output_container: str = "",
+    web_optimized: bool = False,
 ) -> tuple[str, str] | None:
-    """Create a job-scoped preset that enforces decode and GPU routing."""
+    """Create a job-scoped preset enforcing video, GPU, and muxer policy."""
     try:
         with open(preset_file, "r", encoding="utf-8") as stream:
             data = json.load(stream)
@@ -1923,6 +1974,8 @@ def _materialize_decode_policy_preset(
             enabled,
             video_encoder=video_encoder,
             gpu_index=gpu_index,
+            output_container=output_container,
+            web_optimized=web_optimized,
         ):
             return None
         target_dir = work_dir or os.path.join(PRESET_WORK_DIR, str(job_id))
@@ -2019,6 +2072,11 @@ def _hardware_decode_plan(encoder: str, source: dict, mode: str | None = None) -
 def _qsv_decode_log_evidence(line: str) -> str:
     """Classify HandBrake output as an active QSV path or software fallback."""
     text = str(line or "")
+    # HandBrake reports successful hardware decode completion as, for example,
+    # "h264_qsv-decoder done: 35829 frames, 0 decoder errors". Check this
+    # before failure phrases so the harmless word "errors" cannot invert it.
+    if QSV_DECODE_COMPLETION_RE.search(text):
+        return "active"
     if QSV_DECODE_FALLBACK_RE.search(text):
         return "fallback"
     if QSV_DECODE_POSITIVE_RE.search(text):
@@ -4270,20 +4328,23 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
             "[ByteSqueeze] Encoder profile: Auto/default "
             f"(AV1 NVENC profile field omitted{repaired})\n"
         )
-    output_plan = _output_container_plan(
+    output_plan = _canonical_output_plan(
+        encode_src_path,
+        suffix,
         job_policy,
         source_video,
         job=job,
         preset_definition=preset_definition,
         selected_encoder=selected_encoder,
     )
-    out_path = _output_path_for_source(
-        encode_src_path,
-        suffix,
-        job_policy,
-        plan=output_plan,
-    )
-    out_path_existed_before = os.path.exists(out_path)
+    out_path = output_plan["output_path"]
+    alternate_out_path = _alternate_container_output_path(out_path)
+    output_paths_existing_before = {
+        candidate: os.path.exists(candidate)
+        for candidate in (out_path, alternate_out_path)
+        if candidate
+    }
+    out_path_existed_before = output_paths_existing_before.get(out_path, False)
     job["out_path"] = out_path
     job["output_container_requested"] = output_plan["requested_container"]
     job["output_container"] = output_plan["container"]
@@ -4313,6 +4374,8 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
                 else int(gpu_assignment.get("vendor_index") or 0)
             )
         ) if routed_encoder.startswith(("nvenc_", "vce_")) else None,
+        output_container=output_plan["container"],
+        web_optimized=output_plan["web_optimized"],
     )
     if controlled_preset:
         preset_file, preset_work_dir = controlled_preset
@@ -4367,6 +4430,7 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
     env["HB_AUDIO_POLICY_OPTS"] = shlex.join(handbrake_audio_args(operations, source_inventory))
     env["HB_DIMENSION_OPTS"] = shlex.join(resolution_plan["cli_args"])
     env["HB_HW_DECODE_OPTS"] = shlex.join(hardware_decode["cli_args"])
+    env["HB_OUTPUT_PATH"] = out_path
     env["HB_OUTPUT_CONTAINER"] = output_plan["container"]
     env["HB_WEB_OPTIMIZED"] = "1" if output_plan["web_optimized"] else "0"
     env["HB_HW_DECODE_LABEL"] = hardware_decode["label"]
@@ -4479,6 +4543,7 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
             f"[ByteSqueeze] Output container: {output_plan['container'].upper()}"
             f" (requested {output_plan['requested_container'].upper()})\n"
             f"[ByteSqueeze] Container decision: {output_plan['reason']}\n"
+            f"[ByteSqueeze] Output path: {out_path}\n"
             f"[ByteSqueeze] Web optimized: {'on' if output_plan['web_optimized'] else 'off'}\n"
             f"{smart_episode_log}"
             f"{frame_rate_log}"
@@ -4583,6 +4648,35 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
     # Wait for process to exit
     ret = proc.wait()
     job["returncode"] = ret
+
+    # A mixed-version worker may have ignored the authoritative destination
+    # and emitted the opposite extension even though HandBrake returned 0.
+    # Preserve that successful output instead of deleting it as "missing",
+    # while making the actual path/container canonical for upload and history.
+    if (
+        ret == 0
+        and not os.path.isfile(out_path)
+        and alternate_out_path
+        and not output_paths_existing_before.get(alternate_out_path, False)
+        and os.path.isfile(alternate_out_path)
+    ):
+        planned_path = out_path
+        out_path = alternate_out_path
+        out_path_existed_before = False
+        actual_container = "mp4" if os.path.splitext(out_path)[1].lower() == ".mp4" else "mkv"
+        job["out_path"] = out_path
+        job["output_container"] = actual_container
+        job["output_container_contract_recovered"] = True
+        job["output_container_reason"] = (
+            f"{job.get('output_container_reason') or output_plan['reason']}; "
+            f"worker emitted {actual_container.upper()} and the validated result was recovered"
+        )[:500]
+        _append_job_log(
+            job_id,
+            "[ByteSqueeze] WARNING: Output path contract mismatch recovered: "
+            f"expected {planned_path}, worker created {out_path}. "
+            "The actual container/path will be used for validation and return.",
+        )
 
     if hardware_decode["enabled"]:
         if decode_evidence["active"]:

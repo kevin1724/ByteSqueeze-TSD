@@ -37,6 +37,17 @@ class EncodePlanningTests(unittest.TestCase):
         self.assertFalse(mkv_plan["web_optimized"])
         self.assertNotIn("--optimize", mkv_plan["cli_args"])
 
+        canonical = jobs._canonical_output_plan(
+            "/media/Futurama - S11E08.mkv",
+            "TSD",
+            {"output_container": "mp4", "web_optimized": True},
+        )
+        self.assertEqual(canonical["container"], "mp4")
+        self.assertEqual(
+            canonical["output_path"],
+            os.path.join("/media", "Futurama - S11E08-TSD.mp4"),
+        )
+
     def test_auto_container_is_selected_per_file_from_effective_tracks(self):
         copy_preset = {
             "AudioTrackSelectionBehavior": "all",
@@ -393,6 +404,8 @@ class EncodePlanningTests(unittest.TestCase):
                 "Imported QSV",
                 True,
                 tempdir,
+                output_container="mp4",
+                web_optimized=True,
             )
             self.assertIsNotNone(result)
             with open(result[0], "r", encoding="utf-8") as stream:
@@ -402,6 +415,8 @@ class EncodePlanningTests(unittest.TestCase):
         self.assertEqual(materialized["VideoHWDecode"], 2)
         self.assertIs(materialized["VideoQSVDecode"], True)
         self.assertEqual(materialized["VideoAdapterIndex"], 0)
+        self.assertEqual(materialized["FileFormat"], "av_mp4")
+        self.assertIs(materialized["Optimize"], True)
         self.assertEqual(materialized["AudioList"][0]["AudioEncoder"], "copy")
 
     def test_qsv_adapter_index_is_explicit_and_safely_normalized(self):
@@ -423,6 +438,8 @@ class EncodePlanningTests(unittest.TestCase):
             'decoder: h264_qsv 8-bit (yuv420p)',
             'decoder: qsv hevc 10-bit (p010le, sw)',
             'hevc_qsv-decoder: opening decoder',
+            'h264_qsv-decoder done: 35829 frames, 0 decoder errors',
+            'hevc_qsv-decoder done: 35829 frames, 2 decoder errors',
             'encavcodec: QSV hardware decode and QSV hardware encode via system memory transfer',
         )
         negative = (
@@ -488,7 +505,8 @@ class EncodePlanningTests(unittest.TestCase):
         self.assertIn('CONTAINER_OPTS="$CONTAINER_OPTS --optimize"', script)
         self.assertIn('CONTAINER_OPTS="--format av_mkv"', script)
         self.assertEqual(script.count("${CONTAINER_OPTS}"), 3)
-        self.assertIn('OUT="${DIR}/${NAME}-${SUFFIX}.${EXT}"', script)
+        self.assertIn('DEFAULT_OUT="${DIR}/${NAME}-${SUFFIX}.${EXT}"', script)
+        self.assertIn('OUT="${HB_OUTPUT_PATH:-$DEFAULT_OUT}"', script)
         self.assertIn("bytesqueeze-qsv-preflight encode", script)
         self.assertIn('QSV_ADAPTER_OPTS="--qsv-adapter $QSV_ADAPTER"', script)
         self.assertIn('rm -f -- "$OUT"', script)

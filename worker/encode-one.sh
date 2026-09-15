@@ -59,7 +59,17 @@ if echo "$LOWER_NAME" | grep -q -- '-tsd$'; then
   exit 0
 fi
 
-OUT="${DIR}/${NAME}-${SUFFIX}.${EXT}"
+DEFAULT_OUT="${DIR}/${NAME}-${SUFFIX}.${EXT}"
+# AUTO is resolved once by the job planner. Consume that exact destination so
+# the launcher and validator cannot independently disagree about .mp4/.mkv.
+OUT="${HB_OUTPUT_PATH:-$DEFAULT_OUT}"
+case "$(printf '%s' "${OUT##*.}" | tr 'A-Z' 'a-z')" in
+  "$EXT") ;;
+  *)
+    echo "ERROR: HB_OUTPUT_PATH extension does not match HB_OUTPUT_CONTAINER: $OUT"
+    exit 2
+    ;;
+esac
 
 # Preset info comes from env (set by jobs.py based on preset key)
 PRESET_FILE="${HB_PRESET_FILE:-/presets/my-presets.json}"
