@@ -1,8 +1,8 @@
-# HandBrake TSD Helper
+# ByteSqueeze-TSD
 
-A clean, self-hosted web dashboard for managing HandBrake encodes across a movie and TV library.
+A polished, self-hosted media optimization controller for managing HandBrake and FFmpeg jobs across movie and TV libraries.
 
-HandBrake TSD Helper is built for Plex, Jellyfin, Emby, NAS, and homelab users who want to reduce media file sizes without giving up control over quality, audio, subtitles, presets, hardware encoding, or file safety.
+ByteSqueeze-TSD is built for Plex, Jellyfin, Emby, NAS, and homelab users who want to reduce media file sizes without giving up control over quality, audio, subtitles, presets, hardware acceleration, worker routing, or file safety.
 
 Completed output files are tagged with `-TSD`, short for "Transcoded", so the app can skip media that has already been processed.
 
@@ -79,8 +79,9 @@ The same signed application runs on iPhone and iPad. iPad uses the wide workspac
 - Source: [`mobile/bytesqueeze`](mobile/bytesqueeze)
 - Product and mobile API notes: [`docs/BYTESQUEEZE.md`](docs/BYTESQUEEZE.md)
 - iPhone/iPad and TestFlight setup: [`docs/ios-testflight.md`](docs/ios-testflight.md)
-- Latest Android APK: [GitHub Releases](https://github.com/kevin1724/handbrake-tsd-helper/releases/latest)
-- Pairing: open **Settings > Linked Nodes** and generate a one-time read or control code under Companion app access
+- Latest Android APK: [GitHub Releases](https://github.com/kevin1724/ByteSqueeze-TSD/releases/latest)
+- Fast pairing: open **Settings > Linked Nodes**, generate a one-time code under Companion app access, then select **Open app & pair**
+- Paired-device cleanup: revoke access, permanently forget an individual app, or clear inactive app records from the same controller panel
 
 LAN HTTP is supported for home-server use. Use a trusted HTTPS reverse proxy when connecting from outside the home network; do not expose the controller directly to the public internet.
 
@@ -103,8 +104,8 @@ Use it when you want to:
 Clone the repo:
 
 ```bash
-git clone https://github.com/kevin1724/handbrake-tsd-helper.git
-cd handbrake-tsd-helper
+git clone https://github.com/kevin1724/ByteSqueeze-TSD.git
+cd ByteSqueeze-TSD
 ```
 
 Edit `docker-compose.yml` and mount your media folders:
@@ -376,7 +377,7 @@ encode.
 - Shared accurate-preview review and Smart Preset feedback from the phone
 - Focused default screens with optional secondary controls and Stats for nerds under Interface & UI
 - Primary home address plus an optional Tailscale/away address with automatic connection failover
-- Browser-admin controls for creating pairing codes and revoking devices
+- Browser-admin controls for one-tap app links, pairing codes, revoking access, forgetting devices, and clearing inactive app records
 
 Access and refresh tokens are returned only to the client and stored on the server as hashes. Keep the web UI and mobile API on a trusted LAN or behind your own authenticated reverse proxy; the main web UI does not yet provide user accounts.
 
@@ -582,7 +583,7 @@ git status --short
 ## Project Layout
 
 ```text
-handbrake-tsd-helper/
+ByteSqueeze-TSD/
 |-- Dockerfile
 |-- docker-compose.yml
 |-- README.md

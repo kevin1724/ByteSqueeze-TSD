@@ -76,7 +76,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=sha-
           labels: |
-            org.opencontainers.image.title=HandBrake TSD Helper
+            org.opencontainers.image.title=ByteSqueeze-TSD
             org.opencontainers.image.description=Web dashboard and queue manager for HandBrake transcoding
 
       - name: Build and push image
