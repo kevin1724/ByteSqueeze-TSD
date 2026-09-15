@@ -1,8 +1,9 @@
-"""Cross-platform HandBrake launcher used by the packaged Windows worker.
+"""Cross-platform HandBrake launcher used by every ByteSqueeze worker.
 
-The Docker worker keeps using ``encode-one.sh``.  This module intentionally
-accepts the same environment contract so the dispatcher and controller do not
-need a Windows-specific job format.
+The launcher consumes one environment contract on Linux and Windows.  Keeping
+container choice, destination path, validation target, and HandBrake arguments
+in this process prevents mixed-version shell scripts from deriving a second
+output filename.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ _AUDIO_OPTIONS_WITH_VALUE = {
 _AUDIO_SHORT_OPTIONS_WITH_VALUE = {"-a", "-E", "-B", "-6", "-R"}
 _AUDIO_FLAG_OPTIONS = {"--all-audio", "--first-audio"}
 _NVENC_AV1_ENCODERS = {"nvenc_av1", "nvenc_av1_10bit"}
+RUNNER_CONTRACT_VERSION = "2"
 
 
 def _background_process_options() -> dict:
@@ -259,6 +261,28 @@ def _run(command: list[str]) -> int:
     return process.wait()
 
 
+def _requested_qsv_decode(values: dict[str, str]) -> bool:
+    return _split(values.get("HB_HW_DECODE_OPTS")) == ["--enable-hw-decoding", "qsv"]
+
+
+def _qsv_job(values: dict[str, str]) -> bool:
+    encoder = str(values.get("HB_VIDEO_ENCODER") or "").strip().lower()
+    return encoder.startswith("qsv_") or _requested_qsv_decode(values)
+
+
+def _qsv_preflight(values: dict[str, str]) -> tuple[bool, str]:
+    """Validate Linux render-node access and stream diagnostic output."""
+    if os.name == "nt" or not _qsv_job(values):
+        return True, "not required"
+    helper = shutil.which("bytesqueeze-qsv-preflight")
+    if not helper:
+        return False, "QSV preflight helper is missing"
+    status = _run([helper, "encode"])
+    if status:
+        return False, f"QSV render-device preflight exited {status}"
+    return True, "passed"
+
+
 def run(env: dict[str, str] | None = None) -> int:
     values = env or os.environ
     source = str(values.get("SRC") or "").strip()
@@ -284,7 +308,8 @@ def run(env: dict[str, str] | None = None) -> int:
     preset_name = str(values.get("HB_PRESET_NAME") or "MyPresetName")
     container = str(values.get("HB_OUTPUT_CONTAINER") or "mkv").strip().lower()
     hw_decode = str(values.get("HB_HW_DECODE_LABEL") or "software (not configured)")
-    _emit("=== ByteSqueeze Windows encode ===")
+    _emit(f"[ByteSqueeze] Encoder runner contract: {RUNNER_CONTRACT_VERSION}")
+    _emit("=== ByteSqueeze encode ===")
     _emit(f"Source : {source}")
     _emit(f"Target : {out}")
     _emit(f"[ByteSqueeze] Output container: {container.upper()}")
@@ -296,11 +321,15 @@ def run(env: dict[str, str] | None = None) -> int:
     _emit("=======================================")
 
     try:
-        command = build_command(values)
-        _emit("[ByteSqueeze] Command: " + subprocess.list2cmdline(command))
+        preflight_ok, preflight_reason = _qsv_preflight(values)
+        disable_qsv_decode = bool(not preflight_ok and _requested_qsv_decode(values))
+        if disable_qsv_decode:
+            _emit(f"[ByteSqueeze] Hardware decode: software fallback ({preflight_reason})")
+        command = build_command(values, disable_qsv_decode=disable_qsv_decode)
+        command_text = subprocess.list2cmdline(command) if os.name == "nt" else shlex.join(command)
+        _emit("[ByteSqueeze] Command: " + command_text)
         status = _run(command)
-        requested_qsv_decode = _split(values.get("HB_HW_DECODE_OPTS")) == ["--enable-hw-decoding", "qsv"]
-        if status and requested_qsv_decode:
+        if status and _requested_qsv_decode(values) and not disable_qsv_decode:
             _emit(f"[ByteSqueeze] Hardware decode: software fallback (QSV decode attempt exited {status})")
             try:
                 out.unlink(missing_ok=True)

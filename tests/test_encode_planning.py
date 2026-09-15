@@ -8,6 +8,92 @@ from webui.app import jobs, presets
 
 
 class EncodePlanningTests(unittest.TestCase):
+    def test_linux_dispatcher_uses_shared_python_runner(self):
+        with mock.patch.object(jobs.os, "name", "posix"), mock.patch.object(
+            jobs.sys,
+            "executable",
+            "/usr/local/bin/python",
+        ):
+            command, label = jobs._encoder_launch_command()
+
+        self.assertEqual(
+            command,
+            ["/usr/local/bin/python", "-m", "worker.encode_runner"],
+        )
+        self.assertEqual(label, "python -m worker.encode_runner")
+
+    def test_false_finished_failures_reconcile_only_after_output_validation(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            source = os.path.join(tempdir, "Episode.mkv")
+            planned = os.path.join(tempdir, "Episode-TSD.mp4")
+            actual = os.path.join(tempdir, "Episode-TSD.mkv")
+            with open(actual, "wb") as stream:
+                stream.write(b"complete-media")
+            records = {
+                "first": {
+                    "status": "error",
+                    "phase": "validation_error",
+                    "returncode": 0,
+                    "src": source,
+                    "src_bytes": 100,
+                    "out_path": planned,
+                    "error_message": "output file missing",
+                    "finished_at": 1,
+                },
+                "retry": {
+                    "status": "error",
+                    "phase": "encode_error",
+                    "returncode": 1,
+                    "src": source,
+                    "src_bytes": 100,
+                    "out_path": planned,
+                    "error_message": f"HandBrake exited: Output already exists: {actual}",
+                    "finished_at": 2,
+                },
+                "real-error": {
+                    "status": "error",
+                    "phase": "encode_error",
+                    "returncode": 1,
+                    "out_path": planned,
+                    "error_message": "decoder crashed",
+                    "finished_at": 3,
+                },
+            }
+            validator = mock.Mock(return_value=(True, "ok"))
+
+            recovered = jobs._reconcile_finished_output_contract_errors(
+                records,
+                validator=validator,
+            )
+
+        self.assertEqual(recovered, 2)
+        self.assertEqual(validator.call_count, 1)
+        for key in ("first", "retry"):
+            self.assertEqual(records[key]["status"], "done")
+            self.assertEqual(records[key]["out_path"], actual)
+            self.assertEqual(records[key]["output_container"], "mkv")
+            self.assertTrue(records[key]["completion_recovered"])
+            self.assertEqual(records[key]["returncode"], 0)
+        self.assertEqual(records["retry"]["pre_recovery_returncode"], 1)
+        self.assertEqual(records["real-error"]["status"], "error")
+
+    def test_finished_failure_is_not_reconciled_when_media_is_invalid(self):
+        record = {
+            "job": {
+                "status": "error",
+                "phase": "validation_error",
+                "returncode": 0,
+                "out_path": "/media/Episode-TSD.mp4",
+                "error_message": "output file missing",
+            }
+        }
+        recovered = jobs._reconcile_finished_output_contract_errors(
+            record,
+            validator=lambda _path: (False, "ffprobe failed"),
+        )
+        self.assertEqual(recovered, 0)
+        self.assertEqual(record["job"]["status"], "error")
+
     def test_output_container_plan_controls_muxer_fast_start_and_extension(self):
         default_plan = jobs._output_container_plan({})
         self.assertEqual(default_plan["container"], "mkv")
@@ -536,6 +622,17 @@ class EncodePlanningTests(unittest.TestCase):
         )
         self.assertIn('vainfo --display drm --device "$RENDER_DEVICE"', preflight)
         self.assertIn("child_device=$RENDER_DEVICE,child_device_type=vaapi", preflight)
+
+        # Both controller and remote-worker stages ship the same structured
+        # runner; encode-one.sh is retained only as a manual compatibility aid.
+        self.assertEqual(
+            dockerfile.count("COPY worker/__init__.py worker/encode_runner.py /app/worker/"),
+            1,
+        )
+        self.assertIn(
+            "COPY worker/__init__.py worker/app.py worker/encode_runner.py /app/worker/",
+            dockerfile,
+        )
 
 
 if __name__ == "__main__":

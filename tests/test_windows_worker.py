@@ -15,6 +15,24 @@ from webui.app.process_utils import background_process_options
 
 
 class WindowsEncodeRunnerTests(unittest.TestCase):
+    def test_linux_qsv_preflight_uses_the_image_helper(self):
+        with mock.patch.object(encode_runner.os, "name", "posix"), mock.patch.object(
+            encode_runner,
+            "_qsv_job",
+            return_value=True,
+        ), mock.patch.object(
+            encode_runner.shutil,
+            "which",
+            return_value="/usr/local/bin/bytesqueeze-qsv-preflight",
+        ), mock.patch.object(encode_runner, "_run", return_value=0) as run:
+            ok, reason = encode_runner._qsv_preflight({})
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "passed")
+        run.assert_called_once_with(
+            ["/usr/local/bin/bytesqueeze-qsv-preflight", "encode"]
+        )
+
     def test_command_preserves_dispatcher_contract_and_mp4_fast_start(self):
         with tempfile.TemporaryDirectory() as tempdir:
             source = Path(tempdir) / "Movie Source.mkv"

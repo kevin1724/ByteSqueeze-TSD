@@ -66,7 +66,11 @@ def _process_group_options() -> dict:
 def _encoder_launch_command() -> tuple[list[str], str]:
     """Return the platform launcher while keeping one dispatcher contract."""
     if os.name != "nt":
-        return ["/bin/sh", "/worker/encode-one.sh"], "/worker/encode-one.sh"
+        # Use the same structured launcher as the native Windows worker.  The
+        # previous split implementation allowed a refreshed controller to run
+        # beside an older encode-one.sh, so AUTO could plan .mp4 while the
+        # stale shell script independently created/looked for .mkv.
+        return [sys.executable, "-m", "worker.encode_runner"], "python -m worker.encode_runner"
     if getattr(sys, "frozen", False):
         return [sys.executable, "--encode-one"], "ByteSqueezeWorker.exe --encode-one"
     return [sys.executable, "-m", "worker.windows_app", "--encode-one"], "python -m worker.windows_app --encode-one"
@@ -1077,6 +1081,105 @@ def _alternate_container_output_path(path: str) -> str:
     if extension.lower() == ".mkv":
         return root + ".mp4"
     return ""
+
+
+def _reconcile_finished_output_contract_errors(
+    records: dict[str, dict] | None = None,
+    *,
+    validator=None,
+) -> int:
+    """Repair historical false failures when a complete output is present.
+
+    Older/mixed containers could successfully create the opposite container
+    extension and then validate a separately calculated destination.  A retry
+    could subsequently fail at launch because that completed sibling already
+    existed.  Only these two narrow signatures are eligible, and the media
+    must pass the normal ffprobe validation before its history status changes.
+    """
+    candidates = records if isinstance(records, dict) else jobs
+    validate = validator or _encoded_output_is_valid
+    validation_cache: dict[str, tuple[bool, str]] = {}
+    recovered = 0
+
+    for job_id, job in sorted(
+        candidates.items(),
+        key=lambda item: float((item[1] or {}).get("finished_at") or 0.0),
+    ):
+        if not isinstance(job, dict) or job.get("status") != "error":
+            continue
+        error_text = "\n".join(
+            (str(job.get("error_message") or ""), str(job.get("log") or ""))
+        )
+        lower_error = error_text.lower()
+        returncode = job.get("returncode")
+        successful_missing_output = (
+            returncode == 0
+            and str(job.get("phase") or "") == "validation_error"
+            and "output file missing" in lower_error
+        )
+        blocked_by_completed_output = "output already exists:" in lower_error
+        if not successful_missing_output and not blocked_by_completed_output:
+            continue
+
+        planned_path = str(job.get("out_path") or "").strip()
+        output_path = ""
+        if blocked_by_completed_output:
+            matches = re.findall(r"Output already exists:\s*([^\r\n]+)", error_text, re.IGNORECASE)
+            if matches:
+                output_path = str(matches[-1]).strip()
+        if not output_path and planned_path:
+            output_path = _alternate_container_output_path(planned_path)
+        if not output_path or os.path.splitext(output_path)[1].lower() not in {".mp4", ".mkv"}:
+            continue
+
+        if output_path not in validation_cache:
+            validation_cache[output_path] = validate(output_path)
+        valid, reason = validation_cache[output_path]
+        if not valid:
+            continue
+
+        original_returncode = returncode
+        try:
+            out_bytes = int(os.path.getsize(output_path))
+        except Exception:
+            out_bytes = int(job.get("out_bytes") or 0)
+        try:
+            src_bytes = int(job.get("src_bytes") or 0)
+        except Exception:
+            src_bytes = 0
+        actual_container = "mp4" if output_path.lower().endswith(".mp4") else "mkv"
+        recovery_reason = (
+            "successful encode output recovered from the worker's actual container"
+            if successful_missing_output
+            else "retry matched an already completed, validated output"
+        )
+        job.update({
+            "status": "done",
+            "phase": "done",
+            "returncode": 0,
+            "progress": 100.0,
+            "eta_seconds": None,
+            "error_message": "",
+            "out_path": output_path,
+            "out_bytes": out_bytes,
+            "estimated_out_bytes": out_bytes,
+            "estimated_out_source": "actual",
+            "saved_bytes": max(0, src_bytes - out_bytes),
+            "output_container": actual_container,
+            "output_container_contract_recovered": True,
+            "completion_recovered": True,
+            "completion_recovery_reason": recovery_reason,
+            "pre_recovery_returncode": original_returncode,
+        })
+        job["log"] = (
+            str(job.get("log") or "").rstrip()
+            + "\n[ByteSqueeze] Completion reconciled: "
+            + f"{recovery_reason}; validated {output_path} ({reason}).\n"
+        )[-JOB_LOG_TAIL_CHARS:]
+        recovered += 1
+        print(f"[JOB {job_id}] {recovery_reason}: {output_path}", flush=True)
+
+    return recovered
 
 
 def _estimated_output_stop_guard(job: dict) -> dict | None:
@@ -2457,6 +2560,14 @@ def save_jobs():
                 "out_bytes": j.get("out_bytes"),
                 "saved_bytes": j.get("saved_bytes"),
                 "out_path": j.get("out_path"),
+                "output_container_requested": j.get("output_container_requested") or "",
+                "output_container": j.get("output_container") or "",
+                "output_container_reason": j.get("output_container_reason") or "",
+                "web_optimized": bool(j.get("web_optimized", False)),
+                "output_container_contract_recovered": bool(j.get("output_container_contract_recovered", False)),
+                "completion_recovered": bool(j.get("completion_recovered", False)),
+                "completion_recovery_reason": j.get("completion_recovery_reason") or "",
+                "pre_recovery_returncode": j.get("pre_recovery_returncode"),
                 "is_hdr": bool(j.get("is_hdr", False) or _looks_like_hdr_path(j.get("src", ""))),
                 "created_at": j.get("created_at"),
                 "started_at": j.get("started_at"),
@@ -2625,6 +2736,14 @@ def load_jobs():
                 "out_bytes": j.get("out_bytes"),
                 "saved_bytes": j.get("saved_bytes"),
                 "out_path": j.get("out_path"),
+                "output_container_requested": j.get("output_container_requested") or "",
+                "output_container": j.get("output_container") or "",
+                "output_container_reason": j.get("output_container_reason") or "",
+                "web_optimized": bool(j.get("web_optimized", False)),
+                "output_container_contract_recovered": bool(j.get("output_container_contract_recovered", False)),
+                "completion_recovered": bool(j.get("completion_recovered", False)),
+                "completion_recovery_reason": j.get("completion_recovery_reason") or "",
+                "pre_recovery_returncode": j.get("pre_recovery_returncode"),
                 "is_hdr": bool(j.get("is_hdr", False) or _looks_like_hdr_path(j.get("src", ""))),
                 "created_at": j.get("created_at"),
                 "started_at": j.get("started_at"),
@@ -2644,6 +2763,12 @@ def load_jobs():
             for jid in q
             if jid in jobs and jobs[jid].get("status") == "queued"
         ]
+
+        # Repair the exact historical false-failure signatures caused by the
+        # old split launcher. Recovered rows remain history and cannot be
+        # dispatched again.
+        if _reconcile_finished_output_contract_errors():
+            save_jobs()
 
     except Exception as e:
         print(f"[WARN] Failed to load jobs.json: {e}", flush=True)
