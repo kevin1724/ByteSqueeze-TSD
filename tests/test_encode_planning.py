@@ -18,9 +18,9 @@ class EncodePlanningTests(unittest.TestCase):
 
         self.assertEqual(
             command,
-            ["/usr/local/bin/python", "-m", "worker.encode_runner"],
+            ["/usr/local/bin/python", "-m", "webui.app.encode_runner"],
         )
-        self.assertEqual(label, "python -m worker.encode_runner")
+        self.assertEqual(label, "python -m webui.app.encode_runner")
 
     def test_false_finished_failures_reconcile_only_after_output_validation(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -93,6 +93,36 @@ class EncodePlanningTests(unittest.TestCase):
         )
         self.assertEqual(recovered, 0)
         self.assertEqual(record["job"]["status"], "error")
+
+    def test_missing_controller_runner_is_requeued_once_when_source_remains(self):
+        records = {
+            "failed": {
+                "status": "error",
+                "phase": "encode_error",
+                "returncode": 1,
+                "src": "/media/Movie.mkv",
+                "out_path": "/media/Movie-TSD.mkv",
+                "error_message": (
+                    "Error while finding module specification for "
+                    "'worker.encode_runner' (ModuleNotFoundError: No module named 'worker')"
+                ),
+            }
+        }
+        existing = {"/media/Movie.mkv"}
+        first = jobs._requeue_transient_launcher_failures(
+            records,
+            file_exists=lambda path: path in existing,
+        )
+        second = jobs._requeue_transient_launcher_failures(
+            records,
+            file_exists=lambda path: path in existing,
+        )
+
+        self.assertEqual(first, ["failed"])
+        self.assertEqual(second, [])
+        self.assertEqual(records["failed"]["status"], "queued")
+        self.assertTrue(records["failed"]["launcher_recovery_attempted"])
+        self.assertIsNone(records["failed"]["returncode"])
 
     def test_output_container_plan_controls_muxer_fast_start_and_extension(self):
         default_plan = jobs._output_container_plan({})
@@ -623,12 +653,10 @@ class EncodePlanningTests(unittest.TestCase):
         self.assertIn('vainfo --display drm --device "$RENDER_DEVICE"', preflight)
         self.assertIn("child_device=$RENDER_DEVICE,child_device_type=vaapi", preflight)
 
-        # Both controller and remote-worker stages ship the same structured
-        # runner; encode-one.sh is retained only as a manual compatibility aid.
-        self.assertEqual(
-            dockerfile.count("COPY worker/__init__.py worker/encode_runner.py /app/worker/"),
-            1,
-        )
+        # Both controller and remote-worker stages receive the structured
+        # launcher through webui; encode-one.sh remains a compatibility aid.
+        self.assertIn("COPY webui /app/webui", dockerfile)
+        self.assertIn("COPY webui/app/encode_runner.py /app/webui/app/encode_runner.py", dockerfile)
         self.assertIn(
             "COPY worker/__init__.py worker/app.py worker/encode_runner.py /app/worker/",
             dockerfile,

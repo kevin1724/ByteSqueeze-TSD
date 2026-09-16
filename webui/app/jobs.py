@@ -70,7 +70,7 @@ def _encoder_launch_command() -> tuple[list[str], str]:
         # previous split implementation allowed a refreshed controller to run
         # beside an older encode-one.sh, so AUTO could plan .mp4 while the
         # stale shell script independently created/looked for .mkv.
-        return [sys.executable, "-m", "worker.encode_runner"], "python -m worker.encode_runner"
+        return [sys.executable, "-m", "webui.app.encode_runner"], "python -m webui.app.encode_runner"
     if getattr(sys, "frozen", False):
         return [sys.executable, "--encode-one"], "ByteSqueezeWorker.exe --encode-one"
     return [sys.executable, "-m", "worker.windows_app", "--encode-one"], "python -m worker.windows_app --encode-one"
@@ -1180,6 +1180,56 @@ def _reconcile_finished_output_contract_errors(
         print(f"[JOB {job_id}] {recovery_reason}: {output_path}", flush=True)
 
     return recovered
+
+
+def _requeue_transient_launcher_failures(
+    records: dict[str, dict] | None = None,
+    *,
+    file_exists=None,
+) -> list[str]:
+    """Queue one safe retry for the affected controller packaging failure."""
+    candidates = records if isinstance(records, dict) else jobs
+    exists = file_exists or os.path.isfile
+    requeued: list[str] = []
+    for job_id, job in candidates.items():
+        if not isinstance(job, dict) or job.get("status") != "error":
+            continue
+        if job.get("launcher_recovery_attempted"):
+            continue
+        error_text = "\n".join(
+            (str(job.get("error_message") or ""), str(job.get("log") or ""))
+        ).lower()
+        missing_runner = (
+            "module specification for 'worker.encode_runner'" in error_text
+            and "no module named 'worker'" in error_text
+        )
+        source_path = str(job.get("src") or "").strip()
+        output_path = str(job.get("out_path") or "").strip()
+        if not missing_runner or not source_path or not exists(source_path):
+            continue
+        if output_path and exists(output_path):
+            continue
+        job.update({
+            "status": "queued",
+            "phase": "queued",
+            "returncode": None,
+            "pid": None,
+            "progress": 0.0,
+            "eta_seconds": None,
+            "error_message": "",
+            "started_at": None,
+            "finished_at": None,
+            "duration_seconds": None,
+            "launcher_recovery_attempted": True,
+        })
+        job["log"] = (
+            str(job.get("log") or "").rstrip()
+            + "\n[ByteSqueeze] Controller launcher packaging was repaired; "
+            + "job queued once for automatic retry.\n"
+        )[-JOB_LOG_TAIL_CHARS:]
+        requeued.append(job_id)
+        print(f"[JOB {job_id}] requeued after controller launcher repair", flush=True)
+    return requeued
 
 
 def _estimated_output_stop_guard(job: dict) -> dict | None:
@@ -2568,6 +2618,7 @@ def save_jobs():
                 "completion_recovered": bool(j.get("completion_recovered", False)),
                 "completion_recovery_reason": j.get("completion_recovery_reason") or "",
                 "pre_recovery_returncode": j.get("pre_recovery_returncode"),
+                "launcher_recovery_attempted": bool(j.get("launcher_recovery_attempted", False)),
                 "is_hdr": bool(j.get("is_hdr", False) or _looks_like_hdr_path(j.get("src", ""))),
                 "created_at": j.get("created_at"),
                 "started_at": j.get("started_at"),
@@ -2744,6 +2795,7 @@ def load_jobs():
                 "completion_recovered": bool(j.get("completion_recovered", False)),
                 "completion_recovery_reason": j.get("completion_recovery_reason") or "",
                 "pre_recovery_returncode": j.get("pre_recovery_returncode"),
+                "launcher_recovery_attempted": bool(j.get("launcher_recovery_attempted", False)),
                 "is_hdr": bool(j.get("is_hdr", False) or _looks_like_hdr_path(j.get("src", ""))),
                 "created_at": j.get("created_at"),
                 "started_at": j.get("started_at"),
@@ -2767,7 +2819,12 @@ def load_jobs():
         # Repair the exact historical false-failure signatures caused by the
         # old split launcher. Recovered rows remain history and cannot be
         # dispatched again.
-        if _reconcile_finished_output_contract_errors():
+        recovered = _reconcile_finished_output_contract_errors()
+        requeued = _requeue_transient_launcher_failures()
+        for jid in requeued:
+            if jid not in job_queue:
+                job_queue.append(jid)
+        if recovered or requeued:
             save_jobs()
 
     except Exception as e:

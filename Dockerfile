@@ -268,6 +268,7 @@ COPY webui/app/events.py /app/webui/app/events.py
 COPY webui/app/storage_stats.py /app/webui/app/storage_stats.py
 COPY webui/app/audio_optimization.py /app/webui/app/audio_optimization.py
 COPY webui/app/node_linking.py /app/webui/app/node_linking.py
+COPY webui/app/encode_runner.py /app/webui/app/encode_runner.py
 COPY worker/__init__.py worker/app.py worker/encode_runner.py /app/worker/
 COPY worker/encode-one.sh /worker/encode-one.sh
 COPY presets /presets
@@ -282,10 +283,9 @@ CMD ["gunicorn", "--bind=0.0.0.0:8080", "--workers=1", "--threads=4", "--timeout
 # -------------------------------
 FROM runtime-base AS controller
 
-RUN mkdir -p /app/data /app/worker /presets /worker
+RUN mkdir -p /app/data /presets /worker
 
 COPY webui /app/webui
-COPY worker/__init__.py worker/encode_runner.py /app/worker/
 COPY worker/encode-one.sh /worker/encode-one.sh
 COPY presets /presets
 

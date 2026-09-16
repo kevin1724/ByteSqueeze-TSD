@@ -6,8 +6,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from worker import encode_runner
 from worker.windows_app import configure_environment, default_config, local_addresses, windows_firewall_script
+from webui.app import encode_runner
 from webui.app import node_linking
 from webui.app import jobs
 from webui.app import process_utils
