@@ -1,6 +1,7 @@
 import os
 import json
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -385,6 +386,83 @@ class HeadlessWorkerServiceTests(unittest.TestCase):
         with open(destination, "rb") as handle:
             self.assertEqual(handle.read(), b"test")
         self.assertTrue(any("attempt 2/2" in line.lower() for line in attempts))
+
+    def test_remote_source_download_cancellation_removes_partial_file(self):
+        cancel_event = threading.Event()
+
+        class FakeResponse:
+            headers = {"Content-Length": "8"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _size=-1):
+                if not getattr(self, "used", False):
+                    self.used = True
+                    cancel_event.set()
+                    return b"partial"
+                return b""
+
+        destination = os.path.join(self.tempdir.name, "download-cancel", "source.mkv")
+        with mock.patch.object(jobs, "urlopen", return_value=FakeResponse()):
+            with self.assertRaises(jobs.TransferDownloadCanceled):
+                jobs._download_transfer_source(
+                    "http://controller:8081/source",
+                    "download-token",
+                    "worker-id",
+                    destination,
+                    expected_size=8,
+                    cancel_event=cancel_event,
+                )
+
+        self.assertFalse(os.path.exists(destination))
+        self.assertFalse(os.path.exists(destination + ".part"))
+
+    def test_cancel_running_transfer_closes_response_and_marks_transfer_canceled(self):
+        class FakeResponse:
+            closed = False
+
+            def close(self):
+                self.closed = True
+
+        original_jobs = jobs.jobs
+        response = FakeResponse()
+        cancel_event = jobs._begin_transfer_download("transfer-job")
+        jobs._set_transfer_download_response("transfer-job", response)
+        jobs.jobs = {
+            "transfer-job": {
+                "status": "running",
+                "phase": "downloading",
+                "src": "/media/show.mkv",
+                "pid": None,
+                "started_at": 1.0,
+                "transfer": {
+                    "status": "downloading",
+                    "progress": {"phase": "downloading", "speed_bps": 1000},
+                },
+            }
+        }
+        try:
+            with (
+                mock.patch.object(jobs, "save_jobs"),
+                mock.patch.object(jobs, "_append_job_log"),
+                mock.patch.object(jobs, "log_event"),
+            ):
+                ok, error = jobs.cancel_job("transfer-job")
+
+            self.assertTrue(ok)
+            self.assertIsNone(error)
+            self.assertTrue(cancel_event.is_set())
+            self.assertTrue(response.closed)
+            self.assertEqual(jobs.jobs["transfer-job"]["status"], "canceled")
+            self.assertEqual(jobs.jobs["transfer-job"]["transfer"]["status"], "canceled")
+            self.assertTrue(jobs.jobs["transfer-job"]["cancel_transfer_interrupted"])
+        finally:
+            jobs._finish_transfer_download("transfer-job")
+            jobs.jobs = original_jobs
 
     def test_controller_encoding_policy_keeps_large_output_auto_stop(self):
         job = {

@@ -11,11 +11,42 @@ class NodePairingProtocolTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.original_node_file = node_linking.NODE_LINK_FILE
+        self.original_transfer_file = node_linking.NODE_TRANSFER_FILE
         node_linking.NODE_LINK_FILE = os.path.join(self.tempdir.name, "linked_nodes.json")
+        node_linking.NODE_TRANSFER_FILE = os.path.join(self.tempdir.name, "node_transfers.json")
 
     def tearDown(self):
         node_linking.NODE_LINK_FILE = self.original_node_file
+        node_linking.NODE_TRANSFER_FILE = self.original_transfer_file
         self.tempdir.cleanup()
+
+    def test_cancel_transfer_grant_revokes_download_and_upload_tokens(self):
+        grant = node_linking.create_transfer_grant(
+            "/media/show.mkv",
+            "worker-a",
+            source_size=123,
+        )
+        canceled = node_linking.cancel_transfer_grant(grant["id"], "worker-a")
+
+        self.assertEqual(canceled["status"], "canceled")
+        self.assertFalse(
+            node_linking.transfer_token_matches(
+                canceled,
+                "download",
+                grant["download_token"],
+                require_unused=False,
+            )
+        )
+        self.assertFalse(
+            node_linking.transfer_token_matches(
+                canceled,
+                "upload",
+                grant["upload_token"],
+                require_unused=False,
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "canceled"):
+            node_linking.renew_transfer_upload_grant(grant["id"], "worker-a")
 
     def test_lost_pair_response_can_be_retried_by_same_controller(self):
         pairing = node_linking.create_pairing_code()

@@ -156,6 +156,7 @@ from .audio_optimization import normalize_operations, scan_media, storage_breakd
 from .media_metadata import artwork_path as media_artwork_path, enrich_library as enrich_media_library
 from .node_linking import (
     accept_pairing,
+    cancel_transfer_grant,
     create_transfer_grant,
     create_pairing_code,
     delete_node,
@@ -7156,6 +7157,29 @@ def _linked_worker_jobs_for_api() -> list[dict]:
     return combined
 
 
+def _cancel_worker_transfer_grant(node: dict, worker_job_id: str) -> None:
+    """Expire the controller-side source grant for a canceled worker job."""
+    jobs_list = node.get("jobs") if isinstance(node.get("jobs"), list) else []
+    worker_job = next(
+        (
+            item for item in jobs_list
+            if isinstance(item, dict) and str(item.get("id") or "") == str(worker_job_id or "")
+        ),
+        None,
+    )
+    transfer = worker_job.get("transfer") if isinstance(worker_job, dict) and isinstance(worker_job.get("transfer"), dict) else {}
+    transfer_id = str(transfer.get("id") or transfer.get("transfer_id") or "").strip()
+    if not transfer_id:
+        return
+    try:
+        cancel_transfer_grant(transfer_id, str(node.get("id") or ""))
+    except ValueError:
+        # The worker-side response is authoritative for cancellation. A
+        # missing/finished ledger row should not turn a successful cancel into
+        # a UI error.
+        return
+
+
 def _combined_jobs_for_api() -> list[dict]:
     """Return local/controller history plus live and failed worker jobs."""
     items = list_job_history_for_api()
@@ -10150,6 +10174,8 @@ def register_routes(app):
             if isinstance(result.get("summary"), dict):
                 row["summary"] = result["summary"]
                 row["status"] = _node_summary_status(result["summary"])
+            if action == "cancel":
+                _cancel_worker_transfer_grant(row, worker_job_id)
             save_node(row)
             ok, error = True, None
         elif action == "cancel":

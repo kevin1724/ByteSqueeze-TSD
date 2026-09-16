@@ -110,6 +110,8 @@ JOBS_SAVE_LOCK = threading.RLock()
 DISPATCH_LOCK = threading.RLock()
 DISPATCH_WAKE_EVENT = threading.Event()
 RUNNING_JOB_THREADS: dict[str, threading.Thread] = {}
+ACTIVE_TRANSFER_DOWNLOADS_LOCK = threading.RLock()
+ACTIVE_TRANSFER_DOWNLOADS: dict[str, dict] = {}
 TRANSFER_WORK_DIR = os.path.join(DATA_DIR, "node_transfer_work")
 PRESET_WORK_DIR = os.path.join(DATA_DIR, "node_job_presets")
 OUTPUT_ESTIMATE_CHECKPOINTS = (2, 10, 25, 60, 90)
@@ -165,6 +167,67 @@ QSV_DECODE_FALLBACK_RE = re.compile(
     r'(?:No VA display found|failed to create hwdevice))',
     re.IGNORECASE,
 )
+
+
+class TransferDownloadCanceled(RuntimeError):
+    """Raised when a remote source transfer is intentionally canceled."""
+
+
+def _begin_transfer_download(job_id: str) -> threading.Event:
+    """Register a cancelable source download before opening its HTTP stream."""
+    cancel_event = threading.Event()
+    with ACTIVE_TRANSFER_DOWNLOADS_LOCK:
+        ACTIVE_TRANSFER_DOWNLOADS[str(job_id)] = {
+            "cancel_event": cancel_event,
+            "response": None,
+        }
+    return cancel_event
+
+
+def _set_transfer_download_response(job_id: str, response) -> None:
+    """Track the live response so cancel can interrupt a blocking read."""
+    should_close = False
+    with ACTIVE_TRANSFER_DOWNLOADS_LOCK:
+        active = ACTIVE_TRANSFER_DOWNLOADS.get(str(job_id))
+        if not active:
+            should_close = response is not None
+        else:
+            active["response"] = response
+            cancel_event = active.get("cancel_event")
+            should_close = bool(
+                response is not None
+                and isinstance(cancel_event, threading.Event)
+                and cancel_event.is_set()
+            )
+    if should_close:
+        try:
+            response.close()
+        except Exception:
+            pass
+
+
+def _finish_transfer_download(job_id: str) -> None:
+    with ACTIVE_TRANSFER_DOWNLOADS_LOCK:
+        ACTIVE_TRANSFER_DOWNLOADS.pop(str(job_id), None)
+
+
+def _cancel_transfer_download(job_id: str) -> bool:
+    """Signal and actively close an in-flight controller-to-worker stream."""
+    response = None
+    with ACTIVE_TRANSFER_DOWNLOADS_LOCK:
+        active = ACTIVE_TRANSFER_DOWNLOADS.get(str(job_id))
+        if not active:
+            return False
+        cancel_event = active.get("cancel_event")
+        if isinstance(cancel_event, threading.Event):
+            cancel_event.set()
+        response = active.get("response")
+    if response is not None:
+        try:
+            response.close()
+        except Exception:
+            pass
+    return True
 
 
 def _now_ts() -> float:
@@ -1269,6 +1332,8 @@ def _download_transfer_source(
     expected_size: int = 0,
     progress_callback=None,
     attempt_callback=None,
+    cancel_event: threading.Event | None = None,
+    response_callback=None,
 ) -> int:
     if not url or not token:
         raise RuntimeError("transfer download is missing URL or token")
@@ -1278,7 +1343,27 @@ def _download_transfer_source(
     timeout = _transfer_download_timeout()
     last_error = ""
 
+    def ensure_not_canceled() -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise TransferDownloadCanceled("source transfer canceled")
+
+    def wait_before_retry(delay: float) -> None:
+        if cancel_event is not None:
+            if cancel_event.wait(max(0.0, float(delay or 0.0))):
+                raise TransferDownloadCanceled("source transfer canceled")
+        else:
+            time.sleep(delay)
+
+    def remove_partial() -> None:
+        try:
+            os.remove(part_path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
     for attempt in range(1, attempts + 1):
+        ensure_not_canceled()
         req = Request(
             url,
             method="GET",
@@ -1293,43 +1378,54 @@ def _download_transfer_source(
                 f"(socket timeout {timeout}s)."
             )
         try:
-            with urlopen(req, timeout=timeout) as res, open(part_path, "wb") as f:
-                transferred = 0
-                header_size = 0
-                try:
-                    header_size = int(res.headers.get("Content-Length") or 0)
-                except Exception:
+            ensure_not_canceled()
+            response = urlopen(req, timeout=timeout)
+            if response_callback:
+                response_callback(response)
+            try:
+                with response as res, open(part_path, "wb") as f:
+                    transferred = 0
                     header_size = 0
-                total = int(expected_size or header_size or 0)
-                if progress_callback:
-                    progress_callback("downloading", 0, total, force=True)
-                while True:
-                    chunk = res.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    transferred += len(chunk)
+                    try:
+                        header_size = int(res.headers.get("Content-Length") or 0)
+                    except Exception:
+                        header_size = 0
+                    total = int(expected_size or header_size or 0)
                     if progress_callback:
-                        progress_callback("downloading", transferred, total)
+                        progress_callback("downloading", 0, total, force=True)
+                    while True:
+                        ensure_not_canceled()
+                        chunk = res.read(1024 * 1024)
+                        ensure_not_canceled()
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        transferred += len(chunk)
+                        if progress_callback:
+                            progress_callback("downloading", transferred, total)
+            finally:
+                if response_callback:
+                    response_callback(None)
+            ensure_not_canceled()
             downloaded_size = int(os.path.getsize(part_path))
             if expected_size and downloaded_size != int(expected_size):
                 last_error = (
                     "downloaded source size mismatch "
                     f"({downloaded_size} != {expected_size})"
                 )
-                try:
-                    os.remove(part_path)
-                except FileNotFoundError:
-                    pass
+                remove_partial()
                 if attempt >= attempts:
                     raise RuntimeError(
                         f"source download failed after {attempts} attempts: {last_error}"
                     )
                 if attempt_callback:
                     attempt_callback(f"Download interrupted: {last_error}. Retrying...")
-                time.sleep(min(5, attempt))
+                wait_before_retry(min(5, attempt))
                 continue
             break
+        except TransferDownloadCanceled:
+            remove_partial()
+            raise
         except HTTPError as exc:
             try:
                 detail = exc.read().decode("utf-8", errors="replace")
@@ -1341,19 +1437,30 @@ def _download_transfer_source(
             if int(getattr(exc, "code", 500) or 500) < 500:
                 raise RuntimeError(last_error)
         except (URLError, TimeoutError, OSError) as exc:
+            if cancel_event is not None and cancel_event.is_set():
+                remove_partial()
+                raise TransferDownloadCanceled("source transfer canceled") from exc
             last_error = str(getattr(exc, "reason", exc) or exc)
+        except Exception as exc:
+            if cancel_event is not None and cancel_event.is_set():
+                remove_partial()
+                raise TransferDownloadCanceled("source transfer canceled") from exc
+            raise
 
+        ensure_not_canceled()
         if attempt >= attempts:
             raise RuntimeError(
                 f"source download failed after {attempts} attempts: {last_error}"
             )
         if attempt_callback:
             attempt_callback(f"Download interrupted: {last_error}. Retrying...")
-        time.sleep(min(5, attempt))
+        wait_before_retry(min(5, attempt))
 
+    ensure_not_canceled()
     size = int(os.path.getsize(part_path))
     if progress_callback:
         progress_callback("downloaded", size, int(expected_size or size), force=True)
+    ensure_not_canceled()
     os.replace(part_path, destination)
     return size
 
@@ -4297,6 +4404,7 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
         print(f"[JOB {job_id}] {message}", flush=True)
 
     if remote_transfer:
+        transfer_cancel_event = _begin_transfer_download(job_id)
         try:
             transfer_work_dir = os.path.join(_remote_transfer_temp_root(transfer), job_id)
             basename = _safe_transfer_filename(transfer.get("source_basename") or os.path.basename(display_src_path))
@@ -4316,7 +4424,11 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
                 int(transfer.get("source_size") or 0),
                 progress_callback=update_transfer_progress,
                 attempt_callback=log_download_attempt,
+                cancel_event=transfer_cancel_event,
+                response_callback=lambda response: _set_transfer_download_response(job_id, response),
             )
+            if job.get("status") == "canceled":
+                raise TransferDownloadCanceled("source transfer canceled")
             job["src_bytes"] = downloaded_size
             _append_job_log(
                 job_id,
@@ -4326,6 +4438,33 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
             update_transfer_progress("downloaded", downloaded_size, int(transfer.get("source_size") or downloaded_size), force=True)
             job["transfer"] = transfer
             save_jobs()
+        except TransferDownloadCanceled:
+            job["status"] = "canceled"
+            job["phase"] = "canceled"
+            job["returncode"] = None
+            job["eta_seconds"] = None
+            job["finished_at"] = job.get("finished_at") or _now_ts()
+            transfer["status"] = "canceled"
+            transfer["error"] = ""
+            progress = transfer.get("progress") if isinstance(transfer.get("progress"), dict) else {}
+            transfer["progress"] = {
+                **progress,
+                "phase": "canceled",
+                "speed_bps": 0,
+                "speed_label": "",
+                "eta_seconds": None,
+                "updated_at": _now_ts(),
+            }
+            _append_job_log(
+                job_id,
+                "[ByteSqueeze] Source transfer canceled; controller stream closed and partial download removed.",
+            )
+            for key in ("download_token", "upload_token", "local_src", "work_dir"):
+                transfer.pop(key, None)
+            job["transfer"] = transfer
+            _cleanup_transfer_work_dir(transfer_work_dir, transfer)
+            save_jobs()
+            return
         except Exception as e:
             job["status"] = "error"
             job["phase"] = "download_error"
@@ -4354,6 +4493,14 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
             _cleanup_transfer_work_dir(transfer_work_dir, transfer)
             save_jobs()
             return
+        finally:
+            _finish_transfer_download(job_id)
+
+    if job.get("status") == "canceled":
+        if remote_transfer:
+            _cleanup_transfer_work_dir(transfer_work_dir, transfer)
+        save_jobs()
+        return
 
     # Capture source size before the success path deletes the original.
     try:
@@ -4399,6 +4546,12 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
             "pid": None,
         })
         _append_job_log(job_id, f"[ByteSqueeze] ERROR: {job['error_message']}")
+        if remote_transfer:
+            _cleanup_transfer_work_dir(transfer_work_dir, transfer)
+        save_jobs()
+        return
+
+    if job.get("status") == "canceled":
         if remote_transfer:
             _cleanup_transfer_work_dir(transfer_work_dir, transfer)
         save_jobs()
@@ -4739,6 +4892,17 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
             f"[ByteSqueeze] HandBrakeCLI: {shutil.which('HandBrakeCLI') or 'NOT FOUND'}"
         ),
     )
+    # Cancellation can arrive during audio inventory, preset preparation, or
+    # hardware preflight while there is not yet a process PID to terminate.
+    # Re-check immediately before launch so a canceled job never starts an
+    # encoder after the UI has acknowledged the cancellation.
+    if job.get("status") == "canceled":
+        if remote_transfer:
+            _cleanup_transfer_work_dir(transfer_work_dir, transfer)
+        _cleanup_job_preset_dir(preset_work_dir)
+        save_jobs()
+        return
+
     proc = subprocess.Popen(
         launch_command,
         stdout=subprocess.PIPE,
@@ -5437,6 +5601,13 @@ def cancel_job(job_id: str) -> tuple[bool, str | None]:
         job["progress"] = 0.0
         job["eta_seconds"] = None
         job["finished_at"] = _now_ts()
+        transfer = job.get("transfer") if isinstance(job.get("transfer"), dict) else None
+        if transfer is not None:
+            transfer["status"] = "canceled"
+            transfer["error"] = ""
+            for key in ("download_token", "upload_token"):
+                transfer.pop(key, None)
+            job["transfer"] = transfer
         if job.get("started_at") is not None:
             try:
                 job["duration_seconds"] = max(0.0, float(job["finished_at"]) - float(job["started_at"]))
@@ -5456,6 +5627,7 @@ def cancel_job(job_id: str) -> tuple[bool, str | None]:
     # Mark canceled before terminating so the runner cannot race the kill and
     # convert an intentional cancellation into an encode error.
     pid = job.get("pid")
+    transfer_interrupted = _cancel_transfer_download(job_id)
     job["status"] = "canceled"
     job["phase"] = "canceling_process_tree" if pid else "canceled"
     job["returncode"] = None
@@ -5470,12 +5642,31 @@ def cancel_job(job_id: str) -> tuple[bool, str | None]:
     save_jobs()
 
     terminated = True
-    termination_detail = "no active encoder pid"
+    termination_detail = (
+        "source transfer interrupted"
+        if transfer_interrupted
+        else "no active encoder pid"
+    )
     if pid:
         terminated, termination_detail = terminate_process_tree(pid, force=True)
     job["phase"] = "canceled" if terminated else "cancel_cleanup_failed"
     job["cancel_process_tree_terminated"] = bool(terminated)
     job["cancel_process_detail"] = str(termination_detail or "")[:500]
+    job["cancel_transfer_interrupted"] = bool(transfer_interrupted)
+    transfer = job.get("transfer") if isinstance(job.get("transfer"), dict) else None
+    if transfer is not None:
+        transfer["status"] = "canceled"
+        transfer["error"] = ""
+        progress = transfer.get("progress") if isinstance(transfer.get("progress"), dict) else {}
+        transfer["progress"] = {
+            **progress,
+            "phase": "canceled",
+            "speed_bps": 0,
+            "speed_label": "",
+            "eta_seconds": None,
+            "updated_at": _now_ts(),
+        }
+        job["transfer"] = transfer
     _append_job_log(
         job_id,
         (

@@ -1802,6 +1802,33 @@ def save_transfer(row: dict) -> dict:
         return merged
 
 
+def cancel_transfer_grant(transfer_id: str, worker_node_id: str = "") -> dict:
+    """Invalidate both transfer tokens so a canceled job cannot resume I/O."""
+    with TRANSFER_LOCK:
+        data = _load_transfers()
+        transfers = data.setdefault("transfers", {})
+        row = transfers.get(str(transfer_id or ""))
+        if not isinstance(row, dict):
+            raise ValueError("transfer not found")
+        expected_worker = str(row.get("worker_node_id") or "")
+        if worker_node_id and expected_worker != str(worker_node_id):
+            raise ValueError("transfer belongs to a different worker")
+        if row.get("completed_at") or str(row.get("status") or "").lower() == "complete":
+            return deepcopy(row)
+        now = _now()
+        row.update({
+            "status": "canceled",
+            "canceled_at": now,
+            "expires_at": now,
+            "download_token_hash": "",
+            "upload_token_hash": "",
+            "error": "",
+        })
+        transfers[str(transfer_id)] = row
+        _save_transfers(data)
+        return deepcopy(row)
+
+
 def renew_transfer_upload_grant(transfer_id: str, worker_node_id: str, *, ttl_seconds: int = TRANSFER_TTL_SECONDS) -> dict:
     with TRANSFER_LOCK:
         data = _load_transfers()
@@ -1811,6 +1838,8 @@ def renew_transfer_upload_grant(transfer_id: str, worker_node_id: str, *, ttl_se
             raise ValueError("transfer not found")
         if str(row.get("worker_node_id") or "") != str(worker_node_id or ""):
             raise ValueError("transfer belongs to a different worker")
+        if str(row.get("status") or "").strip().lower() in {"canceled", "cancelled"}:
+            raise ValueError("transfer was canceled")
         if row.get("completed_at") or row.get("status") == "complete":
             return {
                 "id": row.get("id"),
@@ -1840,6 +1869,8 @@ def transfer_token_matches(row: dict, kind: str, token: str, *, require_unused: 
     row = row if isinstance(row, dict) else {}
     kind = str(kind or "").strip().lower()
     if kind not in {"download", "upload"}:
+        return False
+    if str(row.get("status") or "").strip().lower() in {"canceled", "cancelled"}:
         return False
     if float(row.get("expires_at") or 0) < _now():
         return False
