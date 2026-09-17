@@ -102,6 +102,7 @@ from .jobs import (
     _queued_preset_display_name,
     _encoded_output_is_valid,
     _format_handbrake_fps,
+    _sample_file_fingerprint,
 )
 
 from .presets import (
@@ -3697,6 +3698,8 @@ BETA_TRACKED_SHOWS_FILE = os.path.join(DATA_DIR, "beta_tracked_shows.json")
 BETA_SCAN_INDEX_FILE = os.path.join(DATA_DIR, "beta_scan_index.json")
 BETA_AUTOSCAN_STATUS_FILE = os.path.join(DATA_DIR, "beta_autoscan_status.json")
 NODE_TRANSFER_TMP_DIR = os.path.join(DATA_DIR, "node_transfer_uploads")
+NODE_TRANSFER_UPLOAD_LOCKS_GUARD = threading.RLock()
+NODE_TRANSFER_UPLOAD_LOCKS: dict[str, threading.RLock] = {}
 BETA_POSTER_CACHE: dict[tuple, dict] = {}
 BETA_LIBRARY_CACHE_LOCK = threading.RLock()
 BETA_TRACKING_LOCK = threading.RLock()
@@ -8918,6 +8921,153 @@ def _resolved_transfer_output_container(requested: str | None, reported: str | N
     return selected if selected in {"mp4", "mkv"} else "mkv"
 
 
+def _node_transfer_upload_lock(transfer_id: str) -> threading.RLock:
+    with NODE_TRANSFER_UPLOAD_LOCKS_GUARD:
+        return NODE_TRANSFER_UPLOAD_LOCKS.setdefault(str(transfer_id), threading.RLock())
+
+
+def _completed_transfer_result(row: dict) -> dict:
+    return {
+        "complete": True,
+        "out_path": row.get("out_path") or "",
+        "output_container": row.get("output_container_selected") or "",
+        "out_bytes": int(row.get("out_bytes") or 0),
+        "saved_bytes": int(row.get("saved_bytes") or 0),
+        "source_deleted": bool(row.get("source_deleted")),
+        "warning": row.get("warning") or "",
+        "output_inventory": row.get("output_inventory") if isinstance(row.get("output_inventory"), dict) else {},
+        "storage_breakdown": row.get("storage_breakdown") if isinstance(row.get("storage_breakdown"), dict) else {},
+    }
+
+
+def _recover_existing_transfer_output(row: dict, retry: dict) -> dict | None:
+    """Recover a successful install whose HTTP response was lost.
+
+    Recovery is deliberately strict: the worker reports the exact byte count
+    and a sampled SHA-256 identity for its retained output. The controller
+    only adopts an existing destination when both match and media validation
+    succeeds.
+    """
+    row = row if isinstance(row, dict) else {}
+    retry = retry if isinstance(retry, dict) else {}
+    job_type = str(row.get("job_type") or "video_preserve_audio").strip().lower()
+    if job_type == "audio_only":
+        return None
+    try:
+        expected_bytes = int(retry.get("out_bytes") or row.get("upload_received_bytes") or 0)
+    except (TypeError, ValueError):
+        expected_bytes = 0
+    expected_fingerprint = str(
+        retry.get("output_fingerprint") or row.get("upload_fingerprint") or ""
+    ).strip().lower()
+    trusted_worker_snapshot = bool(retry.get("trusted_worker_snapshot"))
+    has_fingerprint = bool(re.fullmatch(r"[0-9a-f]{64}", expected_fingerprint))
+    if expected_bytes <= 0 or (not has_fingerprint and not trusted_worker_snapshot):
+        return None
+
+    src = str(row.get("src") or "")
+    reported_container = retry.get("output_container") or row.get("upload_reported_container")
+    selected_container = _resolved_transfer_output_container(row.get("output_container"), reported_container)
+    container_candidates = [selected_container]
+    if normalize_output_container(row.get("output_container")) == "auto" and not reported_container:
+        container_candidates = ["mkv", "mp4"]
+    out_path = ""
+    for candidate in container_candidates:
+        candidate_path = _transfer_output_path_for_src(src, candidate)
+        if os.path.isfile(candidate_path) and int(os.path.getsize(candidate_path)) == expected_bytes:
+            selected_container = candidate
+            out_path = candidate_path
+            break
+    if not out_path:
+        return None
+    if has_fingerprint and _sample_file_fingerprint(out_path) != expected_fingerprint:
+        return None
+    if not has_fingerprint:
+        # Older workers did not send a fingerprint. Their signed heartbeat
+        # still reports the exact completed byte count; also require the file
+        # to have been created during this transfer before adopting it.
+        created_at = float(row.get("created_at") or 0)
+        if created_at > 0 and float(os.path.getmtime(out_path)) + 300 < created_at:
+            return None
+    output_ok, output_reason = _encoded_output_is_valid(out_path)
+    if not output_ok:
+        raise RuntimeError(f"existing returned output failed validation: {output_reason}")
+
+    input_inventory = row.get("input_inventory") if isinstance(row.get("input_inventory"), dict) else {}
+    output_inventory = scan_media(out_path, exact=True, force=True)
+    src_bytes = int(row.get("source_size") or 0)
+    saved_bytes = max(0, src_bytes - expected_bytes)
+    actual_breakdown = storage_breakdown(
+        input_inventory,
+        output_inventory,
+        src_bytes,
+        expected_bytes,
+    )
+    worker_job_id = str(retry.get("job_id") or "").strip()
+    worker_node_id = str(row.get("worker_node_id") or "")
+    worker_node = get_node_private(worker_node_id) or {}
+    encode_metadata = row.get("encode_metadata") if isinstance(row.get("encode_metadata"), dict) else {}
+    try:
+        duration_seconds = float(retry.get("duration_seconds") or 0.0)
+    except (TypeError, ValueError):
+        duration_seconds = 0.0
+    record_encode(
+        job_id=f"remote-{worker_job_id or row.get('id')}",
+        src=src,
+        out=out_path,
+        preset=str(row.get("preset") or "auto"),
+        src_bytes=src_bytes,
+        out_bytes=expected_bytes,
+        duration_seconds=duration_seconds if duration_seconds > 0 else None,
+        is_hdr=bool(_path_looks_hdr(src)),
+        node_id=worker_node_id,
+        node_name=worker_node.get("name"),
+        encode_method=encode_metadata.get("encode_method"),
+        encoder=encode_metadata.get("encoder"),
+        video_codec=encode_metadata.get("video_codec"),
+        encoder_family=encode_metadata.get("encoder_family"),
+        bit_depth=encode_metadata.get("bit_depth"),
+        job_type=job_type,
+        operations=row.get("operations") if isinstance(row.get("operations"), dict) else {},
+        parent_job_id=str(row.get("parent_job_id") or ""),
+        input_inventory=input_inventory,
+        output_inventory=output_inventory,
+        storage_breakdown=actual_breakdown,
+    )
+
+    source_deleted = bool(row.get("source_deleted"))
+    warning = "Recovered a completed worker return after its acknowledgement was lost."
+    if os.path.isfile(src):
+        try:
+            os.remove(src)
+            source_deleted = True
+        except OSError as exc:
+            warning += f" Original cleanup still needs attention: {exc}"
+    row.update({
+        "status": "complete",
+        "completed_at": time.time(),
+        "error": "",
+        "out_path": out_path,
+        "output_container_selected": selected_container,
+        "out_bytes": expected_bytes,
+        "saved_bytes": saved_bytes,
+        "source_deleted": source_deleted,
+        "warning": warning,
+        "output_inventory": output_inventory,
+        "storage_breakdown": actual_breakdown,
+        "recovered_after_lost_response": True,
+    })
+    save_transfer(row)
+    log_event(
+        "node_transfer_recovered",
+        f"Recovered completed worker upload: {os.path.basename(src)}",
+        level="warn",
+        src=src,
+        extra={"transfer_id": row.get("id"), "out_path": out_path},
+    )
+    return _completed_transfer_result(row)
+
+
 def _authorize_transfer_request(transfer_id: str, kind: str) -> tuple[dict | None, str | None]:
     row = get_transfer(transfer_id)
     if not row:
@@ -10973,53 +11123,115 @@ def register_routes(app):
             return jsonify(error=err or "unauthorized"), 401
 
         transfer_dir = os.path.join(NODE_TRANSFER_TMP_DIR, transfer_id)
-        upload_tmp = os.path.join(transfer_dir, "output.upload")
+        request_id = uuid.uuid4().hex
+        upload_tmp = os.path.join(transfer_dir, f"output-{request_id}.upload")
         upload_part = upload_tmp + ".part"
-        try:
-            row["upload_used_at"] = time.time()
-            row["status"] = "uploading"
-            save_transfer(row)
-            size = _stream_upload_to_file(upload_part)
-            if size <= 0:
-                raise RuntimeError("uploaded output is empty")
-            os.replace(upload_part, upload_tmp)
-            result = _finalize_transfer_output(row, upload_tmp)
-            return jsonify(ok=True, **result)
-        except Exception as e:
-            row["status"] = "error"
-            row["error"] = str(e)[:240]
-            save_transfer(row)
-            log_event(
-                "node_transfer_error",
-                f"Remote transfer output rejected: {str(e)[:160]}",
-                level="error",
-                src=row.get("src"),
-                extra={"transfer_id": transfer_id},
-            )
-            return jsonify(error=str(e)), 400
-        finally:
-            for path in (upload_part, upload_tmp):
+        with _node_transfer_upload_lock(transfer_id):
+            try:
+                latest = get_transfer(transfer_id)
+                if isinstance(latest, dict):
+                    row = latest
+                if row.get("completed_at") or str(row.get("status") or "").lower() == "complete":
+                    return jsonify(ok=True, **_completed_transfer_result(row))
+                started_at = time.time()
+                row.update({
+                    "upload_used_at": started_at,
+                    "upload_started_at": started_at,
+                    "upload_expected_bytes": int(request.content_length or 0),
+                    "status": "uploading",
+                    "error": "",
+                })
+                save_transfer(row)
+                size = _stream_upload_to_file(upload_part)
+                if size <= 0:
+                    raise RuntimeError("uploaded output is empty")
+                os.replace(upload_part, upload_tmp)
+                row.update({
+                    "status": "validating",
+                    "upload_received_bytes": size,
+                    "upload_fingerprint": _sample_file_fingerprint(upload_tmp),
+                    "upload_reported_container": str(
+                        request.headers.get("X-Output-Container") or ""
+                    ).strip().lower(),
+                })
+                save_transfer(row)
+                result = _finalize_transfer_output(row, upload_tmp)
+                return jsonify(ok=True, **result)
+            except Exception as e:
+                # A previous request can finish after this request was already
+                # authorized. Never overwrite its durable success with a stale
+                # retry error.
+                latest = get_transfer(transfer_id)
+                if isinstance(latest, dict) and (
+                    latest.get("completed_at")
+                    or str(latest.get("status") or "").lower() == "complete"
+                ):
+                    return jsonify(ok=True, **_completed_transfer_result(latest))
+                row["status"] = "error"
+                row["error"] = str(e)[:240]
+                save_transfer(row)
+                log_event(
+                    "node_transfer_error",
+                    f"Remote transfer output rejected: {str(e)[:160]}",
+                    level="error",
+                    src=row.get("src"),
+                    extra={"transfer_id": transfer_id},
+                )
+                return jsonify(error=str(e)), 400
+            finally:
+                for path in (upload_part, upload_tmp):
+                    try:
+                        if os.path.isfile(path):
+                            os.remove(path)
+                    except Exception:
+                        pass
                 try:
-                    if os.path.isfile(path):
-                        os.remove(path)
+                    if os.path.isdir(transfer_dir) and not os.listdir(transfer_dir):
+                        os.rmdir(transfer_dir)
                 except Exception:
                     pass
-            try:
-                if os.path.isdir(transfer_dir) and not os.listdir(transfer_dir):
-                    os.rmdir(transfer_dir)
-            except Exception:
-                pass
 
     @app.route("/api/node/transfers/<transfer_id>/renew-upload", methods=["POST"])
     def node_transfer_renew_upload_api(transfer_id):
         worker = _authenticated_worker()
         if not worker:
             return jsonify(error="unauthorized worker"), 401
-        try:
-            grant = renew_transfer_upload_grant(transfer_id, str(worker.get("id") or ""))
-        except ValueError as e:
-            return jsonify(error=str(e)), 404
+        retry = request.get_json(silent=True) or {}
+        with _node_transfer_upload_lock(transfer_id):
+            row = get_transfer(transfer_id)
+            if not row:
+                return jsonify(error="transfer not found"), 404
+            if str(row.get("worker_node_id") or "") != str(worker.get("id") or ""):
+                return jsonify(error="transfer belongs to a different worker"), 403
+            if row.get("completed_at") or str(row.get("status") or "").lower() == "complete":
+                return jsonify(ok=True, **_completed_transfer_result(row))
+            if not retry.get("out_bytes") and retry.get("job_id"):
+                worker_jobs = worker.get("jobs") if isinstance(worker.get("jobs"), list) else []
+                worker_job = next(
+                    (
+                        item for item in worker_jobs
+                        if isinstance(item, dict)
+                        and str(item.get("id") or "") == str(retry.get("job_id") or "")
+                    ),
+                    None,
+                )
+                if worker_job and int(worker_job.get("out_bytes") or 0) > 0:
+                    retry = dict(retry)
+                    retry["out_bytes"] = int(worker_job.get("out_bytes") or 0)
+                    retry["output_container"] = str(worker_job.get("output_container") or "")
+                    retry["trusted_worker_snapshot"] = True
+            try:
+                recovered = _recover_existing_transfer_output(row, retry)
+                if recovered:
+                    return jsonify(ok=True, **recovered)
+                grant = renew_transfer_upload_grant(transfer_id, str(worker.get("id") or ""))
+            except ValueError as e:
+                return jsonify(error=str(e)), 404
+            except RuntimeError as e:
+                return jsonify(error=str(e)), 409
         if grant.get("complete"):
+            return jsonify(ok=True, **grant)
+        if grant.get("in_progress"):
             return jsonify(ok=True, **grant)
         controller_url = _controller_base_url(str(grant.get("controller_url") or ""), str(worker.get("url") or ""))
         return jsonify(

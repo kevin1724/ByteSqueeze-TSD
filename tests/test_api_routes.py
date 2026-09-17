@@ -1503,6 +1503,101 @@ class ApiRouteSmokeTests(unittest.TestCase):
                 if os.path.isfile(path):
                     os.remove(path)
 
+    def test_lost_upload_response_recovers_matching_installed_output(self):
+        source = os.path.join(TEST_MEDIA, "Lost.Response.Source.mkv")
+        output = app_routes._transfer_output_path_for_src(source, "mkv")
+        with open(source, "wb") as stream:
+            stream.write(b"original-source")
+        with open(output, "wb") as stream:
+            stream.write(b"completed-worker-output")
+        row = {
+            "id": "lost-response-transfer",
+            "src": source,
+            "created_at": os.path.getmtime(output) - 1,
+            "source_size": 1000,
+            "worker_node_id": "worker-lost-response",
+            "preset": "smart",
+            "operations": {"job_type": "video_preserve_audio"},
+            "job_type": "video_preserve_audio",
+            "input_inventory": {"video_streams": [{"codec": "hevc"}], "audio_streams": []},
+            "output_container": "auto",
+            "encode_metadata": {"encoder": "qsv_h265_10bit", "encoder_family": "qsv"},
+        }
+        retry = {
+            "job_id": "worker-job-lost-response",
+            "out_bytes": os.path.getsize(output),
+            "output_container": "",
+            "trusted_worker_snapshot": True,
+        }
+        inventory = {"video_streams": [{"codec": "hevc"}], "audio_streams": []}
+        try:
+            with (
+                patch.object(app_routes, "scan_media", return_value=inventory),
+                patch.object(app_routes, "_encoded_output_is_valid", return_value=(True, "ok")),
+                patch.object(app_routes, "storage_breakdown", return_value={"total_saved_bytes": 977}),
+                patch.object(app_routes, "record_encode") as record,
+                patch.object(app_routes, "save_transfer") as save,
+                patch.object(app_routes, "get_node_private", return_value={"name": "Worker"}),
+                patch.object(app_routes, "log_event"),
+            ):
+                result = app_routes._recover_existing_transfer_output(row, retry)
+
+            self.assertIsNotNone(result)
+            self.assertTrue(result["complete"])
+            self.assertEqual(row["status"], "complete")
+            self.assertTrue(row["recovered_after_lost_response"])
+            self.assertTrue(row["source_deleted"])
+            self.assertFalse(os.path.exists(source))
+            self.assertTrue(os.path.isfile(output))
+            record.assert_called_once()
+            save.assert_called_once()
+        finally:
+            for path in (source, output):
+                if os.path.isfile(path):
+                    os.remove(path)
+
+    def test_storage_history_does_not_double_count_same_transfer_job(self):
+        stats_path = os.path.join(TEST_DATA, "idempotent-storage-stats.json")
+        original = (
+            app_storage_stats.STATS_FILE,
+            app_storage_stats._stats_cache,
+            app_storage_stats._stats_signature,
+            app_storage_stats._summary_cache,
+            app_storage_stats._analytics_cache,
+        )
+        try:
+            app_storage_stats.STATS_FILE = stats_path
+            app_storage_stats._stats_cache = None
+            app_storage_stats._stats_signature = None
+            app_storage_stats._summary_cache = None
+            app_storage_stats._analytics_cache = {}
+            payload = {
+                "job_id": "remote-same-worker-job",
+                "src": "/media/source.mkv",
+                "out": "/media/source-TSD.mkv",
+                "preset": "smart",
+                "src_bytes": 1000,
+                "out_bytes": 400,
+            }
+            app_storage_stats.record_encode(**payload)
+            app_storage_stats.record_encode(**payload)
+
+            with open(stats_path, "r", encoding="utf-8") as stream:
+                saved = json.load(stream)
+            self.assertEqual(len(saved["encodes"]), 1)
+            self.assertEqual(saved["totals"]["count"], 1)
+            self.assertEqual(saved["totals"]["saved_bytes"], 600)
+        finally:
+            (
+                app_storage_stats.STATS_FILE,
+                app_storage_stats._stats_cache,
+                app_storage_stats._stats_signature,
+                app_storage_stats._summary_cache,
+                app_storage_stats._analytics_cache,
+            ) = original
+            if os.path.isfile(stats_path):
+                os.remove(stats_path)
+
     def test_audio_only_transfer_still_requires_current_source(self):
         source = os.path.join(TEST_MEDIA, "Missing.Audio.Source.mkv")
         with self.app.test_request_context():

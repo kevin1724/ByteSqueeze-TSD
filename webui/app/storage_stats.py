@@ -210,6 +210,15 @@ def record_encode(
     with STATS_LOCK:
         data = _load_unlocked()
         encodes = _ensure_list(data.get("encodes"))
+        # Transfer retries may repeat a successful completion request after a
+        # response is lost. A job identity is durable, so never count the same
+        # encode twice in lifetime totals.
+        existing = next(
+            (item for item in encodes if str(item.get("job_id") or "") == str(job_id)),
+            None,
+        )
+        if isinstance(existing, dict):
+            return dict(existing)
         encodes.insert(0, row)  # newest-first
         if len(encodes) > MAX_ROWS:
             encodes = encodes[:MAX_ROWS]

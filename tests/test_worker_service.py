@@ -387,6 +387,37 @@ class HeadlessWorkerServiceTests(unittest.TestCase):
             self.assertEqual(handle.read(), b"test")
         self.assertTrue(any("attempt 2/2" in line.lower() for line in attempts))
 
+    def test_upload_renewal_reports_retained_output_identity(self):
+        output = os.path.join(self.tempdir.name, "retained-output.mkv")
+        with open(output, "wb") as stream:
+            stream.write(b"completed-output")
+        transfer = {
+            "id": "transfer-id",
+            "controller_id": "controller-id",
+            "controller_url": "http://controller:8081",
+        }
+        with (
+            mock.patch.object(node_linking, "trusted_controller", return_value={"id": "controller-id"}),
+            mock.patch.object(
+                node_linking,
+                "signed_json_request",
+                return_value={"ok": True, "complete": True, "out_path": "/media/output.mkv"},
+            ) as request_json,
+        ):
+            result = jobs._renew_transfer_upload_grant(
+                "worker-job",
+                transfer,
+                out_path=output,
+                output_container="mkv",
+            )
+
+        self.assertTrue(result["complete"])
+        body = request_json.call_args.kwargs["body"]
+        self.assertEqual(body["out_bytes"], len(b"completed-output"))
+        self.assertEqual(body["output_container"], "mkv")
+        self.assertRegex(body["output_fingerprint"], r"^[0-9a-f]{64}$")
+        self.assertEqual(request_json.call_args.kwargs["timeout"], 1800)
+
     def test_remote_source_download_cancellation_removes_partial_file(self):
         cancel_event = threading.Event()
 

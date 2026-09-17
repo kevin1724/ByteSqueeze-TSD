@@ -1850,8 +1850,22 @@ def renew_transfer_upload_grant(transfer_id: str, worker_node_id: str, *, ttl_se
                 "source_deleted": bool(row.get("source_deleted")),
             }
 
-        token = secrets.token_urlsafe(32)
         now = _now()
+        upload_started_at = float(row.get("upload_started_at") or row.get("upload_used_at") or 0)
+        if (
+            str(row.get("status") or "").strip().lower() in {"uploading", "validating"}
+            and upload_started_at > 0
+            and now - upload_started_at < 2 * 60 * 60
+        ):
+            return {
+                "id": row.get("id"),
+                "complete": False,
+                "in_progress": True,
+                "retry_after": 30,
+                "status": row.get("status"),
+            }
+
+        token = secrets.token_urlsafe(32)
         row.update({
             "upload_token_hash": _hash_secret(token),
             "upload_used_at": 0,

@@ -31,6 +31,7 @@ import http.client
 import shutil
 import sys
 import traceback
+import hashlib
 from copy import deepcopy
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -253,6 +254,37 @@ def _transfer_download_timeout() -> int:
 
 def _transfer_download_attempts() -> int:
     return _bounded_env_int("TSD_WORKER_TRANSFER_ATTEMPTS", 3, 1, 8)
+
+
+def _transfer_upload_timeout() -> int:
+    # The controller validates and inventories the completed file before it
+    # replies. Large remuxes can legitimately take several minutes, so the
+    # old 60-second socket timeout caused a successful install to look failed.
+    return _bounded_env_int(
+        "TSD_WORKER_UPLOAD_TIMEOUT_SECONDS",
+        1800,
+        120,
+        7200,
+    )
+
+
+def _sample_file_fingerprint(path: str, chunk_size: int = 1024 * 1024) -> str:
+    """Return a fast identity using size plus samples from across the file."""
+    size = int(os.path.getsize(path))
+    digest = hashlib.sha256()
+    digest.update(str(size).encode("ascii"))
+    read_size = max(64 * 1024, int(chunk_size or 0))
+    positions = {
+        0,
+        max(0, (size - read_size) // 2),
+        max(0, size - read_size),
+    }
+    with open(path, "rb") as stream:
+        for position in sorted(positions):
+            stream.seek(position)
+            digest.update(str(position).encode("ascii"))
+            digest.update(stream.read(read_size))
+    return digest.hexdigest()
 
 
 def _job_log_path(job_id: str) -> str:
@@ -1476,7 +1508,7 @@ def _upload_transfer_output(url: str, token: str, worker_node_id: str, out_path:
     target = parsed.path or "/"
     if parsed.query:
         target += "?" + parsed.query
-    conn = conn_cls(parsed.netloc, timeout=60)
+    conn = conn_cls(parsed.netloc, timeout=_transfer_upload_timeout())
     try:
         conn.putrequest("POST", target)
         conn.putheader("Content-Type", "application/octet-stream")
@@ -1567,7 +1599,13 @@ def _transfer_retry_delay(retry_count: int) -> int:
     return min(TRANSFER_RETRY_MAX_SECONDS, TRANSFER_RETRY_MIN_SECONDS * (2 ** min(count - 1, 7)))
 
 
-def _renew_transfer_upload_grant(job_id: str, transfer: dict) -> dict:
+def _renew_transfer_upload_grant(
+    job_id: str,
+    transfer: dict,
+    *,
+    out_path: str = "",
+    output_container: str = "",
+) -> dict:
     controller_id = str(transfer.get("controller_id") or "").strip()
     transfer_id = str(transfer.get("id") or "").strip()
     if not transfer_id:
@@ -1581,15 +1619,24 @@ def _renew_transfer_upload_grant(job_id: str, transfer: dict) -> dict:
         controller_id = str(controller.get("id") or "")
         transfer["controller_id"] = controller_id
     api_path = f"/api/node/transfers/{transfer_id}/renew-upload"
+    body = {"job_id": job_id}
+    if out_path and os.path.isfile(out_path):
+        body.update({
+            "out_bytes": int(os.path.getsize(out_path)),
+            "output_fingerprint": _sample_file_fingerprint(out_path),
+            "output_container": str(output_container or "").strip().lower(),
+        })
     result = signed_json_request(
         controller,
         api_path,
         method="POST",
-        body={"job_id": job_id},
-        timeout=15,
+        body=body,
+        timeout=_transfer_upload_timeout(),
     )
     if result.get("complete"):
         return result
+    if result.get("in_progress"):
+        raise RuntimeError("controller is still validating the previous upload")
     token = str(result.get("upload_token") or "").strip()
     if not token:
         raise RuntimeError("controller did not return a renewed upload token")
@@ -5482,7 +5529,12 @@ def transfer_retry_loop():
             save_jobs()
             try:
                 # Renewing is cheap and also proves the paired controller is back.
-                renewal = _renew_transfer_upload_grant(job_id, transfer)
+                renewal = _renew_transfer_upload_grant(
+                    job_id,
+                    transfer,
+                    out_path=out_path,
+                    output_container=str(job.get("output_container") or ""),
+                )
                 duration_seconds = job.get("duration_seconds")
                 result = renewal if renewal.get("complete") else _upload_transfer_output(
                     transfer.get("upload_url") or "",

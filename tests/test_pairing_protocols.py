@@ -48,6 +48,21 @@ class NodePairingProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "canceled"):
             node_linking.renew_transfer_upload_grant(grant["id"], "worker-a")
 
+    def test_upload_renewal_waits_while_controller_is_still_validating(self):
+        grant = node_linking.create_transfer_grant("/media/show.mkv", "worker-a", source_size=123)
+        row = node_linking.get_transfer(grant["id"])
+        row.update({
+            "status": "validating",
+            "upload_started_at": node_linking._now(),
+        })
+        node_linking.save_transfer(row)
+
+        renewal = node_linking.renew_transfer_upload_grant(grant["id"], "worker-a")
+
+        self.assertFalse(renewal["complete"])
+        self.assertTrue(renewal["in_progress"])
+        self.assertNotIn("upload_token", renewal)
+
     def test_lost_pair_response_can_be_retried_by_same_controller(self):
         pairing = node_linking.create_pairing_code()
         controller = {
