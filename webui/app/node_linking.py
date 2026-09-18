@@ -34,6 +34,7 @@ HEARTBEAT_STALE_SECONDS = 10 * 60
 HEARTBEAT_RUNNING_GRACE_SECONDS = 2 * 60 * 60
 HEARTBEAT_MAX_MISSES = 3
 TRANSFER_TTL_SECONDS = 48 * 60 * 60
+TRANSFER_IDLE_RECONCILE_SECONDS = 10 * 60
 NODE_STATE_SCHEMA_VERSION = 2
 NODE_PROTOCOL_VERSION = 2
 NODE_CAPABILITIES = [
@@ -1739,6 +1740,50 @@ def get_transfer(transfer_id: str) -> dict | None:
     return row if isinstance(row, dict) else None
 
 
+def _worker_confirms_transfer_missing(row: dict, *, now: float, last_activity: float) -> bool:
+    """Return whether a post-transfer worker heartbeat proves a download was abandoned."""
+    if now - last_activity < TRANSFER_IDLE_RECONCILE_SECONDS:
+        return False
+    worker_id = str(row.get("worker_node_id") or "").strip()
+    if not worker_id:
+        return False
+    worker = get_node_private(worker_id)
+    if not worker:
+        return False
+    public = public_node(worker)
+    try:
+        last_heartbeat = float(public.get("last_heartbeat") or 0)
+    except (TypeError, ValueError):
+        return False
+    # The worker does not have to remain online. A heartbeat sent after the
+    # last transfer activity is authoritative for that point in time: when it
+    # reports no active work, the durable reservation was already orphaned.
+    if last_heartbeat <= last_activity:
+        return False
+
+    summary = public.get("summary") if isinstance(public.get("summary"), dict) else {}
+    counts = summary.get("counts") if isinstance(summary.get("counts"), dict) else None
+    if counts is None:
+        return False
+    for status in ("queued", "dispatching", "running", "waiting_to_upload"):
+        try:
+            if int(counts.get(status) or 0) > 0:
+                return False
+        except (TypeError, ValueError):
+            return False
+    for job in public.get("jobs") or []:
+        if not isinstance(job, dict):
+            continue
+        if str(job.get("status") or "").strip().lower() in {
+            "queued",
+            "dispatching",
+            "running",
+            "waiting_to_upload",
+        }:
+            return False
+    return True
+
+
 def find_active_transfer_for_src(src: str, *, retention_seconds: int = 7 * 24 * 60 * 60) -> dict | None:
     """Return a durable in-flight remote transfer reservation for ``src``.
 
@@ -1782,6 +1827,24 @@ def find_active_transfer_for_src(src: str, *, retention_seconds: int = 7 * 24 * 
         )
         if last_activity and now - last_activity > max(TRANSFER_TTL_SECONDS, int(retention_seconds)):
             continue
+        if status in {"created", "downloading"} and _worker_confirms_transfer_missing(
+            row,
+            now=now,
+            last_activity=last_activity,
+        ):
+            try:
+                cancel_transfer_grant(str(row.get("id") or ""), str(row.get("worker_node_id") or ""))
+                print(
+                    f"[WARN] Released abandoned remote transfer {row.get('id')} for {os.path.basename(row_src)}; "
+                    "the assigned worker reported no active job after the last transfer activity.",
+                    flush=True,
+                )
+                continue
+            except Exception as exc:
+                print(
+                    f"[WARN] Could not release abandoned remote transfer {row.get('id')}: {exc}",
+                    flush=True,
+                )
         candidates.append(row)
     if not candidates:
         return None

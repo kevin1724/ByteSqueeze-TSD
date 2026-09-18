@@ -63,6 +63,105 @@ class NodePairingProtocolTests(unittest.TestCase):
         self.assertTrue(renewal["in_progress"])
         self.assertNotIn("upload_token", renewal)
 
+    def test_idle_online_worker_releases_abandoned_download_reservation(self):
+        with mock.patch.object(node_linking, "_now", return_value=1000):
+            grant = node_linking.create_transfer_grant(
+                "/media/abandoned-movie.mkv",
+                "worker-a",
+                source_size=123,
+            )
+            transfer = node_linking.get_transfer(grant["id"])
+            transfer.update({
+                "status": "downloading",
+                "created_at": 100,
+                "download_used_at": 120,
+            })
+            node_linking.save_transfer(transfer)
+            node_linking.save_node({
+                "id": "worker-a",
+                "online": True,
+                "status": "idle",
+                "last_heartbeat": 1000,
+                "summary": {
+                    "counts": {
+                        "queued": 0,
+                        "running": 0,
+                        "waiting_to_upload": 0,
+                    }
+                },
+            })
+
+            active = node_linking.find_active_transfer_for_src(
+                "/media/abandoned-movie.mkv"
+            )
+
+        self.assertIsNone(active)
+        self.assertEqual(node_linking.get_transfer(grant["id"])["status"], "canceled")
+
+    def test_post_transfer_idle_heartbeat_releases_reservation_after_worker_goes_offline(self):
+        with mock.patch.object(node_linking, "_now", return_value=1000):
+            grant = node_linking.create_transfer_grant(
+                "/media/offline-abandoned-movie.mkv",
+                "worker-a",
+                source_size=123,
+            )
+            transfer = node_linking.get_transfer(grant["id"])
+            transfer.update({
+                "status": "downloading",
+                "created_at": 100,
+                "download_used_at": 120,
+            })
+            node_linking.save_transfer(transfer)
+            node_linking.save_node({
+                "id": "worker-a",
+                "online": False,
+                "status": "offline",
+                "last_heartbeat": 300,
+                "summary": {
+                    "counts": {
+                        "queued": 0,
+                        "running": 0,
+                        "waiting_to_upload": 0,
+                    }
+                },
+            })
+
+            active = node_linking.find_active_transfer_for_src(
+                "/media/offline-abandoned-movie.mkv"
+            )
+
+        self.assertIsNone(active)
+        self.assertEqual(node_linking.get_transfer(grant["id"])["status"], "canceled")
+
+    def test_worker_without_status_counts_does_not_release_transfer_reservation(self):
+        with mock.patch.object(node_linking, "_now", return_value=1000):
+            grant = node_linking.create_transfer_grant(
+                "/media/legacy-worker-movie.mkv",
+                "worker-a",
+                source_size=123,
+            )
+            transfer = node_linking.get_transfer(grant["id"])
+            transfer.update({
+                "status": "downloading",
+                "created_at": 100,
+                "download_used_at": 120,
+            })
+            node_linking.save_transfer(transfer)
+            node_linking.save_node({
+                "id": "worker-a",
+                "online": True,
+                "status": "idle",
+                "last_heartbeat": 1000,
+                "summary": {},
+            })
+
+            active = node_linking.find_active_transfer_for_src(
+                "/media/legacy-worker-movie.mkv"
+            )
+
+        self.assertEqual(active["id"], grant["id"])
+        self.assertEqual(node_linking.get_transfer(grant["id"])["status"], "downloading")
+
     def test_lost_pair_response_can_be_retried_by_same_controller(self):
         pairing = node_linking.create_pairing_code()
         controller = {

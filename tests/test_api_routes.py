@@ -469,6 +469,42 @@ class ApiRouteSmokeTests(unittest.TestCase):
         self.assertFalse(duplicate.get_json()["learning_recorded"])
         duplicate_record.assert_not_called()
 
+        with (
+            patch.object(app_routes, "_wizard_plan", return_value=plan),
+            patch.object(app_routes, "list_jobs_for_api", return_value=[]),
+            patch.object(
+                app_routes,
+                "create_job",
+                return_value="remote-transfer:active-transfer",
+            ),
+            patch.object(app_routes, "record_smart_preset_feedback") as conflict_record,
+        ):
+            conflict = self.client.post(
+                "/encode_wizard",
+                json={"src": media_path, "mode": "local"},
+            )
+        self.assertEqual(conflict.status_code, 400)
+        self.assertIn("already active on a linked worker", conflict.get_json()["error"])
+        conflict_record.assert_not_called()
+
+        with (
+            patch.object(
+                app_routes,
+                "create_job",
+                return_value="remote-transfer:active-transfer",
+            ),
+            patch.object(app_routes, "log_event") as smart_log,
+        ):
+            with self.assertRaisesRegex(ValueError, "already active on a linked worker"):
+                app_routes._create_smart_job(
+                    media_path,
+                    recommendation={
+                        "selected_plan": plan,
+                        "recommended_id": "detail",
+                    },
+                )
+        smart_log.assert_not_called()
+
     def test_size_wizard_can_pin_an_approved_plan_to_a_linked_worker(self):
         media_path = os.path.join(TEST_MEDIA, "Wizard.Pinned.Movie.2026.mkv")
         plan = {
@@ -1679,6 +1715,38 @@ class ApiRouteSmokeTests(unittest.TestCase):
             all(call.kwargs["dispatch_mode"] == "auto" for call in create.call_args_list)
         )
         wake.assert_called_once_with()
+
+        with (
+            patch.object(
+                app_routes,
+                "_authenticated_mobile",
+                return_value={"name": "Distribution phone"},
+            ),
+            patch.object(
+                app_routes,
+                "_smart_recommendations_for_paths",
+                return_value=({path: {} for path in paths}, {}),
+            ),
+            patch.object(app_routes, "_node_queue_plan", return_value=plan),
+            patch.object(
+                app_routes,
+                "create_job",
+                return_value="remote-transfer:active-transfer",
+            ),
+            patch.object(app_routes, "_wake_auto_node_dispatch") as blocked_wake,
+        ):
+            blocked = self.client.post(
+                "/api/mobile/v1/library/queue",
+                json={
+                    "paths": [paths[0]],
+                    "preset": "smart",
+                    "mode": "available",
+                },
+            )
+
+        self.assertEqual(blocked.status_code, 400, blocked.get_data(as_text=True))
+        self.assertIn("already active on a linked worker", blocked.get_data(as_text=True))
+        blocked_wake.assert_not_called()
 
     @staticmethod
     def _video_preset_bundle(encoder="qsv_h265_10bit", name="Smart HEVC 10-bit"):

@@ -164,6 +164,7 @@ from .node_linking import (
     delete_trusted_controller,
     enable_pair_recovery,
     encoder_hardware_profile,
+    find_active_transfer_for_src,
     get_node_private,
     heartbeat_allowed_age,
     hmac_headers,
@@ -3518,6 +3519,11 @@ def _create_smart_job(
         preset_preferences=preset_preferences,
         operations=operations,
     )
+    if str(job_id or "").startswith("remote-transfer:"):
+        raise ValueError(
+            "This source is already active on a linked worker. Cancel that worker job "
+            "or wait for it to finish before queueing it again."
+        )
     scene = episode_plan.get("scene_analysis") if isinstance(episode_plan.get("scene_analysis"), dict) else {}
     log_event(
         "smart_episode_planned",
@@ -3637,6 +3643,11 @@ def _queue_wizard_job(data: dict) -> dict:
             preset_preferences=preset_preferences,
             operations=operations,
         )
+        if str(job_id or "").startswith("remote-transfer:"):
+            raise ValueError(
+                "This source is already active on a linked worker. Cancel that worker job "
+                "or wait for it to finish before queueing it on the Main controller."
+            )
     if dispatch_mode == "auto":
         _wake_auto_node_dispatch()
     learning_result = None
@@ -7742,6 +7753,11 @@ def _queue_paths_to_destination(
                     preset_adaptive=bool(plan.get("preset_adaptive")),
                     preset_preferences=plan.get("preset_preferences") if isinstance(plan.get("preset_preferences"), dict) else None,
                 )
+                if str(job_id or "").startswith("remote-transfer:"):
+                    raise ValueError(
+                        "source is already active on a linked worker; cancel that worker job "
+                        "or wait for it to finish"
+                    )
                 if job_id not in job_ids:
                     job_ids.append(job_id)
             except Exception as exc:
@@ -8463,6 +8479,11 @@ def _dispatch_plan_to_worker(
     require_available_for: dict | None = None,
 ) -> tuple[dict, dict, str]:
     """Send one planned job to a linked worker, including remote fallback."""
+    if find_active_transfer_for_src(src):
+        raise ValueError(
+            "This source is already active on a linked worker. Cancel that worker job "
+            "or wait for it to finish before queueing it again."
+        )
     selected = _refresh_linked_node(selected)
     if not public_node(selected).get("online"):
         raise ValueError(selected.get("last_error") or "worker is offline")
@@ -11793,6 +11814,11 @@ def register_routes(app):
                         preset_preferences=plan.get("preset_preferences") if isinstance(plan.get("preset_preferences"), dict) else None,
                         operations=plan.get("operations") if isinstance(plan.get("operations"), dict) else None,
                     )
+                    if str(job_id or "").startswith("remote-transfer:"):
+                        raise ValueError(
+                            "source is already active on a linked worker; cancel that worker job "
+                            "or wait for it to finish"
+                        )
                     if job_id not in job_ids:
                         job_ids.append(job_id)
                 except Exception as exc:
@@ -11811,6 +11837,8 @@ def register_routes(app):
 
         if mode == "local":
             count, skipped = _queue_local_paths(paths, preset, data.get("smart_tuning"))
+            if count <= 0:
+                return jsonify(error="no files could be queued", skipped=skipped), 400
             return jsonify(ok=True, target="local", count=count, skipped=skipped)
 
         selected = None
@@ -11916,6 +11944,15 @@ def register_routes(app):
                 continue
             if os.path.splitext(os.path.basename(src))[0].lower().endswith("-tsd") and not request_audio_only:
                 skipped.append({"path": src, "reason": "already tagged -TSD"})
+                continue
+            if find_active_transfer_for_src(src):
+                skipped.append({
+                    "path": src,
+                    "reason": (
+                        "already active on a linked worker; cancel that worker job "
+                        "or wait for it to finish"
+                    ),
+                })
                 continue
 
             try:
