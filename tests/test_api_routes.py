@@ -2210,6 +2210,63 @@ class ApiRouteSmokeTests(unittest.TestCase):
         }
         self.assertFalse(app_routes._worker_available_for_auto(cpu_busy_row, smart_qsv_job)[0])
 
+    def test_auto_worker_accepts_audio_only_plan_without_video_encoder_match(self):
+        operations = {
+            "job_type": "audio_only",
+            "video_action": "copy",
+            "audio_policy": "optimize_lossless",
+        }
+        plan = {
+            "preset": "4k",
+            "preset_bundle": self._video_preset_bundle(encoder="svt_av1_10bit"),
+            "extra_args": "",
+            "preset_selection": "audio-only",
+            "preset_adaptive": False,
+            "operations": operations,
+            "job_type": "audio_only",
+            "encode_metadata": {
+                "encoder": "copy",
+                "encode_method": "ffmpeg_audio_only",
+                "encoder_family": "stream_copy",
+                "job_type": "audio_only",
+                "operations": operations,
+            },
+        }
+        job = {
+            "job_type": "audio_only",
+            "operations": operations,
+            "dispatch_plan": plan,
+        }
+        worker = {
+            "id": "audio-worker",
+            "name": "Audio worker",
+            "online": True,
+            "status": "idle",
+            "last_heartbeat": app_routes.time.time(),
+            "summary": {"counts": {"queued": 0, "running": 0}},
+            "jobs": [],
+            "hardware": {
+                "encoder_families": ["qsv"],
+                "encoders": ["qsv_h264"],
+            },
+        }
+
+        self.assertTrue(app_routes._hardware_supports_plan(plan, worker["hardware"]))
+        self.assertTrue(app_routes._worker_available_for_auto(worker, job)[0])
+        legacy_job = {
+            "preset": "4k",
+            "preset_bundle": plan["preset_bundle"],
+            "preset_selection": "audio-only",
+            "encoder": "copy",
+            "encoder_family": "stream_copy",
+            "job_type": "audio_only",
+            "operations": operations,
+        }
+        self.assertTrue(app_routes._worker_available_for_auto(worker, legacy_job)[0])
+        prepared = app_routes._prepare_plan_for_node(plan, worker)
+        self.assertEqual(prepared["encode_metadata"]["job_type"], "audio_only")
+        self.assertEqual(prepared["encode_metadata"]["operations"]["video_action"], "copy")
+
     def test_auto_dispatch_loop_claims_the_oldest_job_for_an_available_worker(self):
         pending_job = {
             "src": os.path.join(TEST_MEDIA, "Oldest.Automatic.Movie.mkv"),

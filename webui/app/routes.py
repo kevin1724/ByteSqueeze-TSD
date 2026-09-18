@@ -7992,7 +7992,32 @@ def _plan_encoder(plan: dict) -> tuple[str, str, str, str]:
     return encoder, family or "software", codec, depth
 
 
+def _plan_is_audio_only(plan: dict | None) -> bool:
+    """Return whether a queued plan bypasses video encoding entirely."""
+    plan = plan if isinstance(plan, dict) else {}
+    metadata = plan.get("encode_metadata") if isinstance(plan.get("encode_metadata"), dict) else {}
+    operations = plan.get("operations") if isinstance(plan.get("operations"), dict) else {}
+    metadata_operations = (
+        metadata.get("operations")
+        if isinstance(metadata.get("operations"), dict)
+        else {}
+    )
+    markers = (
+        plan.get("job_type"),
+        operations.get("job_type"),
+        metadata.get("job_type"),
+        metadata_operations.get("job_type"),
+        plan.get("preset_selection"),
+    )
+    return any(
+        str(value or "").strip().lower() in {"audio_only", "audio-only", "ffmpeg_audio_only"}
+        for value in markers
+    )
+
+
 def _hardware_supports_plan(plan: dict, hardware: dict) -> bool:
+    if _plan_is_audio_only(plan):
+        return True
     encoder, family, codec, _depth = _plan_encoder(plan)
     return _node_supports_encoder(hardware, encoder, family, codec)
 
@@ -8415,8 +8440,7 @@ def _plan_metadata_for_worker(plan: dict) -> dict:
 
 
 def _prepare_plan_for_node(plan: dict, node: dict) -> dict:
-    operations = plan.get("operations") if isinstance(plan.get("operations"), dict) else {}
-    if str(operations.get("job_type") or plan.get("job_type") or "").strip().lower() == "audio_only":
+    if _plan_is_audio_only(plan):
         prepared = dict(plan)
         prepared["encode_metadata"] = _plan_metadata_for_worker(prepared)
         return prepared
@@ -8671,6 +8695,8 @@ def _worker_available_for_auto(row: dict, job: dict) -> tuple[bool, float]:
             "bit_depth": job.get("bit_depth") or "",
             "smart_preset": bool(job.get("smart_preset")),
         },
+        "operations": job.get("operations") if isinstance(job.get("operations"), dict) else {},
+        "job_type": job.get("job_type") or "",
     }
     metadata = plan.get("encode_metadata") if isinstance(plan.get("encode_metadata"), dict) else {}
     adaptive = bool(plan.get("preset_adaptive") or metadata.get("preset_adaptive") or metadata.get("smart_preset"))
