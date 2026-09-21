@@ -633,6 +633,27 @@ class ApiRouteSmokeTests(unittest.TestCase):
         self.assertEqual(actions[2]["bitrate_kbps"], 1024)
         self.assertEqual(actions[3]["bitrate_kbps"], 320)
 
+        legacy_snapshot = app_jobs._queued_operations()
+        repaired = app_jobs._queued_operations(
+            {
+                "preset_selection": "wizard",
+                "preset_preferences": plan["options"],
+            },
+            legacy_snapshot,
+        )
+        self.assertEqual(repaired["job_type"], "video_audio")
+        self.assertEqual(repaired["audio_policy"], "optimize_lossless")
+        self.assertEqual(repaired["default_target_codec"], "eac3")
+        self.assertTrue(repaired["transcode_selected_audio"])
+        repaired_actions = {
+            row["stream_index"]: row
+            for row in app_routes.normalize_operations(repaired, inventory)["audio_actions"]
+        }
+        self.assertEqual(
+            {index for index, row in repaired_actions.items() if row["action"] == "encode"},
+            {2, 3},
+        )
+
     def test_size_wizard_can_pin_an_approved_plan_to_a_linked_worker(self):
         media_path = os.path.join(TEST_MEDIA, "Wizard.Pinned.Movie.2026.mkv")
         plan = {

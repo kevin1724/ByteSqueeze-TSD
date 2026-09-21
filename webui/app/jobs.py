@@ -3114,9 +3114,10 @@ def _find_existing_active_job_for_src(src: str) -> str | None:
 def _queued_operations(metadata: dict | None = None, operations: dict | None = None) -> dict:
     """Keep an additive, backward-compatible operation snapshot on each job."""
     metadata = metadata if isinstance(metadata, dict) else {}
-    source = operations if isinstance(operations, dict) else (
+    source = dict(operations) if isinstance(operations, dict) else (
         metadata.get("operations") if isinstance(metadata.get("operations"), dict) else {}
     )
+    source = dict(source)
     settings = load_settings()
     explicit_job_type = source.get("job_type") or metadata.get("job_type")
     job_type = str(explicit_job_type or "video_preserve_audio").strip().lower()
@@ -3130,6 +3131,42 @@ def _queued_operations(metadata: dict | None = None, operations: dict | None = N
     ).strip().lower()
     if audio_policy not in {"preserve", "optimize_lossless", "custom"}:
         audio_policy = "preserve"
+    preset_preferences = (
+        metadata.get("preset_preferences")
+        if isinstance(metadata.get("preset_preferences"), dict)
+        else {}
+    )
+    queued_selection = str(metadata.get("preset_selection") or "").strip().lower()
+    queued_audio_mode = str(preset_preferences.get("audio_mode") or "copy").strip().lower()
+    repair_legacy_wizard_audio = bool(
+        queued_selection in {"wizard", "smart"}
+        and queued_audio_mode in {"auto", "aac", "eac3"}
+        and audio_policy == "preserve"
+        and not source.get("audio_actions")
+    )
+    if repair_legacy_wizard_audio:
+        # Jobs queued before Smart audio operations were persisted still carry
+        # the approved Wizard recipe. Rehydrate that recipe at launch so an
+        # already queued item is fixed without requiring cancel/requeue.
+        job_type = "video_audio"
+        audio_policy = "optimize_lossless"
+        try:
+            legacy_target_bitrate = int(preset_preferences.get("audio_bitrate") or 0)
+        except (TypeError, ValueError):
+            legacy_target_bitrate = 0
+        if queued_audio_mode == "eac3":
+            legacy_target_bitrate = 1024
+        elif legacy_target_bitrate <= 0:
+            legacy_target_bitrate = int(settings.get("audio_optimize_bitrate_kbps") or 1024)
+        source.update({
+            "allow_object_audio_loss": True,
+            "default_target_codec": "eac3" if queued_audio_mode == "eac3" else "aac",
+            "default_target_bitrate_kbps": legacy_target_bitrate,
+            "deduplicate_languages": True,
+            "preferred_languages": preset_preferences.get("audio_languages") or [],
+            "transcode_selected_audio": True,
+            "audio_track_scope": preset_preferences.get("audio_tracks") or "all",
+        })
     if not explicit_job_type and audio_policy != "preserve":
         job_type = "video_audio"
     if job_type == "video_preserve_audio":
@@ -4628,7 +4665,8 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
         source_inventory = scan_media(encode_src_path, exact=False)
         if _job_requests_audio_only(job):
             _lock_audio_only_job(job)
-        operations = normalize_operations(job.get("operations"), source_inventory)
+        queued_operations = _queued_operations(job, job.get("operations"))
+        operations = normalize_operations(queued_operations, source_inventory)
         if _job_requests_audio_only(job):
             # normalize_operations must not be able to downgrade a durable
             # audio-only marker into a video encode.
