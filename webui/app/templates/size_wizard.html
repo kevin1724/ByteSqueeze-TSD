@@ -2771,9 +2771,12 @@
       }
 
       const keepAllAudio = !!el("simpleKeepAllAudio")?.checked;
-      setChecked("aiCopyAudio", true);
+      const smartAudioStrategy = el("smartAudioStrategy")?.value || "copy";
+      const optimizeAudio = smartAudioStrategy === "eac3_surround";
+      setChecked("aiCopyAudio", !optimizeAudio);
       setValue("aiAudioScope", keepAllAudio ? "all" : "first");
-      setValue("audioMode", "copy");
+      setValue("audioMode", optimizeAudio ? "eac3" : "copy");
+      setValue("audioBitrate", optimizeAudio ? "1024" : "auto");
       setValue("audioTracks", keepAllAudio ? "all" : "first");
       setValue("audioLanguages", el("simpleAudioLanguages")?.value || "");
 
@@ -2793,6 +2796,10 @@
     function currentPayload() {
       applySimpleControlsToAdvanced({ schedule: false });
       const aiEnabled = el("aiMode").checked;
+      const audioMode = el("audioMode").value;
+      const smartAudioStrategy = audioMode === "eac3"
+        ? "eac3_surround"
+        : (audioMode === "copy" ? "copy" : "");
       return {
         src: el("src").value,
         ai_mode: aiEnabled,
@@ -2815,8 +2822,8 @@
         bit_depth: el("bitDepth").value,
         encoder_speed: el("encoderSpeed").value,
         resolution_mode: el("resolutionMode").value,
-        audio_mode: el("audioMode").value,
-        smart_audio_strategy: activeSmartCandidateId ? (smartProfile?.audio_strategy || "copy") : "",
+        audio_mode: audioMode,
+        smart_audio_strategy: smartAudioStrategy,
         audio_bitrate: el("audioBitrate").value,
         audio_tracks: el("audioTracks").value,
         subtitle_mode: el("subtitleMode").value,
@@ -3934,6 +3941,22 @@
         updateControlStates();
       });
       el("audioMode").addEventListener("change", updateControlStates);
+      el("smartAudioStrategy").addEventListener("change", () => {
+        const optimizeAudio = el("smartAudioStrategy").value === "eac3_surround";
+        setChecked("aiCopyAudio", !optimizeAudio);
+        setValue("audioMode", optimizeAudio ? "eac3" : "copy");
+        setValue("audioBitrate", optimizeAudio ? "1024" : "auto");
+        if (smartProfile) {
+          smartProfile = {
+            ...smartProfile,
+            audio_strategy: optimizeAudio ? "eac3_surround" : "copy",
+            preserve_audio: !optimizeAudio,
+            never_transcode_audio: optimizeAudio ? false : smartProfile.never_transcode_audio
+          };
+        }
+        updateControlStates();
+        schedulePreview();
+      });
       el("framerateMode").addEventListener("change", updateControlStates);
       el("targetSizeAuto").addEventListener("change", () => {
         setChecked("simpleTargetAuto", el("targetSizeAuto").checked);

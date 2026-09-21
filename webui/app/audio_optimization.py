@@ -548,6 +548,10 @@ def normalize_operations(payload: dict | None, inventory: dict) -> dict:
     )
     deduplicate_languages = _bool(payload.get("deduplicate_languages"), True)
     preferred_languages = _preferred_languages(payload.get("preferred_languages", ["eng", "spa"]))
+    transcode_selected_audio = _bool(payload.get("transcode_selected_audio"), False)
+    audio_track_scope = str(payload.get("audio_track_scope") or "all").strip().lower()
+    if audio_track_scope not in {"first", "all"}:
+        audio_track_scope = "all"
     default_target_codec = str(payload.get("default_target_codec") or "aac").strip().lower()
     if default_target_codec not in {"aac", "eac3", "ac3", "opus", "flac"}:
         default_target_codec = "aac"
@@ -563,6 +567,11 @@ def normalize_operations(payload: dict | None, inventory: dict) -> dict:
             track, policy, allow_object, surround_target_kbps
         )
         action["target_codec"] = default_target_codec
+        if policy == "optimize_lossless" and transcode_selected_audio:
+            # Size Wizard's Smart optimize choice is an explicit request to
+            # encode the retained tracks. Without this durable marker the
+            # runtime normalizer used to turn the Wizard plan back into copy.
+            action["action"] = "encode"
         override = proposed_by_index.get(_int(track.get("index"), -1))
         if policy in {"custom", "optimize_lossless"} and isinstance(override, dict):
             # Only per-track user controls may be overridden. Stream identity,
@@ -658,6 +667,23 @@ def normalize_operations(payload: dict | None, inventory: dict) -> dict:
                     f"Keeping the strongest {group.replace(':', ' ')} track and removing duplicate {action['source_codec_label']} {action['source_channels']}ch; review before queueing."
                 )
 
+        if audio_track_scope == "first":
+            kept = [
+                (action, inventory_by_index.get(action["stream_index"], action))
+                for action in actions
+                if action.get("action") != "remove"
+            ]
+            if kept:
+                first_winner, _first_track = max(kept, key=lambda pair: _track_quality_score(pair[1]))
+                for action, _track in kept:
+                    if action is first_winner:
+                        continue
+                    action["action"] = "remove"
+                    action["selected_by_language_policy"] = False
+                    warnings.append(
+                        f"Keeping one strongest preferred-language track and removing {action['language']} {action['source_codec_label']}."
+                    )
+
     duration = max(0.0, _float(inventory.get("duration_seconds")))
     source_audio = sum(_int(row.get("source_size_bytes")) for row in actions)
     estimated_audio = 0
@@ -685,6 +711,8 @@ def normalize_operations(payload: dict | None, inventory: dict) -> dict:
         "default_target_bitrate_kbps": surround_target_kbps,
         "deduplicate_languages": deduplicate_languages,
         "preferred_languages": preferred_languages,
+        "transcode_selected_audio": transcode_selected_audio,
+        "audio_track_scope": audio_track_scope,
         "replace_source": _bool(payload.get("replace_source"), job_type == "audio_only"),
         "warnings": list(dict.fromkeys(warnings)),
         "estimate": {

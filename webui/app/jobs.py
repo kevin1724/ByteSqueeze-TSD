@@ -3164,6 +3164,12 @@ def _queued_operations(metadata: dict | None = None, operations: dict | None = N
             if isinstance(source.get("preferred_languages"), list)
             else settings.get("audio_preferred_languages", ["eng", "spa"])
         ),
+        "transcode_selected_audio": bool(source.get("transcode_selected_audio", False)),
+        "audio_track_scope": (
+            str(source.get("audio_track_scope") or "all").strip().lower()
+            if str(source.get("audio_track_scope") or "all").strip().lower() in {"first", "all"}
+            else "all"
+        ),
         "replace_source": bool(source.get("replace_source", job_type == "audio_only")),
     }
 

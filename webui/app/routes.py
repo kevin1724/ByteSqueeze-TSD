@@ -3466,6 +3466,39 @@ def _smart_recommendations_for_paths(
     return planned, errors
 
 
+def _wizard_audio_operations(plan: dict, operations: dict | None = None) -> dict | None:
+    """Persist the Wizard's audio intent so runtime safety normalization cannot erase it."""
+    if isinstance(operations, dict) and operations:
+        return deepcopy(operations)
+    options = plan.get("options") if isinstance(plan.get("options"), dict) else {}
+    audio_mode = str(options.get("audio_mode") or "copy").strip().lower()
+    if audio_mode == "copy":
+        return None
+    target_codec = "eac3" if audio_mode == "eac3" else "aac"
+    preferred_languages = options.get("audio_languages")
+    if not isinstance(preferred_languages, list):
+        preferred_languages = _wizard_languages(preferred_languages)
+    return {
+        "schema": 1,
+        "job_type": "video_audio",
+        "video_action": "encode",
+        "audio_policy": "optimize_lossless",
+        "audio_actions": [],
+        "subtitle_action": "copy",
+        # Choosing Smart optimize is explicit consent to replace object-audio
+        # extensions with the selected channel-based codec. The resulting
+        # warning remains visible in the job log.
+        "allow_object_audio_loss": True,
+        "default_target_codec": target_codec,
+        "default_target_bitrate_kbps": _wizard_audio_kbps(options),
+        "deduplicate_languages": True,
+        "preferred_languages": preferred_languages,
+        "transcode_selected_audio": True,
+        "audio_track_scope": str(options.get("audio_tracks") or "all").strip().lower(),
+        "replace_source": False,
+    }
+
+
 def _create_smart_job(
     src: str,
     *,
@@ -3488,6 +3521,7 @@ def _create_smart_job(
     episode_plan = plan.get("episode_plan") if isinstance(plan.get("episode_plan"), dict) else {}
     preset_preferences = dict(plan.get("options") or {})
     preset_preferences["smart_episode_plan"] = episode_plan
+    operations = _wizard_audio_operations(plan, operations)
     job_id = create_job(
         plan["src"],
         plan["preset"],
@@ -3606,7 +3640,8 @@ def _queue_wizard_job(data: dict) -> dict:
         "preset_adaptive": False,
         "preset_preferences": preset_preferences,
     }
-    operations = data.get("operations") if isinstance(data.get("operations"), dict) else None
+    requested_operations = data.get("operations") if isinstance(data.get("operations"), dict) else None
+    operations = _wizard_audio_operations(plan, requested_operations)
     transfer_mode = ""
     if dispatch_mode == "node":
         # Explicit node selection uses the same direct dispatch path as the

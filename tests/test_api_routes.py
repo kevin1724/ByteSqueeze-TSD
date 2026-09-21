@@ -423,6 +423,8 @@ class ApiRouteSmokeTests(unittest.TestCase):
         self.assertIn(b'value="next_available"', wizard_page.data)
         self.assertIn(b'id="smartPresetToggleBtn"', wizard_page.data)
         self.assertIn(b'id="aiAssistantDetails"', wizard_page.data)
+        self.assertIn(b'setValue("audioMode", optimizeAudio ? "eac3" : "copy")', wizard_page.data)
+        self.assertIn(b'smart_audio_strategy: smartAudioStrategy', wizard_page.data)
         self.assertNotIn(b'target_size_value: 5,', wizard_page.data)
 
     def test_size_wizard_queue_records_an_approved_learning_plan(self):
@@ -547,6 +549,89 @@ class ApiRouteSmokeTests(unittest.TestCase):
                     },
                 )
         smart_log.assert_not_called()
+
+    def test_size_wizard_smart_audio_persists_language_deduplicated_encode_plan(self):
+        media_path = os.path.join(TEST_MEDIA, "Wizard.Smart.Audio.2026.mkv")
+        plan = {
+            "src": media_path,
+            "preset": "1080",
+            "extra_args": ["--encoder", "x265_10bit", "-E", "eac3", "-B", "1024"],
+            "probe": {
+                "source_type": "movie",
+                "source_size_bytes": 8 * 1024**3,
+                "width": 1920,
+                "height": 1080,
+                "is_hdr": False,
+            },
+            "options": {
+                "ai_goal": "quality",
+                "video_codec": "h265",
+                "encoder_family": "software",
+                "bit_depth": "10",
+                "quality": "high",
+                "encoder_speed": "slow",
+                "resolution_mode": "keep",
+                "audio_mode": "eac3",
+                "audio_bitrate": "1024",
+                "audio_tracks": "all",
+                "audio_languages": ["eng", "spa"],
+                "subtitle_mode": "all",
+            },
+            "inputs": {"target_mb": 4096},
+            "estimates": {
+                "encoder": "x265_10bit",
+                "video_bitrate_kbps": 7000,
+                "output_resolution": {"width": 1920, "height": 1080},
+            },
+        }
+        with (
+            patch.object(app_routes, "_wizard_plan", return_value=plan),
+            patch.object(app_routes, "list_jobs_for_api", return_value=[]),
+            patch.object(app_routes, "create_job", return_value="wizard-smart-audio") as create,
+            patch.object(
+                app_routes,
+                "record_smart_preset_feedback",
+                return_value={"learning": {}, "feedback": {"id": "audio-feedback"}},
+            ),
+        ):
+            response = self.client.post(
+                "/encode_wizard",
+                json={"src": media_path, "mode": "local", "audio_mode": "eac3"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        queued = create.call_args.kwargs["operations"]
+        self.assertEqual(queued["job_type"], "video_audio")
+        self.assertEqual(queued["audio_policy"], "optimize_lossless")
+        self.assertEqual(queued["default_target_codec"], "eac3")
+        self.assertEqual(queued["default_target_bitrate_kbps"], 1024)
+        self.assertEqual(queued["preferred_languages"], ["eng", "spa"])
+        self.assertTrue(queued["deduplicate_languages"])
+        self.assertTrue(queued["transcode_selected_audio"])
+
+        persisted = app_jobs._queued_operations({}, queued)
+        inventory = {
+            "duration_seconds": 3600,
+            "audio_streams": [
+                {"index": 1, "type_ordinal": 0, "language": "eng", "title": "English 5.1", "codec": "truehd", "codec_label": "TrueHD", "channels": 6, "bitrate": 2500000, "size_bytes": 900, "lossless": True},
+                {"index": 2, "type_ordinal": 1, "language": "eng", "title": "English Main 5.1", "codec": "truehd", "codec_label": "TrueHD", "channels": 6, "bitrate": 4000000, "size_bytes": 1200, "lossless": True},
+                {"index": 3, "type_ordinal": 2, "language": "spa", "title": "Spanish", "codec": "pcm_s24le", "codec_label": "PCM", "channels": 2, "bitrate": 1536000, "size_bytes": 700, "lossless": True},
+                {"index": 4, "type_ordinal": 3, "language": "fra", "title": "French", "codec": "truehd", "codec_label": "TrueHD", "channels": 6, "bitrate": 3000000, "size_bytes": 1000, "lossless": True},
+            ],
+        }
+        normalized = app_routes.normalize_operations(persisted, inventory)
+        actions = {row["stream_index"]: row for row in normalized["audio_actions"]}
+        self.assertEqual(
+            {index for index, row in actions.items() if row["action"] == "encode"},
+            {2, 3},
+        )
+        self.assertEqual(
+            {index for index, row in actions.items() if row["action"] == "remove"},
+            {1, 4},
+        )
+        self.assertEqual(actions[2]["target_codec"], "eac3")
+        self.assertEqual(actions[2]["bitrate_kbps"], 1024)
+        self.assertEqual(actions[3]["bitrate_kbps"], 320)
 
     def test_size_wizard_can_pin_an_approved_plan_to_a_linked_worker(self):
         media_path = os.path.join(TEST_MEDIA, "Wizard.Pinned.Movie.2026.mkv")
