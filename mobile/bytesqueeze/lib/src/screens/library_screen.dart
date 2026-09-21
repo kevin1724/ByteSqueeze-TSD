@@ -21,9 +21,12 @@ class LibraryScreen extends StatefulWidget {
 
 class _LibraryScreenState extends State<LibraryScreen> {
   final _search = TextEditingController();
-  bool _shows = false;
+  String _section = 'movies';
   String _quickFilter = 'all';
   String _sort = 'recommended';
+
+  bool get _shows => _section == 'shows';
+  bool get _dvr => _section == 'dvr';
 
   @override
   void dispose() {
@@ -33,7 +36,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final all = asList(widget.controller.library[_shows ? 'shows' : 'movies'])
+    final all = asList(widget.controller.library[_section])
         .map(asMap)
         .toList();
     final query = _search.text.trim().toLowerCase();
@@ -67,7 +70,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   CompactPageHeader(
                     title: 'Library',
                     summary:
-                        '${(stats['movies'] as num?)?.toInt() ?? 0} movies · ${(stats['shows'] as num?)?.toInt() ?? 0} shows · ${(stats['episodes'] as num?)?.toInt() ?? 0} episodes',
+                        '${(stats['movies'] as num?)?.toInt() ?? 0} movies · ${(stats['shows'] as num?)?.toInt() ?? 0} shows · ${(stats['dvr'] as num?)?.toInt() ?? 0} DVR',
                     trailing: widget.controller.showSecondaryUi
                         ? IconButton(
                             tooltip: 'Refresh library on server',
@@ -113,7 +116,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     controller: _search,
                     onChanged: (_) => setState(() {}),
                     decoration: InputDecoration(
-                      hintText: _shows ? 'Search shows' : 'Search movies',
+                      hintText: _shows
+                          ? 'Search shows'
+                          : _dvr
+                              ? 'Search DVR recordings'
+                              : 'Search movies',
                       prefixIcon: const Icon(Icons.search_rounded),
                       suffixIcon: _search.text.isEmpty
                           ? null
@@ -130,14 +137,15 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   Row(
                     children: [
                       Expanded(
-                        child: SegmentedButton<bool>(
+                        child: SegmentedButton<String>(
                           segments: const [
-                            ButtonSegment(value: false, label: Text('Movies')),
-                            ButtonSegment(value: true, label: Text('Shows')),
+                            ButtonSegment(value: 'movies', label: Text('Movies')),
+                            ButtonSegment(value: 'shows', label: Text('Shows')),
+                            ButtonSegment(value: 'dvr', label: Text('DVR')),
                           ],
-                          selected: {_shows},
+                          selected: {_section},
                           onSelectionChanged: (value) =>
-                              setState(() => _shows = value.first),
+                              setState(() => _section = value.first),
                           showSelectedIcon: false,
                         ),
                       ),
@@ -230,7 +238,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                           SizedBox(width: 12),
                           Expanded(
                             child: Text(
-                              'Map Movies and Shows folders in the TSD web settings, then refresh here.',
+                              'Map Movies, Shows, and DVR folders in the ByteSqueeze web settings, then refresh here.',
                             ),
                           ),
                         ],
@@ -241,7 +249,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       query.isEmpty &&
                       items.isNotEmpty) ...[
                     SectionHeader(
-                      title: _shows ? 'Tracked shows' : 'Recently added',
+                      title: _shows
+                          ? 'Tracked shows'
+                          : _dvr
+                              ? 'Recent DVR recordings'
+                              : 'Recently added',
                       subtitle: _shows
                           ? 'Favorites with release and download monitoring'
                           : 'Latest files discovered on mapped drives',
@@ -259,9 +271,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
                                   )['recently_added'],
                                 )
                                   .map(asMap)
-                                  .where(
-                                    (item) => item['type'] == 'movie',
-                                  )
+                                  .where((item) =>
+                                      item['type'] == (_dvr ? 'dvr' : 'movie'))
                                   .toList())
                           .take(12)
                           .toList(),
@@ -278,7 +289,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     Padding(
                       padding: const EdgeInsets.only(bottom: 10),
                       child: Text(
-                        '${items.length} ${_shows ? 'show${items.length == 1 ? '' : 's'}' : 'movie${items.length == 1 ? '' : 's'}'} shown',
+                        '${items.length} ${_shows ? 'show${items.length == 1 ? '' : 's'}' : _dvr ? 'DVR recording${items.length == 1 ? '' : 's'}' : 'movie${items.length == 1 ? '' : 's'}'} shown',
                         style: const TextStyle(
                           color: ByteSqueezeColors.muted,
                           fontWeight: FontWeight.w700,

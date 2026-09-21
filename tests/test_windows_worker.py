@@ -90,6 +90,47 @@ class WindowsEncodeRunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "does not match"):
                 encode_runner.output_path(str(source), env)
 
+    def test_transport_stream_uses_mkv_intermediate_then_ffmpeg_remux(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            source = Path(tempdir) / "Plex DVR Recording.ts"
+            source.write_bytes(b"source")
+            target = source.with_name("Plex DVR Recording-TSD.ts")
+            env = {
+                "SRC": str(source),
+                "HB_OUTPUT_CONTAINER": "ts",
+                "HB_OUTPUT_PATH": str(target),
+                "HB_HW_DECODE_OPTS": "--disable-hw-decoding",
+            }
+            with mock.patch.object(encode_runner, "_tool", side_effect=lambda name: f"{name}.exe"):
+                command = encode_runner.build_command(env)
+                intermediate = encode_runner.handbrake_output_path(str(source), env)
+
+            self.assertEqual(encode_runner.output_path(str(source), env), target)
+            self.assertEqual(intermediate.suffix, ".mkv")
+            self.assertIn("av_mkv", command)
+            self.assertEqual(command[-1], str(intermediate))
+
+            with mock.patch.object(encode_runner, "_tool", return_value="ffmpeg.exe"), mock.patch.object(
+                encode_runner, "_run", return_value=0
+            ) as run:
+                status = encode_runner._remux_transport_stream(intermediate, target)
+            self.assertEqual(status, 0)
+            remux = run.call_args.args[0]
+            self.assertEqual(remux[0], "ffmpeg.exe")
+            self.assertIn("mpegts", remux)
+            self.assertIn("0:a?", remux)
+            self.assertIn("0:s?", remux)
+            self.assertEqual(remux[-1], str(target))
+
+            with mock.patch.object(encode_runner, "_tool", return_value="ffmpeg.exe"), mock.patch.object(
+                encode_runner, "_run", side_effect=[1, 0]
+            ) as retry_run:
+                status = encode_runner._remux_transport_stream(intermediate, target)
+            self.assertEqual(status, 0)
+            self.assertEqual(retry_run.call_count, 2)
+            self.assertIn("0:s?", retry_run.call_args_list[0].args[0])
+            self.assertNotIn("0:s?", retry_run.call_args_list[1].args[0])
+
     def test_qsv_jobs_select_adapter_and_keep_decode_request(self):
         with tempfile.TemporaryDirectory() as tempdir:
             source = Path(tempdir) / "Episode.mkv"

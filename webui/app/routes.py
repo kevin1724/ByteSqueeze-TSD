@@ -3765,7 +3765,7 @@ BETA_AUTOSCAN_HEALTH = {
     "cycle_errors": 0,
     "last_error": "",
 }
-BETA_LIBRARY_PARSER_VERSION = 7
+BETA_LIBRARY_PARSER_VERSION = 8
 
 
 def _beta_scan_full_verify_seconds() -> int:
@@ -3861,10 +3861,12 @@ def _beta_library_summary_from_data(data: dict, settings=None) -> dict:
     stats = data.get("stats") if isinstance(data.get("stats"), dict) else {}
     movies = int(catalog.get("movies") or len(data.get("movies") or []))
     shows = int(catalog.get("shows") or len(data.get("shows") or []))
+    dvr = int(catalog.get("dvr") or len(data.get("dvr") or []))
     episodes = int(catalog.get("episodes") or stats.get("episodes") or 0)
     return {
         "movies": movies,
         "shows": shows,
+        "dvr": dvr,
         "episodes": episodes,
         "updated_at": data.get("generated_at") or data.get("scanned_at") or data.get("updated_at") or 0,
         "configured": bool(_beta_mapped_roots(settings or {})),
@@ -4216,7 +4218,7 @@ def _beta_mapped_roots(settings=None) -> list[dict]:
     out = []
     seen = set()
 
-    for kind, prefix in (("movies", "Movies"), ("shows", "Shows")):
+    for kind, prefix in (("movies", "Movies"), ("shows", "Shows"), ("dvr", "DVR")):
         rows = folders.get(kind) if isinstance(folders, dict) else []
         if not isinstance(rows, list):
             continue
@@ -4256,6 +4258,7 @@ def _beta_empty_library(settings=None) -> dict:
         "stats": {
             "movies": 0,
             "shows": 0,
+            "dvr": 0,
             "episodes": 0,
             "scanned": 0,
             "skipped_tsd": 0,
@@ -4264,9 +4267,10 @@ def _beta_empty_library(settings=None) -> dict:
         "tmdb_configured": bool(_beta_tmdb_config(settings)),
         "metadata": {"keyless": bool(settings.get("metadata_no_key_enabled", True)), "providers": []},
         "release_calendar": {"generated_at": 0, "episodes": []},
-        "catalog": {"total_titles": 0, "movies": 0, "shows": 0, "episodes": 0},
+        "catalog": {"total_titles": 0, "movies": 0, "shows": 0, "dvr": 0, "episodes": 0},
         "movies": [],
         "shows": [],
+        "dvr": [],
     }
 
 
@@ -5197,12 +5201,16 @@ def _beta_parse_media(src_path: str, *, root_kind: str = "", library_root: str =
                 if special_episode:
                     title_part = special_episode.group(1)
                     season = 0
+    elif root_kind == "dvr":
+        media_type = "dvr"
+        title_part = name_only
+        season = episode = None
 
     year = None
     year_match = re.search(r"(?:^|[ ._\-\[\(])((?:19|20)\d{2})(?:\D|$)", name_only)
-    if year_match:
+    if year_match and media_type != "dvr":
         year = int(year_match.group(1))
-        if media_type == "movie":
+        if media_type in {"movie", "dvr"}:
             before_year = name_only[: year_match.start()].strip(" ._-[(")
             # Some collections use "1976.Movie.Title...". Treat a leading
             # year as metadata, not as the whole title or an empty title.
@@ -5244,6 +5252,7 @@ def _beta_parse_media(src_path: str, *, root_kind: str = "", library_root: str =
     return {
         "id": uuid.uuid5(uuid.NAMESPACE_URL, src_path).hex,
         "type": media_type,
+        "root_kind": root_kind,
         "title": title,
         "year": year,
         "season": season,
@@ -5496,6 +5505,7 @@ def _beta_finalize_catalog(data: dict) -> dict:
     """Add compact catalog views used by the web and mobile home screens."""
     movies = [row for row in data.get("movies") or [] if isinstance(row, dict)]
     shows = [row for row in data.get("shows") or [] if isinstance(row, dict)]
+    dvr = [row for row in data.get("dvr") or [] if isinstance(row, dict)]
     for show in shows:
         files = [ep for ep in show.get("files") or [] if isinstance(ep, dict)]
         transcoded_count = sum(1 for ep in files if _beta_media_is_transcoded(ep))
@@ -5506,12 +5516,12 @@ def _beta_finalize_catalog(data: dict) -> dict:
             [float(ep.get("modified_at") or 0) for ep in files] or [0.0]
         )
     recent = sorted(
-        [*movies, *shows],
+        [*movies, *shows, *dvr],
         key=lambda row: float(row.get("modified_at") or 0),
         reverse=True,
     )[:24]
     episodes = sum(int(row.get("episode_count") or 0) for row in shows)
-    transcoded = sum(1 for row in movies if _beta_media_is_transcoded(row)) + sum(
+    transcoded = sum(1 for row in [*movies, *dvr] if _beta_media_is_transcoded(row)) + sum(
         int(row.get("transcoded_count") or 0) for row in shows
     )
     stats = data.setdefault("stats", {})
@@ -5521,15 +5531,16 @@ def _beta_finalize_catalog(data: dict) -> dict:
         # outputs are cataloged now, not skipped.
         stats["skipped_tsd"] = 0
     data["catalog"] = {
-        "total_titles": len(movies) + len(shows),
+        "total_titles": len(movies) + len(shows) + len(dvr),
         "movies": len(movies),
         "shows": len(shows),
+        "dvr": len(dvr),
         "episodes": episodes,
         "transcoded": transcoded,
         "complete": not bool((data.get("stats") or {}).get("limited")),
         "recently_added": recent,
     }
-    all_titles = [*movies, *shows]
+    all_titles = [*movies, *shows, *dvr]
     matched = sum(1 for row in all_titles if str(row.get("poster_url") or "").strip())
     sources: dict[str, int] = {}
     for row in all_titles:
@@ -5635,6 +5646,7 @@ def _beta_resolve_show_group_key(groups: dict, title: str, year=None) -> str:
 def _beta_scan_library(root_path: str, *, recursive: bool, posters: bool, settings: dict, root_kind: str = "") -> dict:
     movies = []
     shows = {}
+    dvr = []
     scanned = 0
     skipped_tsd = 0
 
@@ -5653,6 +5665,9 @@ def _beta_scan_library(root_path: str, *, recursive: bool, posters: bool, settin
             elif root_kind == "shows":
                 item["type"] = "show"
                 item["target"] = _wizard_source_target("show")
+            elif root_kind == "dvr":
+                item["type"] = "dvr"
+                item["target"] = _wizard_source_target("movie")
             scanned += 1
             if item["type"] == "show":
                 key = _beta_resolve_show_group_key(shows, item.get("title"), item.get("year"))
@@ -5675,6 +5690,8 @@ def _beta_scan_library(root_path: str, *, recursive: bool, posters: bool, settin
                 group["episode_count"] += 1
                 group["total_size_bytes"] += item["size_bytes"]
                 group["files"].append(item)
+            elif item["type"] == "dvr":
+                dvr.append(item)
             else:
                 movies.append(item)
 
@@ -5684,6 +5701,7 @@ def _beta_scan_library(root_path: str, *, recursive: bool, posters: bool, settin
         group["seasons"] = seasons
         group["files"].sort(key=lambda ep: (ep.get("season") or 0, ep.get("episode") or 0, ep["filename"].lower()))
     movies.sort(key=lambda item: ((item.get("title") or "").lower(), item.get("year") or 0))
+    dvr.sort(key=lambda item: (-float(item.get("modified_at") or 0), (item.get("title") or "").lower()))
     show_rows = sorted(shows.values(), key=lambda item: ((item.get("title") or "").lower(), item.get("year") or 0))
 
     data = {
@@ -5694,6 +5712,7 @@ def _beta_scan_library(root_path: str, *, recursive: bool, posters: bool, settin
         "stats": {
             "movies": len(movies),
             "shows": len(show_rows),
+            "dvr": len(dvr),
             "episodes": sum(row["episode_count"] for row in show_rows),
             "scanned": scanned,
             "skipped_tsd": skipped_tsd,
@@ -5702,6 +5721,7 @@ def _beta_scan_library(root_path: str, *, recursive: bool, posters: bool, settin
         "tmdb_configured": bool(_beta_tmdb_config(settings)),
         "movies": movies,
         "shows": show_rows,
+        "dvr": dvr,
     }
     return _beta_enrich_metadata(data, settings, enabled=True) if posters else _beta_finalize_catalog(data)
 
@@ -5751,6 +5771,7 @@ def _beta_merge_show_group(groups: dict, incoming: dict) -> None:
 
 def _beta_combine_library_scans(scans: list[dict], *, recursive: bool, settings: dict) -> dict:
     movies = []
+    dvr = []
     show_groups = {}
     roots = []
     skipped_tsd = 0
@@ -5761,6 +5782,7 @@ def _beta_combine_library_scans(scans: list[dict], *, recursive: bool, settings:
             continue
         roots.extend(scan.get("roots") or [])
         movies.extend(scan.get("movies") or [])
+        dvr.extend(scan.get("dvr") or [])
         for show in scan.get("shows") or []:
             _beta_merge_show_group(show_groups, show)
         stats = scan.get("stats") or {}
@@ -5768,6 +5790,7 @@ def _beta_combine_library_scans(scans: list[dict], *, recursive: bool, settings:
         scanned += int(stats.get("scanned") or 0)
 
     movies.sort(key=lambda item: ((item.get("title") or "").lower(), item.get("year") or 0))
+    dvr.sort(key=lambda item: (-float(item.get("modified_at") or 0), (item.get("title") or "").lower()))
     show_rows = sorted(show_groups.values(), key=lambda item: ((item.get("title") or "").lower(), item.get("year") or 0))
 
     return {
@@ -5778,6 +5801,7 @@ def _beta_combine_library_scans(scans: list[dict], *, recursive: bool, settings:
         "stats": {
             "movies": len(movies),
             "shows": len(show_rows),
+            "dvr": len(dvr),
             "episodes": sum(int(row.get("episode_count") or 0) for row in show_rows),
             "scanned": scanned,
             "skipped_tsd": skipped_tsd,
@@ -5786,6 +5810,7 @@ def _beta_combine_library_scans(scans: list[dict], *, recursive: bool, settings:
         "tmdb_configured": bool(_beta_tmdb_config(settings)),
         "movies": movies,
         "shows": show_rows,
+        "dvr": dvr,
     }
 
 
@@ -5793,7 +5818,7 @@ def _beta_refresh_predictions(data: dict) -> dict:
     data = data if isinstance(data, dict) else {}
     model = _history_prediction_model()
 
-    for item in data.get("movies") or []:
+    for item in [*(data.get("movies") or []), *(data.get("dvr") or [])]:
         if not isinstance(item, dict):
             continue
         path = str(item.get("path") or "")
@@ -6056,6 +6081,7 @@ def _beta_apply_cached_art(data: dict) -> dict:
 def _beta_library_from_scan_index(index: dict, *, settings: dict, recursive: bool = True) -> dict:
     movies = []
     shows = {}
+    dvr = []
     scanned = 0
     skipped_tsd = 0
     files = index.get("files") if isinstance(index.get("files"), dict) else {}
@@ -6067,7 +6093,10 @@ def _beta_library_from_scan_index(index: dict, *, settings: dict, recursive: boo
         if not item:
             continue
         scanned += 1
-        if item.get("type") == "show":
+        root_kind = str(row.get("root_kind") or item.get("root_kind") or "")
+        if root_kind == "dvr" or item.get("type") == "dvr":
+            dvr.append(item.copy())
+        elif item.get("type") == "show":
             key = _beta_resolve_show_group_key(shows, item.get("title"), item.get("year"))
             identity = f"{item.get('title', '').lower()}::{item.get('year') or ''}"
             group = shows.setdefault(
@@ -6098,6 +6127,7 @@ def _beta_library_from_scan_index(index: dict, *, settings: dict, recursive: boo
         group["files"].sort(key=lambda ep: (ep.get("season") or 0, ep.get("episode") or 0, ep.get("filename", "").lower()))
 
     movies.sort(key=lambda item: ((item.get("title") or "").lower(), item.get("year") or 0))
+    dvr.sort(key=lambda item: (-float(item.get("modified_at") or 0), (item.get("title") or "").lower()))
     show_rows = sorted(shows.values(), key=lambda item: ((item.get("title") or "").lower(), item.get("year") or 0))
     roots = [row for row in _beta_mapped_roots(settings) if row.get("path")]
 
@@ -6109,6 +6139,7 @@ def _beta_library_from_scan_index(index: dict, *, settings: dict, recursive: boo
         "stats": {
             "movies": len(movies),
             "shows": len(show_rows),
+            "dvr": len(dvr),
             "episodes": sum(int(row.get("episode_count") or 0) for row in show_rows),
             "scanned": scanned,
             "skipped_tsd": skipped_tsd,
@@ -6117,6 +6148,7 @@ def _beta_library_from_scan_index(index: dict, *, settings: dict, recursive: boo
         "tmdb_configured": bool(_beta_tmdb_config(settings)),
         "movies": movies,
         "shows": show_rows,
+        "dvr": dvr,
     }
     return _beta_finalize_catalog(_beta_apply_cached_art(data))
 
@@ -6264,6 +6296,9 @@ def _beta_update_scan_index(settings: dict, *, force_full: bool = False) -> tupl
             elif root_kind == "shows":
                 item["type"] = "show"
                 item["target"] = _wizard_source_target("show")
+            elif root_kind == "dvr":
+                item["type"] = "dvr"
+                item["target"] = _wizard_source_target("movie")
         except Exception:
             summary["errors"] += 1
             # Preserve a previously valid row on a transient parse failure.
@@ -9044,12 +9079,15 @@ def _transfer_output_path_for_src(src: str, output_container: str | None = None)
     suffix = (os.environ.get("SUFFIX") or "TSD").strip() or "TSD"
     folder = os.path.dirname(src)
     name = os.path.splitext(os.path.basename(src))[0]
-    extension = ".mp4" if normalize_output_container(output_container) == "mp4" else ".mkv"
+    requested = str(output_container or "").strip().lower()
+    extension = ".ts" if requested == "ts" else ".mp4" if normalize_output_container(requested) == "mp4" else ".mkv"
     return os.path.join(folder, f"{name}-{suffix}{extension}")
 
 
 def _resolved_transfer_output_container(requested: str | None, reported: str | None) -> str:
     """Honor fixed policies and accept a worker's per-file choice for Auto."""
+    if str(requested or "").strip().lower() == "ts":
+        return "ts"
     configured = normalize_output_container(requested)
     if configured != "auto":
         return configured
@@ -9104,8 +9142,14 @@ def _recover_existing_transfer_output(row: dict, retry: dict) -> dict | None:
     src = str(row.get("src") or "")
     reported_container = retry.get("output_container") or row.get("upload_reported_container")
     selected_container = _resolved_transfer_output_container(row.get("output_container"), reported_container)
+    if os.path.splitext(src)[1].lower() == ".ts":
+        selected_container = "ts"
     container_candidates = [selected_container]
-    if normalize_output_container(row.get("output_container")) == "auto" and not reported_container:
+    if (
+        os.path.splitext(src)[1].lower() != ".ts"
+        and normalize_output_container(row.get("output_container")) == "auto"
+        and not reported_container
+    ):
         container_candidates = ["mkv", "mp4"]
     out_path = ""
     for candidate in container_candidates:
@@ -9274,8 +9318,10 @@ def _finalize_transfer_output(row: dict, upload_tmp: str) -> dict:
         row.get("output_container"),
         request.headers.get("X-Output-Container"),
     )
+    if os.path.splitext(src)[1].lower() == ".ts":
+        selected_container = "ts"
     if audio_only:
-        selected_container = "mp4" if os.path.splitext(src)[1].lower() in {".mp4", ".m4v"} else "mkv"
+        selected_container = "ts" if os.path.splitext(src)[1].lower() == ".ts" else "mp4" if os.path.splitext(src)[1].lower() in {".mp4", ".m4v"} else "mkv"
     container_reason = str(request.headers.get("X-Output-Container-Reason") or "").strip()[:240]
     out_path = src if audio_only else _transfer_output_path_for_src(src, selected_container)
     if not audio_only and source_exists and os.path.exists(out_path):

@@ -35,7 +35,7 @@ _AUDIO_OPTIONS_WITH_VALUE = {
 _AUDIO_SHORT_OPTIONS_WITH_VALUE = {"-a", "-E", "-B", "-6", "-R"}
 _AUDIO_FLAG_OPTIONS = {"--all-audio", "--first-audio"}
 _NVENC_AV1_ENCODERS = {"nvenc_av1", "nvenc_av1_10bit"}
-RUNNER_CONTRACT_VERSION = "2"
+RUNNER_CONTRACT_VERSION = "3"
 
 
 def _background_process_options() -> dict:
@@ -182,7 +182,7 @@ def output_path(source: str, env: dict[str, str] | None = None) -> Path:
     src = Path(source)
     suffix = str(values.get("SUFFIX") or "TSD").strip() or "TSD"
     container = str(values.get("HB_OUTPUT_CONTAINER") or "mkv").strip().lower()
-    extension = "mp4" if container == "mp4" else "mkv"
+    extension = "ts" if container == "ts" else "mp4" if container == "mp4" else "mkv"
     canonical = str(values.get("HB_OUTPUT_PATH") or "").strip()
     if canonical:
         out = Path(canonical)
@@ -195,12 +195,22 @@ def output_path(source: str, env: dict[str, str] | None = None) -> Path:
     return src.with_name(f"{src.stem}-{suffix}.{extension}")
 
 
+def handbrake_output_path(source: str, env: dict[str, str] | None = None) -> Path:
+    """Return HandBrake's target, using MKV as the TS remux intermediate."""
+    values = env or os.environ
+    target = output_path(source, values)
+    container = str(values.get("HB_OUTPUT_CONTAINER") or "mkv").strip().lower()
+    if container != "ts":
+        return target
+    return target.with_name(f".{target.stem}.bytesqueeze-handbrake-{os.getpid()}.mkv")
+
+
 def build_command(env: dict[str, str] | None = None, *, disable_qsv_decode: bool = False) -> list[str]:
     values = env or os.environ
     source = str(values.get("SRC") or "").strip()
     if not source:
         raise ValueError("SRC is required")
-    out = output_path(source, values)
+    out = handbrake_output_path(source, values)
     preset_file = str(values.get("HB_PRESET_FILE") or "")
     preset_name = str(values.get("HB_PRESET_NAME") or "MyPresetName")
     command = [_tool("HandBrakeCLI")]
@@ -261,6 +271,33 @@ def _run(command: list[str]) -> int:
     return process.wait()
 
 
+def _remux_transport_stream(intermediate: Path, target: Path) -> int:
+    """Copy encoded video/audio into an MPEG-TS container for Plex DVR."""
+    base = [_tool("ffmpeg"), "-hide_banner", "-nostdin", "-n", "-i", str(intermediate)]
+    command = [
+        *base, "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?",
+        "-c", "copy", "-mpegts_flags", "+resend_headers", "-f", "mpegts", str(target),
+    ]
+    command_text = subprocess.list2cmdline(command) if os.name == "nt" else shlex.join(command)
+    _emit("[ByteSqueeze] DVR remux: " + command_text)
+    status = _run(command)
+    if not status:
+        return 0
+    # Some HandBrake subtitle formats cannot be represented in MPEG-TS.
+    # Preserve captions when the muxer accepts them, but do not lose an
+    # otherwise valid DVR encode because one optional subtitle is incompatible.
+    try:
+        target.unlink(missing_ok=True)
+    except OSError:
+        return status
+    fallback = [
+        *base, "-map", "0:v:0", "-map", "0:a?",
+        "-c", "copy", "-mpegts_flags", "+resend_headers", "-f", "mpegts", str(target),
+    ]
+    _emit("[ByteSqueeze] DVR remux: retrying without incompatible subtitle streams")
+    return _run(fallback)
+
+
 def _requested_qsv_decode(values: dict[str, str]) -> bool:
     return _split(values.get("HB_HW_DECODE_OPTS")) == ["--enable-hw-decoding", "qsv"]
 
@@ -297,6 +334,7 @@ def run(env: dict[str, str] | None = None) -> int:
         _emit("ERROR: HandBrakeCLI.exe is not installed or on PATH.")
         return 127
     out = output_path(source, values)
+    handbrake_out = handbrake_output_path(source, values)
     if source.lower().rsplit(".", 1)[0].endswith("-tsd"):
         _emit(f"INFO: Source already has -TSD tag, skipping encode: {source}")
         return 0
@@ -304,6 +342,12 @@ def run(env: dict[str, str] | None = None) -> int:
         _emit(f"ERROR: Output already exists: {out}")
         _emit("Refusing to overwrite. Delete or rename it first.")
         return 1
+    if handbrake_out != out and handbrake_out.exists():
+        try:
+            handbrake_out.unlink()
+        except OSError as exc:
+            _emit(f"ERROR: Could not remove stale DVR intermediate: {exc}")
+            return 1
 
     preset_name = str(values.get("HB_PRESET_NAME") or "MyPresetName")
     container = str(values.get("HB_OUTPUT_CONTAINER") or "mkv").strip().lower()
@@ -332,15 +376,30 @@ def run(env: dict[str, str] | None = None) -> int:
         if status and _requested_qsv_decode(values) and not disable_qsv_decode:
             _emit(f"[ByteSqueeze] Hardware decode: software fallback (QSV decode attempt exited {status})")
             try:
-                out.unlink(missing_ok=True)
+                handbrake_out.unlink(missing_ok=True)
             except OSError:
                 pass
             status = _run(build_command(values, disable_qsv_decode=True))
         if status:
             return status
+        if handbrake_out != out:
+            _emit("[ByteSqueeze] Preserving Plex DVR MPEG-TS container")
+            status = _remux_transport_stream(handbrake_out, out)
+            if status:
+                try:
+                    out.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return status
     except (OSError, ValueError) as exc:
-        _emit(f"ERROR: Could not start HandBrake: {exc}")
+        _emit(f"ERROR: Could not run encoder or DVR remux: {exc}")
         return 1
+    finally:
+        if handbrake_out != out:
+            try:
+                handbrake_out.unlink(missing_ok=True)
+            except OSError:
+                pass
     if not out.is_file() or out.stat().st_size <= 0:
         _emit("ERROR: Encode failed, output file was not created.")
         return 1

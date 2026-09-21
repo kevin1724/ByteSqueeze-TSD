@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 
 
-VIDEO_EXTS = (".mkv", ".mp4", ".avi", ".mov", ".m4v")
+VIDEO_EXTS = (".mkv", ".mp4", ".avi", ".mov", ".m4v", ".ts")
 
 DATA_DIR = os.path.abspath(os.environ.get("HB_DATA_DIR") or "/work/state")
 LOG_DIR = os.path.join(DATA_DIR, "logs")

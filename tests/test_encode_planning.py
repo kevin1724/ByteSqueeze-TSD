@@ -164,6 +164,22 @@ class EncodePlanningTests(unittest.TestCase):
             os.path.join("/media", "Futurama - S11E08-TSD.mp4"),
         )
 
+    def test_transport_stream_sources_preserve_dvr_container(self):
+        canonical = jobs._canonical_output_plan(
+            "/media/dvr/Evening News.ts",
+            "TSD",
+            {"output_container": "mp4", "web_optimized": True},
+        )
+        self.assertEqual(canonical["container"], "ts")
+        self.assertEqual(canonical["extension"], ".ts")
+        self.assertEqual(canonical["cli_args"], ["--format", "av_mkv"])
+        self.assertFalse(canonical["web_optimized"])
+        self.assertEqual(
+            canonical["output_path"],
+            os.path.join("/media/dvr", "Evening News-TSD.ts"),
+        )
+        self.assertIn("DVR", canonical["reason"])
+
     def test_auto_container_is_selected_per_file_from_effective_tracks(self):
         copy_preset = {
             "AudioTrackSelectionBehavior": "all",

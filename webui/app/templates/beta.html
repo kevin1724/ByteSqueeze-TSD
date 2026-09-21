@@ -1123,6 +1123,7 @@
       <div class="beta-stats" aria-label="Library totals">
         <div class="beta-stat"><span>Movies</span><strong id="statMovies">0</strong></div>
         <div class="beta-stat"><span>Shows</span><strong id="statShows">0</strong></div>
+        <div class="beta-stat"><span>DVR</span><strong id="statDvr">0</strong></div>
         <div class="beta-stat"><span>Episodes</span><strong id="statEpisodes">0</strong></div>
         <div class="beta-stat"><span>Posters</span><strong id="statArtwork">0%</strong></div>
         <div class="beta-stat"><span>Tracked</span><strong id="statTracked">0</strong></div>
@@ -1156,6 +1157,7 @@
     <div class="library-view-tabs" role="tablist" aria-label="Library type">
       <button class="library-view-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="libraryMoviesPanel" data-library-view="movies">Movies <span data-library-tab-count="movies">0</span></button>
       <button class="library-view-tab" type="button" role="tab" aria-selected="false" aria-controls="libraryShowsPanel" data-library-view="shows">Shows <span data-library-tab-count="shows">0</span></button>
+      <button class="library-view-tab" type="button" role="tab" aria-selected="false" aria-controls="libraryDvrPanel" data-library-view="dvr">DVR <span data-library-tab-count="dvr">0</span></button>
     </div>
 
     <section class="beta-layout" data-mobile-view="movies">
@@ -1173,6 +1175,14 @@
           <span id="showCount" class="beta-count">0</span>
         </div>
         <div id="showsGrid" class="beta-grid"></div>
+      </div>
+
+      <div id="libraryDvrPanel" class="beta-column library-dvr-column" role="tabpanel">
+        <div class="beta-column-header">
+          <h2>DVR</h2>
+          <span id="dvrCount" class="beta-count">0</span>
+        </div>
+        <div id="dvrGrid" class="beta-grid"></div>
       </div>
     </section>
   </main>
@@ -1296,7 +1306,7 @@
   <script>
     const roots = {{ roots|tojson }};
     const tmdbConfigured = {{ tmdb_configured|tojson }};
-    let libraryData = { movies: [], shows: [], stats: {} };
+    let libraryData = { movies: [], shows: [], dvr: [], stats: {} };
     const selectedPaths = new Set();
     const expandedShows = new Set();
     const expandedSeasons = new Set();
@@ -1307,7 +1317,7 @@
     let queueBusy = false;
     let smartPreviewRun = 0;
     let smartSafetyProfile = {};
-    const libraryRenderLimit = { movies: 96, shows: 96 };
+    const libraryRenderLimit = { movies: 96, shows: 96, dvr: 96 };
 
     function el(id) {
       return document.getElementById(id);
@@ -1441,13 +1451,17 @@
         shows: sortItems(
           (libraryData.shows || []).filter((item) => includesFilter(item, needle) && matchesQuickFilter(item, quickFilter, "show")),
           sortMode
+        ),
+        dvr: sortItems(
+          (libraryData.dvr || []).filter((item) => includesFilter(item, needle) && matchesQuickFilter(item, quickFilter, "dvr")),
+          sortMode
         )
       };
     }
 
     function selectVisible() {
       const visible = visibleLibraryRows();
-      [...visible.movies, ...visible.shows].forEach((item) => {
+      [...visible.movies, ...visible.shows, ...visible.dvr].forEach((item) => {
         videoQueuePaths(item).forEach((path) => selectedPaths.add(path));
       });
       updateSelectionUi();
@@ -1590,7 +1604,7 @@
     }
 
     function setLibraryMobileView(view, focusTab = false) {
-      const selectedView = view === "shows" ? "shows" : "movies";
+      const selectedView = ["shows", "dvr"].includes(view) ? view : "movies";
       const layout = document.querySelector(".beta-layout");
       if (layout) layout.dataset.mobileView = selectedView;
       document.querySelectorAll("[data-library-view]").forEach((button) => {
@@ -1654,6 +1668,17 @@
               preset: presetForPath(path)
             };
           }
+        }
+      }
+      for (const item of libraryData.dvr || []) {
+        if (item?.path === path) {
+          return {
+            path,
+            size_bytes: Number(item.size_bytes || 0) || 0,
+            is_hdr: Boolean(item.is_hdr),
+            predicted_saved_bytes: Number(item.prediction?.estimated_saved_bytes || 0) || 0,
+            preset: presetForPath(path)
+          };
         }
       }
       return { path, size_bytes: 0, is_hdr: false, predicted_saved_bytes: 0, preset: presetForPath(path) };
@@ -1806,7 +1831,7 @@
       if (/\b(2160p|4k|uhd)\b/.test(text)) return "2160p";
       if (/\b(1080p|fhd)\b/.test(text)) return "1080p";
       if (/\b(720p)\b/.test(text)) return "720p";
-      return item?.type === "show" ? "Show" : "Movie";
+      return item?.type === "show" ? "Show" : item?.type === "dvr" ? "DVR" : "Movie";
     }
 
     function targetCodec() {
@@ -2291,14 +2316,16 @@
     }
 
     function makeMovieCard(item) {
+      const mediaLabel = item?.type === "dvr" ? "DVR" : "Movie";
+      const itemLabel = item?.type === "dvr" ? "DVR recording" : "movie";
       const card = document.createElement("article");
       card.className = "beta-card";
       if (itemIsSelected(item)) card.classList.add("beta-card-selected");
-      card.appendChild(cardPoster(item, "Movie"));
+      card.appendChild(cardPoster(item, mediaLabel));
 
       const body = document.createElement("div");
       body.className = "beta-card-body";
-      if (!item.transcoded) addSelectLine(body, item, "Select movie");
+      if (!item.transcoded) addSelectLine(body, item, `Select ${itemLabel}`);
 
       const title = document.createElement("div");
       title.className = "beta-card-title";
@@ -2306,7 +2333,7 @@
       body.appendChild(title);
 
       addBadgeRow(body, [
-        mediaBadge("Movie"),
+        mediaBadge(mediaLabel),
         item.transcoded ? mediaBadge("Transcoded", "badge-sdr") : null,
         mediaBadge(qualityBadge(item)),
         mediaBadge(item.is_hdr ? "HDR" : "SDR", item.is_hdr ? "badge-hdr" : "badge-sdr"),
@@ -2329,7 +2356,7 @@
       const meta = document.createElement("div");
       meta.className = "beta-card-meta";
       appendMetaLine(meta, predictionText(item.prediction));
-      appendMetaLine(meta, `${item.target?.label || "Movie"} target: calculated per title in Size Wizard`);
+      appendMetaLine(meta, `${mediaLabel} target: calculated per ${item?.type === "dvr" ? "recording" : "title"} in Size Wizard`);
       appendMetaLine(meta, item.filename || "");
       details.appendChild(meta);
       body.appendChild(details);
@@ -2340,34 +2367,34 @@
       wizard.type = "button";
       wizard.className = "wizard-open-button";
       wizard.textContent = "Size Wizard";
-      wizard.setAttribute("aria-label", `Open ${item.title || "movie"} in Size Wizard`);
+      wizard.setAttribute("aria-label", `Open ${item.title || itemLabel} in Size Wizard`);
       wizard.onclick = () => openInWizard(item.path);
       if (!item.transcoded) actions.appendChild(wizard);
       const audio = document.createElement("button");
       audio.type = "button";
       audio.className = "wizard-open-button";
       audio.textContent = "Audio";
-      audio.setAttribute("aria-label", `Optimize ${item.title || "movie"} audio without re-encoding video`);
+      audio.setAttribute("aria-label", `Optimize ${item.title || itemLabel} audio without re-encoding video`);
       audio.onclick = () => openAudioOptimization(item.path);
       actions.appendChild(audio);
       const queue = document.createElement("button");
       queue.type = "button";
       queue.className = "smart-queue-button";
       queue.textContent = "Smart Queue";
-      queue.onclick = () => queuePaths([item.path], item.title || "movie", { preset: "smart", trigger: queue });
+      queue.onclick = () => queuePaths([item.path], item.title || itemLabel, { preset: "smart", trigger: queue });
       if (!item.transcoded) actions.appendChild(queue);
       const tune = document.createElement("button");
       tune.type = "button";
       tune.className = "smart-tune-button";
       tune.textContent = "Tune";
-      tune.setAttribute("aria-label", `Fine tune Smart Preset for ${item.title || "movie"}`);
-      tune.onclick = () => openSmartTune([item.path], item.title || "movie", tune);
+      tune.setAttribute("aria-label", `Fine tune Smart Preset for ${item.title || itemLabel}`);
+      tune.onclick = () => openSmartTune([item.path], item.title || itemLabel, tune);
       if (!item.transcoded) actions.appendChild(tune);
       const preview = document.createElement("button");
       preview.type = "button";
       preview.textContent = "Preview";
-      preview.setAttribute("aria-label", `Preview Smart Preset for ${item.title || "movie"}`);
-      preview.onclick = () => openSmartPreview([item.path], item.title || "movie", preview);
+      preview.setAttribute("aria-label", `Preview Smart Preset for ${item.title || itemLabel}`);
+      preview.onclick = () => openSmartPreview([item.path], item.title || itemLabel, preview);
       if (!item.transcoded) actions.insertBefore(preview, tune);
       body.appendChild(actions);
 
@@ -2740,30 +2767,38 @@
     function resetLibraryWindow() {
       libraryRenderLimit.movies = 96;
       libraryRenderLimit.shows = 96;
+      libraryRenderLimit.dvr = 96;
       renderLibrary();
     }
 
     function renderLibrary() {
-      const { movies, shows } = visibleLibraryRows();
+      const { movies, shows, dvr } = visibleLibraryRows();
       const visibleMovies = movies.slice(0, libraryRenderLimit.movies);
       const visibleShows = shows.slice(0, libraryRenderLimit.shows);
+      const visibleDvr = dvr.slice(0, libraryRenderLimit.dvr);
 
       el("moviesGrid").innerHTML = "";
       el("showsGrid").innerHTML = "";
+      el("dvrGrid").innerHTML = "";
       visibleMovies.forEach((item) => el("moviesGrid").appendChild(makeMovieCard(item)));
       visibleShows.forEach((item) => el("showsGrid").appendChild(makeShowCard(item)));
+      visibleDvr.forEach((item) => el("dvrGrid").appendChild(makeMovieCard(item)));
       renderLoadMore(el("moviesGrid"), "movies", visibleMovies.length, movies.length);
       renderLoadMore(el("showsGrid"), "shows", visibleShows.length, shows.length);
+      renderLoadMore(el("dvrGrid"), "dvr", visibleDvr.length, dvr.length);
 
       if (!movies.length) renderEmpty(el("moviesGrid"), "No movies found.");
       if (!shows.length) renderEmpty(el("showsGrid"), "No shows found.");
+      if (!dvr.length) renderEmpty(el("dvrGrid"), "No DVR recordings found. Map a DVR folder in Settings, then scan.");
 
       renderReleaseCalendar();
 
       el("movieCount").textContent = `${visibleMovies.length} of ${movies.length}`;
       el("showCount").textContent = `${visibleShows.length} of ${shows.length}`;
+      el("dvrCount").textContent = `${visibleDvr.length} of ${dvr.length}`;
       document.querySelector('[data-library-tab-count="movies"]')?.replaceChildren(String(movies.length));
       document.querySelector('[data-library-tab-count="shows"]')?.replaceChildren(String(shows.length));
+      document.querySelector('[data-library-tab-count="dvr"]')?.replaceChildren(String(dvr.length));
     }
 
     function renderReleaseCalendar() {
@@ -2808,10 +2843,11 @@
     function renderStats(stats = {}, tracking = {}, metadata = {}) {
       el("statMovies").textContent = stats.movies || 0;
       el("statShows").textContent = stats.shows || 0;
+      el("statDvr").textContent = stats.dvr || 0;
       el("statEpisodes").textContent = stats.episodes || 0;
       el("statArtwork").textContent = `${Number(metadata?.artwork?.percent || 0).toLocaleString()}%`;
       el("statTracked").textContent = tracking.tracked_count || 0;
-      const totalTitles = Number(stats.movies || 0) + Number(stats.shows || 0);
+      const totalTitles = Number(stats.movies || 0) + Number(stats.shows || 0) + Number(stats.dvr || 0);
       const summary = el("libraryHeaderSummary");
       if (summary) summary.textContent = `${totalTitles.toLocaleString()} titles · ${Number(stats.episodes || 0).toLocaleString()} episodes · ${Number(tracking.tracked_count || 0).toLocaleString()} tracked shows`;
     }
@@ -2819,7 +2855,8 @@
     function posterProblemText(data = {}) {
       const rows = [
         ...(Array.isArray(data.movies) ? data.movies : []),
-        ...(Array.isArray(data.shows) ? data.shows : [])
+        ...(Array.isArray(data.shows) ? data.shows : []),
+        ...(Array.isArray(data.dvr) ? data.dvr : [])
       ];
       const errors = rows.filter((item) => item.source === "tmdb_error");
       if (!errors.length) return "";
@@ -2864,7 +2901,7 @@
         el("betaStatus").textContent = data.generated_at ? "Loaded saved scan." : "No saved scan yet.";
       } catch (e) {
         el("betaStatus").textContent = e.message || "Failed to load saved scan";
-        libraryData = { movies: [], shows: [], stats: {} };
+        libraryData = { movies: [], shows: [], dvr: [], stats: {} };
         renderStats({}, {}, {});
         renderLibrary();
       }
@@ -2913,7 +2950,7 @@
         el("betaStatus").textContent = e.message || "Scan failed";
         if (window.setAppStatus) setAppStatus("Error", "error");
         if (window.appToast) appToast(e.message || "Library scan failed.", "error");
-        libraryData = { movies: [], shows: [], stats: {} };
+        libraryData = { movies: [], shows: [], dvr: [], stats: {} };
         renderStats({}, {}, {});
         renderLibrary();
       } finally {

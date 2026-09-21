@@ -861,9 +861,9 @@
        Beta folder mapping
        ------------------------------------------------------------ -->
   <div class="section-card beta-settings-section">
-    <h2>Beta library folders</h2>
+    <h2>Library folders</h2>
     <p class="small">
-      Map the exact movie and show folders Beta should scan. This keeps Beta away from unrelated folders.
+      Map the exact movie, show, and Plex DVR folders ByteSqueeze should scan. DVR recordings stay separate and retain their .ts container.
     </p>
     <div class="row">
       <button id="mapFoldersBtn">Map drives and folders</button>
@@ -1159,7 +1159,7 @@
       </div>
 
       <p class="small">
-        Add only the folders Beta should scan. Movie folders and show folders are kept separate so detection starts with the right type.
+        Add only the folders ByteSqueeze should scan. Movie, show, and DVR folders stay separate so detection and output handling start with the right type.
       </p>
 
       <div class="small">
@@ -1184,6 +1184,7 @@
           <div class="folder-browser-actions">
             <button id="folderAddMovieBtn" type="button">Movies</button>
             <button id="folderAddShowBtn" type="button">Shows</button>
+            <button id="folderAddDvrBtn" type="button">DVR</button>
             <button id="folderAddCancelBtn" type="button">Cancel</button>
           </div>
         </div>
@@ -1201,6 +1202,12 @@
           <h3>Show folders</h3>
           <div id="showFolderRows"></div>
           <button id="addShowFolderBtn" type="button" style="margin-top:10px;">Add show folder</button>
+        </div>
+
+        <div class="folder-map-panel">
+          <h3>DVR folders</h3>
+          <div id="dvrFolderRows"></div>
+          <button id="addDvrFolderBtn" type="button" style="margin-top:10px;">Add DVR folder</button>
         </div>
       </div>
 
@@ -1593,16 +1600,19 @@
       const data = value && typeof value === "object" ? value : {};
       return {
         movies: normalizeFolderRows(data.movies),
-        shows: normalizeFolderRows(data.shows)
+        shows: normalizeFolderRows(data.shows),
+        dvr: normalizeFolderRows(data.dvr)
       };
     }
 
     function getFolderKindRows(kind) {
-      return kind === "shows" ? betaMediaFolders.shows : betaMediaFolders.movies;
+      if (kind === "shows") return betaMediaFolders.shows;
+      if (kind === "dvr") return betaMediaFolders.dvr;
+      return betaMediaFolders.movies;
     }
 
     function folderKindLabel(kind) {
-      return kind === "shows" ? "Show" : "Movie";
+      return kind === "shows" ? "Show" : kind === "dvr" ? "DVR" : "Movie";
     }
 
     function getAllowedRootRows() {
@@ -1715,7 +1725,8 @@
       if (!node) return;
       const movieCount = betaMediaFolders.movies.length;
       const showCount = betaMediaFolders.shows.length;
-      node.textContent = `${movieCount} movie folder${movieCount === 1 ? "" : "s"}, ${showCount} show folder${showCount === 1 ? "" : "s"} mapped`;
+      const dvrCount = betaMediaFolders.dvr.length;
+      node.textContent = `${movieCount} movie folder${movieCount === 1 ? "" : "s"}, ${showCount} show folder${showCount === 1 ? "" : "s"}, ${dvrCount} DVR folder${dvrCount === 1 ? "" : "s"} mapped`;
     }
 
     function renderAllowedRoots() {
@@ -1760,7 +1771,7 @@
     }
 
     function renderFolderRows(kind) {
-      const wrap = document.getElementById(kind === "shows" ? "showFolderRows" : "movieFolderRows");
+      const wrap = document.getElementById(kind === "shows" ? "showFolderRows" : kind === "dvr" ? "dvrFolderRows" : "movieFolderRows");
       if (!wrap) return;
       const rows = getFolderKindRows(kind);
       wrap.innerHTML = "";
@@ -1768,7 +1779,7 @@
       if (rows.length === 0) {
         const empty = document.createElement("div");
         empty.className = "small";
-        empty.textContent = kind === "shows" ? "No show folders mapped." : "No movie folders mapped.";
+        empty.textContent = kind === "shows" ? "No show folders mapped." : kind === "dvr" ? "No DVR folders mapped." : "No movie folders mapped.";
         wrap.appendChild(empty);
       }
 
@@ -1779,7 +1790,7 @@
         const pathInput = document.createElement("input");
         pathInput.className = "folder-map-path";
         pathInput.type = "text";
-        pathInput.placeholder = kind === "shows" ? "/media/shows" : "/media/movies";
+        pathInput.placeholder = kind === "shows" ? "/media/shows" : kind === "dvr" ? "/media/dvr" : "/media/movies";
         pathInput.value = row.path || "";
         pathInput.addEventListener("input", () => {
           rows[index].path = pathInput.value;
@@ -1814,6 +1825,7 @@
       renderAllowedRoots();
       renderFolderRows("movies");
       renderFolderRows("shows");
+      renderFolderRows("dvr");
       updateFolderMapSummary();
     }
 
@@ -1851,7 +1863,7 @@
     }
 
     function showFolderBrowser(kind, startPath) {
-      folderBrowserKind = kind === "shows" ? "shows" : "movies";
+      folderBrowserKind = ["shows", "dvr"].includes(kind) ? kind : "movies";
       const panel = document.getElementById("folderBrowserPanel");
       const title = document.getElementById("folderBrowserTitle");
       if (panel) panel.hidden = false;
@@ -2040,7 +2052,8 @@
     function getBetaMediaFoldersForSave() {
       return {
         movies: cleanFolderRows(betaMediaFolders.movies),
-        shows: cleanFolderRows(betaMediaFolders.shows)
+        shows: cleanFolderRows(betaMediaFolders.shows),
+        dvr: cleanFolderRows(betaMediaFolders.dvr)
       };
     }
 
@@ -3954,6 +3967,8 @@
       if (addMovieFolderBtn) addMovieFolderBtn.onclick = () => addFolderRow("movies");
       const addShowFolderBtn = document.getElementById("addShowFolderBtn");
       if (addShowFolderBtn) addShowFolderBtn.onclick = () => addFolderRow("shows");
+      const addDvrFolderBtn = document.getElementById("addDvrFolderBtn");
+      if (addDvrFolderBtn) addDvrFolderBtn.onclick = () => addFolderRow("dvr");
       const folderBrowserUpBtn = document.getElementById("folderBrowserUpBtn");
       if (folderBrowserUpBtn) folderBrowserUpBtn.onclick = goUpFolderBrowser;
       const folderBrowserUseBtn = document.getElementById("folderBrowserUseBtn");
@@ -3966,6 +3981,8 @@
       if (folderAddMovieBtn) folderAddMovieBtn.onclick = () => choosePendingFolderKind("movies");
       const folderAddShowBtn = document.getElementById("folderAddShowBtn");
       if (folderAddShowBtn) folderAddShowBtn.onclick = () => choosePendingFolderKind("shows");
+      const folderAddDvrBtn = document.getElementById("folderAddDvrBtn");
+      if (folderAddDvrBtn) folderAddDvrBtn.onclick = () => choosePendingFolderKind("dvr");
       const folderAddCancelBtn = document.getElementById("folderAddCancelBtn");
       if (folderAddCancelBtn) folderAddCancelBtn.onclick = hideFolderAddChoice;
       const saveFolderMapBtn = document.getElementById("saveFolderMapBtn");

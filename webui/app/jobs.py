@@ -1162,6 +1162,18 @@ def _canonical_output_plan(
         preset_definition=preset_definition,
         selected_encoder=selected_encoder,
     )
+    # Plex DVR recordings are MPEG transport streams. Keep that container
+    # identity after transcoding so Plex does not reclassify the replacement
+    # as an unrelated movie/episode. The shared runner encodes to a temporary
+    # MKV and remuxes the completed streams into this final .ts destination.
+    if os.path.splitext(str(src or ""))[1].lower() == ".ts":
+        plan.update({
+            "container": "ts",
+            "extension": ".ts",
+            "web_optimized": False,
+            "reason": "Plex DVR transport stream preserved",
+            "cli_args": ["--format", "av_mkv"],
+        })
     return {
         **plan,
         "output_path": _output_path_for_source(src, suffix, policy, plan=plan),
@@ -4252,7 +4264,7 @@ def list_job_history_for_api(limit: int = 5000) -> list[dict]:
 def _audio_only_paths(src_path: str, job_id: str, replace_source: bool) -> tuple[str, str]:
     folder = os.path.dirname(src_path)
     base, extension = os.path.splitext(os.path.basename(src_path))
-    extension = extension if extension.lower() in {".mkv", ".mp4", ".m4v"} else ".mkv"
+    extension = extension if extension.lower() in {".mkv", ".mp4", ".m4v", ".ts"} else ".mkv"
     temp_out = os.path.join(folder, f".{base}.bytesqueeze-audio-{job_id}.tmp{extension}")
     final_out = src_path if replace_source else os.path.join(folder, f"{base}-Audio-TSD{extension}")
     return temp_out, final_out

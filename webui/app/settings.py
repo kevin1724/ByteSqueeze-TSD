@@ -85,6 +85,7 @@ DEFAULT_SETTINGS = {
     "beta_media_folders": {
         "movies": [],
         "shows": [],
+        "dvr": [],
     },
 
     # Beta incremental auto scan. The scan engine reuses the Beta cache and
@@ -207,6 +208,7 @@ def _normalize_beta_media_folders(value) -> dict:
     return {
         "movies": _normalize_beta_folder_rows(value.get("movies"), "Movies"),
         "shows": _normalize_beta_folder_rows(value.get("shows"), "Shows"),
+        "dvr": _normalize_beta_folder_rows(value.get("dvr"), "DVR"),
     }
 
 

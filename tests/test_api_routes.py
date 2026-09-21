@@ -1580,10 +1580,18 @@ class ApiRouteSmokeTests(unittest.TestCase):
             ),
             os.path.join(TEST_MEDIA, "Source.Movie-TSD.mp4"),
         )
+        self.assertEqual(
+            app_routes._transfer_output_path_for_src(
+                os.path.join(TEST_MEDIA, "Plex.DVR.ts"),
+                "ts",
+            ),
+            os.path.join(TEST_MEDIA, "Plex.DVR-TSD.ts"),
+        )
         self.assertEqual(app_routes._resolved_transfer_output_container("auto", "mp4"), "mp4")
         self.assertEqual(app_routes._resolved_transfer_output_container("auto", "mkv"), "mkv")
         self.assertEqual(app_routes._resolved_transfer_output_container("auto", "invalid"), "mkv")
         self.assertEqual(app_routes._resolved_transfer_output_container("mkv", "mp4"), "mkv")
+        self.assertEqual(app_routes._resolved_transfer_output_container("ts", "mkv"), "ts")
 
     def test_remote_transfer_ledger_reserves_source_after_queue_placeholder_is_removed(self):
         source = os.path.join(TEST_MEDIA, "Reserved.Episode.mkv")
@@ -3819,6 +3827,59 @@ class ApiRouteSmokeTests(unittest.TestCase):
         self.assertIsNotNone(match)
         self.assertEqual(match["id"], 2)
         self.assertIsNone(_choose_show(rows, "Modern Family", 2009))
+
+    def test_dvr_root_catalogs_transport_streams_separately(self):
+        dvr_root = os.path.join(TEST_MEDIA, "plex-dvr-library")
+        os.makedirs(dvr_root, exist_ok=True)
+        recording = os.path.join(dvr_root, "Evening.News.2026-09-20.ts")
+        with open(recording, "wb") as handle:
+            handle.write(b"transport-stream")
+        try:
+            with patch.object(
+                app_routes,
+                "_beta_mapped_roots",
+                return_value=[{"path": dvr_root, "kind": "dvr", "label": "DVR"}],
+            ):
+                data = app_routes._beta_scan_library(
+                    dvr_root,
+                    recursive=True,
+                    posters=False,
+                    settings={"beta_media_folders": {"dvr": [{"path": dvr_root}]}},
+                    root_kind="dvr",
+                )
+            self.assertEqual(data["stats"]["dvr"], 1)
+            self.assertEqual(data["stats"]["movies"], 0)
+            self.assertEqual(data["movies"], [])
+            self.assertEqual(data["dvr"][0]["type"], "dvr")
+            self.assertEqual(data["dvr"][0]["root_kind"], "dvr")
+            self.assertEqual(data["dvr"][0]["path"], recording)
+            self.assertEqual(data["catalog"]["dvr"], 1)
+        finally:
+            if os.path.isfile(recording):
+                os.remove(recording)
+            if os.path.isdir(dvr_root):
+                os.rmdir(dvr_root)
+
+    def test_dvr_folder_mapping_is_normalized_and_exposed_as_a_root(self):
+        dvr_root = os.path.join(TEST_MEDIA, "recordings")
+        settings = {
+            "beta_media_folders": {
+                "movies": [],
+                "shows": [],
+                "dvr": [{"path": dvr_root, "label": "Plex DVR"}],
+            }
+        }
+        normalized = app_settings._normalize_beta_media_folders(
+            settings["beta_media_folders"]
+        )
+        settings["beta_media_folders"] = normalized
+        roots = app_routes._beta_mapped_roots(settings)
+
+        self.assertEqual(normalized["dvr"], [{"path": dvr_root, "label": "Plex DVR"}])
+        self.assertEqual(
+            roots,
+            [{"path": dvr_root, "label": "DVR: Plex DVR", "kind": "dvr"}],
+        )
 
     def test_incremental_scan_reparses_unchanged_files_after_parser_upgrade(self):
         shows_root = os.path.join(TEST_MEDIA, "parser-upgrade-shows")

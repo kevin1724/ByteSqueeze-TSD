@@ -14,7 +14,7 @@ import json
 # -----------------------------
 # Video formats we allow browsing/encoding
 # -----------------------------
-VIDEO_EXTS = (".mkv", ".mp4", ".avi", ".mov", ".m4v")
+VIDEO_EXTS = (".mkv", ".mp4", ".avi", ".mov", ".m4v", ".ts")
 
 
 # ============================================================

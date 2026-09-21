@@ -139,6 +139,7 @@ services:
     volumes:
       - /path/to/movies:/media/Movies
       - /path/to/shows:/media/Shows
+      - /path/to/plex-dvr:/media/DVR
       - ./data:/app/data
       - ./presets:/presets
 ```
@@ -160,7 +161,7 @@ Recommended first setup:
 1. Open Settings.
 2. Select your CPU profile.
 3. Confirm or upload your HandBrake presets.
-4. Map movie and show folders.
+4. Map movie, show, and Plex DVR folders. Files from a DVR mapping are shown in the Library's DVR section, and `.ts` recordings are encoded back to MPEG-TS.
 5. Optionally add TMDb credentials for preferred artwork. Leave keyless artwork enabled so local sidecars, TVmaze, and Apple Search can fill any gaps without an API key.
 6. Run a Library scan and track the shows you want in the release calendar.
 7. Queue a few test encodes.
@@ -654,7 +655,7 @@ Check your Docker volume mounts. Media should be mounted under a path the app ca
 
 ### Library scan is empty
 
-Open Settings and map at least one movie folder or show folder.
+Open Settings and map at least one movie, show, or DVR folder. Plex DVR recordings should be mounted under `/media/...` and mapped as DVR so they appear in the separate DVR Library section.
 
 ### Posters do not show
 
