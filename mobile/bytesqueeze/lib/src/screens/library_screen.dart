@@ -41,13 +41,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
       final files = asList(item['files'])
           .map((row) => '${asMap(row)['path'] ?? ''}')
           .join(' ');
-      final matchesSearch =
-          query.isEmpty ||
+      final matchesSearch = query.isEmpty ||
           '${item['title'] ?? ''} ${item['year'] ?? ''} $files'
               .toLowerCase()
               .contains(query);
       return matchesSearch && _matchesQuickFilter(item);
-    }).toList()..sort(_compareItems);
+    }).toList()
+      ..sort(_compareItems);
     final stats = asMap(widget.controller.library['stats']);
     final configured = widget.controller.library['configured'] != false;
     final tmdbConfigured = widget.controller.library['tmdb_configured'] == true;
@@ -71,8 +71,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     trailing: widget.controller.showSecondaryUi
                         ? IconButton(
                             tooltip: 'Refresh library on server',
-                            onPressed:
-                                widget.controller.canControl &&
+                            onPressed: widget.controller.canControl &&
                                     !widget.controller.busy
                                 ? () => _run(widget.controller.refreshLibrary)
                                 : null,
@@ -160,6 +159,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
                                   Icons.compress_rounded,
                                 ),
                                 ('hdr', 'HDR', Icons.hdr_on_rounded),
+                                (
+                                  'transcoded',
+                                  'Transcoded',
+                                  Icons.video_file_rounded,
+                                ),
                                 if (_shows)
                                   (
                                     'tracked',
@@ -243,27 +247,24 @@ class _LibraryScreenState extends State<LibraryScreen> {
                           : 'Latest files discovered on mapped drives',
                     ),
                     _MediaRail(
-                      items:
-                          (_shows
-                                  ? all
-                                        .where(
-                                          (item) => item['tracked'] == true,
-                                        )
-                                        .toList()
-                                  : asList(
-                                          asMap(
-                                            widget
-                                                .controller
-                                                .library['catalog'],
-                                          )['recently_added'],
-                                        )
-                                        .map(asMap)
-                                        .where(
-                                          (item) => item['type'] == 'movie',
-                                        )
-                                        .toList())
-                              .take(12)
-                              .toList(),
+                      items: (_shows
+                              ? all
+                                  .where(
+                                    (item) => item['tracked'] == true,
+                                  )
+                                  .toList()
+                              : asList(
+                                  asMap(
+                                    widget.controller.library['catalog'],
+                                  )['recently_added'],
+                                )
+                                  .map(asMap)
+                                  .where(
+                                    (item) => item['type'] == 'movie',
+                                  )
+                                  .toList())
+                          .take(12)
+                          .toList(),
                       isShow: _shows,
                       onTap: _openDetails,
                     ),
@@ -290,9 +291,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       icon: _shows
                           ? Icons.tv_off_outlined
                           : Icons.movie_filter_outlined,
-                      title: query.isEmpty
-                          ? 'Nothing scanned yet'
-                          : 'No matches',
+                      title:
+                          query.isEmpty ? 'Nothing scanned yet' : 'No matches',
                       message: query.isEmpty
                           ? 'Run a library refresh after mapping media folders in TSD.'
                           : 'Try another title or year.',
@@ -381,6 +381,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
     if (_quickFilter == 'tracked') {
       return _shows && item['tracked'] == true;
+    }
+    if (_quickFilter == 'transcoded') {
+      return item['transcoded'] == true ||
+          item['has_transcoded'] == true ||
+          asList(item['files'])
+              .map(asMap)
+              .any((row) => row['transcoded'] == true);
     }
     return true;
   }
@@ -483,6 +490,8 @@ class _MediaTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final prediction = asMap(item['prediction']);
     final savings = (prediction['savings_percent'] as num?)?.round();
+    final transcoded =
+        item['transcoded'] == true || item['has_transcoded'] == true;
     return Material(
       color: ByteSqueezeColors.surface,
       shape: RoundedRectangleBorder(
@@ -512,18 +521,24 @@ class _MediaTile extends StatelessWidget {
                   Positioned(
                     top: 8,
                     right: 8,
-                    child: isShow && item['tracked'] == true
+                    child: transcoded
                         ? const StatusPill(
-                            label: 'Tracked',
+                            label: 'Transcoded',
                             color: ByteSqueezeColors.mint,
-                            icon: Icons.notifications_active_outlined,
+                            icon: Icons.check_circle_outline_rounded,
                           )
-                        : savings != null
-                        ? StatusPill(
-                            label: '$savings% save',
-                            color: ByteSqueezeColors.cyan,
-                          )
-                        : const SizedBox.shrink(),
+                        : isShow && item['tracked'] == true
+                            ? const StatusPill(
+                                label: 'Tracked',
+                                color: ByteSqueezeColors.mint,
+                                icon: Icons.notifications_active_outlined,
+                              )
+                            : savings != null
+                                ? StatusPill(
+                                    label: '$savings% save',
+                                    color: ByteSqueezeColors.cyan,
+                                  )
+                                : const SizedBox.shrink(),
                   ),
                 ],
               ),
@@ -599,12 +614,33 @@ class _MediaDetailsState extends State<_MediaDetails> {
     return values;
   }
 
+  List<String> get _videoPaths {
+    if (widget.isShow) {
+      return asList(widget.item['files'])
+          .map(asMap)
+          .where((row) => row['transcoded'] != true)
+          .map((row) => '${row['path'] ?? ''}')
+          .where((path) => path.isNotEmpty)
+          .toList();
+    }
+    return widget.item['transcoded'] == true ? <String>[] : _paths;
+  }
+
   Future<void> _queue(
     String preset, {
     List<String>? paths,
     String? scopeLabel,
   }) async {
-    final queuePaths = paths ?? _paths;
+    final queuePaths = paths ?? _videoPaths;
+    if (queuePaths.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+              'This video is already transcoded. Use Optimize audio only.'),
+        ),
+      );
+      return;
+    }
     setState(() => _working = true);
     try {
       final parts = _queueTarget.split(':');
@@ -734,7 +770,8 @@ class _MediaDetailsState extends State<_MediaDetails> {
     );
     if (queued == true && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Audio-only job queued. Video will be copied.')),
+        const SnackBar(
+            content: Text('Audio-only job queued. Video will be copied.')),
       );
     }
   }
@@ -797,16 +834,17 @@ class _MediaDetailsState extends State<_MediaDetails> {
     final seasons = widget.isShow
         ? _seasonGroups(files)
         : <int, List<Map<String, dynamic>>>{};
+    final allTranscoded = _paths.isNotEmpty && _videoPaths.isEmpty;
     final posterSource =
         '${widget.item['poster_source'] ?? widget.item['metadata_source'] ?? widget.item['source'] ?? ''}'
             .toLowerCase();
     final artworkLabel = posterSource == 'tmdb'
         ? 'Artwork: TMDb'
         : (posterSource == 'tvmaze'
-              ? 'Artwork: TVmaze'
-              : (posterSource == 'apple'
-                    ? 'Artwork: Apple'
-                    : (posterSource == 'local' ? 'Artwork: local' : '')));
+            ? 'Artwork: TVmaze'
+            : (posterSource == 'apple'
+                ? 'Artwork: Apple'
+                : (posterSource == 'local' ? 'Artwork: local' : '')));
     return DraggableScrollableSheet(
       expand: false,
       initialChildSize: .96,
@@ -861,6 +899,13 @@ class _MediaDetailsState extends State<_MediaDetails> {
                           StatusPill(
                             label: '${widget.item['quality']}',
                             color: ByteSqueezeColors.mint,
+                          ),
+                        if (widget.item['transcoded'] == true ||
+                            widget.item['has_transcoded'] == true)
+                          const StatusPill(
+                            label: 'Transcoded',
+                            color: ByteSqueezeColors.mint,
+                            icon: Icons.check_circle_outline_rounded,
                           ),
                         if (artworkLabel.isNotEmpty &&
                             widget.controller.statsForNerds)
@@ -952,9 +997,11 @@ class _MediaDetailsState extends State<_MediaDetails> {
                 ),
               ),
           ],
-          const SectionHeader(
-            title: 'Smart plan',
-            subtitle: 'Every episode gets its own probe, HDR decision, quality floor, and preset snapshot',
+          SectionHeader(
+            title: allTranscoded ? 'Audio optimization' : 'Smart plan',
+            subtitle: allTranscoded
+                ? 'The video is locked to COPY. Only selected audio tracks can change.'
+                : 'Every episode gets its own probe, HDR decision, quality floor, and preset snapshot',
           ),
           SurfaceCard(
             borderColor: ByteSqueezeColors.cyan.withValues(alpha: .34),
@@ -1000,40 +1047,42 @@ class _MediaDetailsState extends State<_MediaDetails> {
                         ],
                       ),
                     ),
-                    TextButton.icon(
-                      onPressed: widget.controller.canControl && !_working
-                          ? _editSmartTuning
-                          : null,
-                      icon: const Icon(Icons.tune_rounded, size: 18),
-                      label: const Text('Tune'),
-                    ),
+                    if (!allTranscoded)
+                      TextButton.icon(
+                        onPressed: widget.controller.canControl && !_working
+                            ? _editSmartTuning
+                            : null,
+                        icon: const Icon(Icons.tune_rounded, size: 18),
+                        label: const Text('Tune'),
+                      ),
                   ],
                 ),
                 const SizedBox(height: 12),
-                FilledButton.tonalIcon(
-                  onPressed: _paths.isEmpty
-                      ? null
-                      : () => _openSizeWizard(
-                          files.isNotEmpty
-                              ? asMap(files.first)
-                              : <String, dynamic>{'path': _paths.first},
-                        ),
-                  icon: const Icon(Icons.straighten_rounded),
-                  label: Text(
-                    widget.isShow
-                        ? 'Size Wizard for first episode'
-                        : 'Open in Size Wizard',
+                if (!allTranscoded)
+                  FilledButton.tonalIcon(
+                    onPressed: _paths.isEmpty
+                        ? null
+                        : () => _openSizeWizard(
+                              files.isNotEmpty
+                                  ? asMap(files.first)
+                                  : <String, dynamic>{'path': _paths.first},
+                            ),
+                    icon: const Icon(Icons.straighten_rounded),
+                    label: Text(
+                      widget.isShow
+                          ? 'Size Wizard for first episode'
+                          : 'Open in Size Wizard',
+                    ),
                   ),
-                ),
-                const SizedBox(height: 9),
+                if (!allTranscoded) const SizedBox(height: 9),
                 OutlinedButton.icon(
                   onPressed: _paths.isEmpty
                       ? null
                       : () => _openAudioOptimization(
-                          files.isNotEmpty
-                              ? asMap(files.first)
-                              : <String, dynamic>{'path': _paths.first},
-                        ),
+                            files.isNotEmpty
+                                ? asMap(files.first)
+                                : <String, dynamic>{'path': _paths.first},
+                          ),
                   icon: const Icon(Icons.graphic_eq_rounded),
                   label: Text(
                     widget.isShow
@@ -1041,129 +1090,137 @@ class _MediaDetailsState extends State<_MediaDetails> {
                         : 'Optimize audio only',
                   ),
                 ),
-                const SizedBox(height: 9),
-                OutlinedButton.icon(
-                  onPressed:
-                      widget.controller.canControl &&
-                          !_previewWorking &&
-                          _paths.isNotEmpty
-                      ? _generatePreview
-                      : null,
-                  icon: _previewWorking
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.compare_rounded),
-                  label: Text(
-                    _preview.isEmpty
-                        ? (widget.isShow
+                if (!allTranscoded) const SizedBox(height: 9),
+                if (!allTranscoded)
+                  OutlinedButton.icon(
+                    onPressed: widget.controller.canControl &&
+                            !_previewWorking &&
+                            _paths.isNotEmpty
+                        ? _generatePreview
+                        : null,
+                    icon: _previewWorking
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.compare_rounded),
+                    label: Text(
+                      _preview.isEmpty
+                          ? (widget.isShow
                               ? 'Preview first episode’s Smart encode'
                               : 'Preview real Smart encode')
-                        : 'Refresh Smart preview',
+                          : 'Refresh Smart preview',
+                    ),
                   ),
-                ),
               ],
             ),
           ),
           if (_preview.isNotEmpty)
             _LibraryPreviewCard(preview: _preview, working: _previewWorking),
-          const SectionHeader(
-            title: 'Queue destination',
-            subtitle: 'Distribute each file automatically or lock this selection to one node',
-          ),
-          DropdownButtonFormField<String>(
-            initialValue: _queueTarget,
-            isExpanded: true,
-            decoration: const InputDecoration(
-              labelText: 'Encoding node',
-              prefixIcon: Icon(Icons.hub_outlined),
+          if (!allTranscoded)
+            const SectionHeader(
+              title: 'Queue destination',
+              subtitle:
+                  'Distribute each file automatically or lock this selection to one node',
             ),
-            items: [
-              const DropdownMenuItem(
-                value: 'local:',
-                child: Text('This server (local)'),
+          if (!allTranscoded)
+            DropdownButtonFormField<String>(
+              initialValue: _queueTarget,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                labelText: 'Encoding node',
+                prefixIcon: Icon(Icons.hub_outlined),
               ),
-              const DropdownMenuItem(
-                value: 'available:',
-                child: Text('Next available · distribute files'),
-              ),
-              if (asList(widget.controller.nodes['nodes'])
-                  .map(asMap)
-                  .any((row) => row['online'] == true))
+              items: [
                 const DropdownMenuItem(
-                  value: 'best:',
-                  child: Text('Best node · keep selection together'),
+                  value: 'local:',
+                  child: Text('This server (local)'),
                 ),
-              ...asList(widget.controller.nodes['nodes'])
-                  .map(asMap)
-                  .where((row) => row['online'] == true)
-                  .map(
-                    (row) => DropdownMenuItem(
-                      value: 'node:${row['id']}',
-                      child: Text('${row['name'] ?? 'Worker node'}'),
+                const DropdownMenuItem(
+                  value: 'available:',
+                  child: Text('Next available · distribute files'),
+                ),
+                if (asList(widget.controller.nodes['nodes'])
+                    .map(asMap)
+                    .any((row) => row['online'] == true))
+                  const DropdownMenuItem(
+                    value: 'best:',
+                    child: Text('Best node · keep selection together'),
+                  ),
+                ...asList(widget.controller.nodes['nodes'])
+                    .map(asMap)
+                    .where((row) => row['online'] == true)
+                    .map(
+                      (row) => DropdownMenuItem(
+                        value: 'node:${row['id']}',
+                        child: Text('${row['name'] ?? 'Worker node'}'),
+                      ),
+                    ),
+              ],
+              onChanged: _working
+                  ? null
+                  : (value) => setState(() => _queueTarget = value ?? 'local:'),
+            ),
+          if (!allTranscoded) const SizedBox(height: 12),
+          if (!allTranscoded)
+            Row(
+              children: [
+                Expanded(
+                  child: FilledButton.icon(
+                    onPressed: widget.controller.canControl && !_working
+                        ? () => _queue('smart')
+                        : null,
+                    icon: _working
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.auto_awesome_rounded),
+                    label: Text(
+                      widget.isShow
+                          ? 'Smart Queue Full Show'
+                          : 'Smart Queue Movie',
                     ),
                   ),
-            ],
-            onChanged: _working
-                ? null
-                : (value) => setState(() => _queueTarget = value ?? 'local:'),
-          ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: FilledButton.icon(
-                  onPressed: widget.controller.canControl && !_working
-                      ? () => _queue('smart')
-                      : null,
-                  icon: _working
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.auto_awesome_rounded),
-                  label: Text(
-                    widget.isShow
-                        ? 'Smart Queue Full Show'
-                        : 'Smart Queue Movie',
+                ),
+                const SizedBox(width: 9),
+                PopupMenuButton<String>(
+                  enabled: widget.controller.canControl && !_working,
+                  tooltip: 'Other server presets',
+                  onSelected: _queue,
+                  itemBuilder: (context) => const [
+                    PopupMenuItem(
+                        value: 'auto', child: Text('Automatic preset')),
+                    PopupMenuItem(value: '1080', child: Text('1080p preset')),
+                    PopupMenuItem(value: '4k', child: Text('4K preset')),
+                  ],
+                  child: const DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: ByteSqueezeColors.raised,
+                      borderRadius: BorderRadius.all(Radius.circular(14)),
+                    ),
+                    child: Padding(
+                      padding: EdgeInsets.all(14),
+                      child: Icon(Icons.more_horiz_rounded),
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(width: 9),
-              PopupMenuButton<String>(
-                enabled: widget.controller.canControl && !_working,
-                tooltip: 'Other server presets',
-                onSelected: _queue,
-                itemBuilder: (context) => const [
-                  PopupMenuItem(value: 'auto', child: Text('Automatic preset')),
-                  PopupMenuItem(value: '1080', child: Text('1080p preset')),
-                  PopupMenuItem(value: '4k', child: Text('4K preset')),
-                ],
-                child: const DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: ByteSqueezeColors.raised,
-                    borderRadius: BorderRadius.all(Radius.circular(14)),
-                  ),
-                  child: Padding(
-                    padding: EdgeInsets.all(14),
-                    child: Icon(Icons.more_horiz_rounded),
-                  ),
-                ),
-              ),
-            ],
-          ),
+              ],
+            ),
           if (widget.isShow && seasons.isNotEmpty) ...[
             const SectionHeader(
               title: 'Seasons',
-              subtitle: 'Preview one episode; queue planning remains independent for every episode',
+              subtitle:
+                  'Preview one episode; queue planning remains independent for every episode',
             ),
             ...seasons.entries.map((entry) {
               final season = entry.key;
               final rows = entry.value;
-              final paths = _filePaths(rows);
+              final paths = _filePaths(
+                rows.where((row) => row['transcoded'] != true),
+              );
               final totalBytes = rows.fold<int>(
                 0,
                 (sum, row) => sum + ((row['size_bytes'] as num?)?.toInt() ?? 0),
@@ -1203,8 +1260,7 @@ class _MediaDetailsState extends State<_MediaDetails> {
                       children: [
                         IconButton(
                           tooltip: 'Preview the first episode in this season',
-                          onPressed:
-                              widget.controller.canControl &&
+                          onPressed: widget.controller.canControl &&
                                   !_previewWorking &&
                                   paths.isNotEmpty
                               ? () => _generatePreview(paths: paths)
@@ -1213,17 +1269,16 @@ class _MediaDetailsState extends State<_MediaDetails> {
                         ),
                         IconButton.filledTonal(
                           tooltip: 'Smart Queue this season',
-                          onPressed:
-                              widget.controller.canControl &&
+                          onPressed: widget.controller.canControl &&
                                   !_working &&
                                   paths.isNotEmpty
                               ? () => _queue(
-                                  'smart',
-                                  paths: paths,
-                                  scopeLabel: season > 0
-                                      ? '${widget.item['title']} Season $season'
-                                      : '${widget.item['title']} Specials',
-                                )
+                                    'smart',
+                                    paths: paths,
+                                    scopeLabel: season > 0
+                                        ? '${widget.item['title']} Season $season'
+                                        : '${widget.item['title']} Specials',
+                                  )
                               : null,
                           icon: const Icon(Icons.add_to_queue_rounded),
                         ),
@@ -1257,11 +1312,12 @@ class _MediaDetailsState extends State<_MediaDetails> {
                               onPressed: () => _openAudioOptimization(file),
                               icon: const Icon(Icons.graphic_eq_rounded),
                             ),
-                            IconButton(
-                              tooltip: 'Open this episode in Size Wizard',
-                              onPressed: () => _openSizeWizard(file),
-                              icon: const Icon(Icons.straighten_rounded),
-                            ),
+                            if (file['transcoded'] != true)
+                              IconButton(
+                                tooltip: 'Open this episode in Size Wizard',
+                                onPressed: () => _openSizeWizard(file),
+                                icon: const Icon(Icons.straighten_rounded),
+                              ),
                           ],
                         ),
                       );
@@ -1337,8 +1393,8 @@ class _LibraryPreviewCard extends StatelessWidget {
     final encoder = '${result['encoder_label'] ?? result['encoder'] ?? ''}';
     final dimensions =
         result['out_width'] != null && result['out_height'] != null
-        ? '${result['out_width']}×${result['out_height']}'
-        : '';
+            ? '${result['out_width']}×${result['out_height']}'
+            : '';
     return Padding(
       padding: const EdgeInsets.only(top: 10),
       child: SurfaceCard(
@@ -1352,9 +1408,8 @@ class _LibraryPreviewCard extends StatelessWidget {
                   ready
                       ? Icons.check_circle_rounded
                       : Icons.movie_filter_rounded,
-                  color: ready
-                      ? ByteSqueezeColors.mint
-                      : ByteSqueezeColors.cyan,
+                  color:
+                      ready ? ByteSqueezeColors.mint : ByteSqueezeColors.cyan,
                 ),
                 const SizedBox(width: 9),
                 Expanded(
@@ -1649,19 +1704,29 @@ class _SmartTuneSheetState extends State<_SmartTuneSheet> {
                   borderColor: ByteSqueezeColors.cyan,
                   child: Text(
                     [
-                          if (_resolutionLocked) 'source resolution',
-                          if (widget.profile['keep_black_bars'] != false)
-                            'black bars',
-                          if (widget.profile['keep_aspect_ratio'] != false)
-                            'aspect ratio',
-                          if (_audioLocked) 'audio passthrough',
-                          if (widget.profile['keep_all_audio_languages'] !=
-                              false)
-                            'all audio languages',
-                          if (_subtitlesLocked) 'all subtitles',
-                        ].isEmpty
+                      if (_resolutionLocked) 'source resolution',
+                      if (widget.profile['keep_black_bars'] != false)
+                        'black bars',
+                      if (widget.profile['keep_aspect_ratio'] != false)
+                        'aspect ratio',
+                      if (_audioLocked) 'audio passthrough',
+                      if (widget.profile['keep_all_audio_languages'] != false)
+                        'all audio languages',
+                      if (_subtitlesLocked) 'all subtitles',
+                    ].isEmpty
                         ? 'No saved hard protections are enabled. These choices guide this queue without changing your learned profile.'
-                        : 'Saved protections are locked: ${[if (_resolutionLocked) 'source resolution', if (widget.profile['keep_black_bars'] != false) 'black bars', if (widget.profile['keep_aspect_ratio'] != false) 'aspect ratio', if (_audioLocked) 'audio passthrough', if (widget.profile['keep_all_audio_languages'] != false) 'all audio languages', if (_subtitlesLocked) 'all subtitles'].join(', ')}.',
+                        : 'Saved protections are locked: ${[
+                            if (_resolutionLocked) 'source resolution',
+                            if (widget.profile['keep_black_bars'] != false)
+                              'black bars',
+                            if (widget.profile['keep_aspect_ratio'] != false)
+                              'aspect ratio',
+                            if (_audioLocked) 'audio passthrough',
+                            if (widget.profile['keep_all_audio_languages'] !=
+                                false)
+                              'all audio languages',
+                            if (_subtitlesLocked) 'all subtitles'
+                          ].join(', ')}.',
                     style: const TextStyle(
                       color: ByteSqueezeColors.muted,
                       fontSize: 12.5,
@@ -1761,8 +1826,8 @@ class _SmartTuneSheetState extends State<_SmartTuneSheet> {
                             _targetScale == 1
                                 ? 'Learned target'
                                 : (_targetScale < 1
-                                      ? '${((1 - _targetScale) * 100).round()}% smaller'
-                                      : '${((_targetScale - 1) * 100).round()}% more detail'),
+                                    ? '${((1 - _targetScale) * 100).round()}% smaller'
+                                    : '${((_targetScale - 1) * 100).round()}% more detail'),
                             style: const TextStyle(
                               color: ByteSqueezeColors.cyan,
                               fontWeight: FontWeight.w700,

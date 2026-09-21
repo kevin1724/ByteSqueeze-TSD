@@ -455,6 +455,14 @@ class AppController extends ChangeNotifier {
         },
       };
     }
+    final safeOperations = operations == null
+        ? null
+        : <String, dynamic>{
+            ...operations,
+            'job_type': 'audio_only',
+            'video_action': 'copy',
+            'subtitle_action': 'copy',
+          };
     return api.post(
       '/audio/scan',
       {
@@ -462,7 +470,7 @@ class AppController extends ChangeNotifier {
         if (jobId.isNotEmpty) 'job_id': jobId,
         'job_type': jobType,
         'audio_policy': audioPolicy,
-        if (operations != null) 'operations': operations,
+        if (safeOperations != null) 'operations': safeOperations,
       },
       timeout: const Duration(minutes: 5),
     );
@@ -478,9 +486,15 @@ class AppController extends ChangeNotifier {
       throw const ApiFailure('The completed job is missing its identifier.');
     }
     if (demoMode) return {'ok': true, 'job_id': 'demo-audio-only'};
+    final safeOperations = <String, dynamic>{
+      ...operations,
+      'job_type': 'audio_only',
+      'video_action': 'copy',
+      'subtitle_action': 'copy',
+    };
     final result = await api.post(
       '/jobs/$completedJobId/optimize-audio',
-      {'operations': operations, 'mode': mode},
+      {'operations': safeOperations, 'mode': mode},
       timeout: const Duration(minutes: 5),
     );
     await refreshJobsAndDashboard();
@@ -497,9 +511,15 @@ class AppController extends ChangeNotifier {
       throw const ApiFailure('Choose a media file first.');
     }
     if (demoMode) return {'ok': true, 'job_id': 'demo-audio-only'};
+    final safeOperations = <String, dynamic>{
+      ...operations,
+      'job_type': 'audio_only',
+      'video_action': 'copy',
+      'subtitle_action': 'copy',
+    };
     final result = await api.post(
       '/audio/queue',
-      {'src': path, 'operations': operations, 'mode': mode},
+      {'src': path, 'operations': safeOperations, 'mode': mode},
       timeout: const Duration(minutes: 5),
     );
     await refreshJobsAndDashboard();

@@ -3168,6 +3168,50 @@ def _queued_operations(metadata: dict | None = None, operations: dict | None = N
     }
 
 
+def _job_requests_audio_only(job: dict | None) -> bool:
+    """Recognize audio-only intent from every durable job marker.
+
+    Older controller/worker pairs did not always persist the nested operations
+    snapshot.  Treat any explicit audio-only marker as authoritative so such a
+    job can never fall through to the HandBrake video path.
+    """
+    job = job if isinstance(job, dict) else {}
+    operations = job.get("operations") if isinstance(job.get("operations"), dict) else {}
+    markers = (
+        operations.get("job_type"),
+        job.get("job_type"),
+        job.get("preset_selection"),
+        job.get("encode_method"),
+    )
+    return any(str(value or "").strip().lower() in {"audio_only", "audio-only", "ffmpeg_audio_only"} for value in markers)
+
+
+def _lock_audio_only_job(job: dict) -> dict:
+    """Repair and lock an audio-only job before any encoder is selected."""
+    source = dict(job.get("operations")) if isinstance(job.get("operations"), dict) else {}
+    source.update({
+        "job_type": "audio_only",
+        "video_action": "copy",
+        "subtitle_action": "copy",
+        "replace_source": source.get("replace_source", True),
+    })
+    if not source.get("audio_policy") or source.get("audio_policy") == "preserve":
+        source["audio_policy"] = str(job.get("audio_policy") or "optimize_lossless")
+    operations = _queued_operations(job, source)
+    operations["job_type"] = "audio_only"
+    operations["video_action"] = "copy"
+    operations["subtitle_action"] = "copy"
+    job.update({
+        "job_type": "audio_only",
+        "operations": operations,
+        "encode_method": "ffmpeg_audio_only",
+        "encoder": "copy",
+        "encoder_family": "stream_copy",
+        "bit_depth": "copy",
+    })
+    return operations
+
+
 def _planned_output_estimate(
     metadata: dict | None,
     operations: dict | None = None,
@@ -4388,7 +4432,18 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
     job["finished_at"] = None
     job["duration_seconds"] = None
     job["eta_seconds"] = None  # reset ETA at the start
-    method = _job_encode_metadata(job)
+    audio_only_requested = _job_requests_audio_only(job)
+    if audio_only_requested:
+        _lock_audio_only_job(job)
+        method = {
+            "encode_method": "ffmpeg_audio_only",
+            "encoder": "copy",
+            "video_codec": str(job.get("video_codec") or "copy"),
+            "encoder_family": "stream_copy",
+            "bit_depth": "copy",
+        }
+    else:
+        method = _job_encode_metadata(job)
     job["encode_method"] = method.get("encode_method")
     job["encoder"] = method.get("encoder")
     job["video_codec"] = method.get("video_codec")
@@ -4565,7 +4620,15 @@ def run_encode(job_id: str, src_path: str, preset_key: str):
         # the encode may be sampled estimates so a NAS file is not read twice
         # before HandBrake/FFmpeg can start.
         source_inventory = scan_media(encode_src_path, exact=False)
+        if _job_requests_audio_only(job):
+            _lock_audio_only_job(job)
         operations = normalize_operations(job.get("operations"), source_inventory)
+        if _job_requests_audio_only(job):
+            # normalize_operations must not be able to downgrade a durable
+            # audio-only marker into a video encode.
+            operations["job_type"] = "audio_only"
+            operations["video_action"] = "copy"
+            operations["subtitle_action"] = "copy"
         job["audio_inventory"] = source_inventory
         job["operations"] = operations
         job["job_type"] = operations["job_type"]

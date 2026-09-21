@@ -3730,7 +3730,7 @@ BETA_AUTOSCAN_HEALTH = {
     "cycle_errors": 0,
     "last_error": "",
 }
-BETA_LIBRARY_PARSER_VERSION = 6
+BETA_LIBRARY_PARSER_VERSION = 7
 
 
 def _beta_scan_full_verify_seconds() -> int:
@@ -5098,6 +5098,21 @@ def _beta_title_from_path(
     return _beta_clean_title(os.path.basename(src_path))
 
 
+def _beta_media_is_transcoded(value) -> bool:
+    """Return whether a catalog row/path is a ByteSqueeze output.
+
+    The library used to omit these files entirely.  Keep the filename check in
+    one place so scans, automation, and both clients agree on what is safe to
+    revisit for an audio-only remux.
+    """
+    if isinstance(value, dict):
+        if value.get("transcoded") is True:
+            return True
+        value = value.get("path") or value.get("filename") or ""
+    stem = os.path.splitext(os.path.basename(str(value or "")))[0]
+    return stem.lower().endswith("-tsd")
+
+
 def _beta_parse_media(src_path: str, *, root_kind: str = "", library_root: str = "") -> dict:
     filename = os.path.basename(src_path)
     name_only, _ext = os.path.splitext(filename)
@@ -5203,6 +5218,7 @@ def _beta_parse_media(src_path: str, *, root_kind: str = "", library_root: str =
         "folder": os.path.dirname(src_path),
         "size_bytes": size_bytes,
         "modified_at": modified_at,
+        "transcoded": _beta_media_is_transcoded(src_path),
         "is_hdr": bool(hdr_reason),
         "hdr_reason": hdr_reason,
         "detected_reason": source_type.get("reason") or "filename",
@@ -5446,8 +5462,13 @@ def _beta_finalize_catalog(data: dict) -> dict:
     movies = [row for row in data.get("movies") or [] if isinstance(row, dict)]
     shows = [row for row in data.get("shows") or [] if isinstance(row, dict)]
     for show in shows:
+        files = [ep for ep in show.get("files") or [] if isinstance(ep, dict)]
+        transcoded_count = sum(1 for ep in files if _beta_media_is_transcoded(ep))
+        show["transcoded_count"] = transcoded_count
+        show["has_transcoded"] = transcoded_count > 0
+        show["all_transcoded"] = bool(files) and transcoded_count == len(files)
         show["modified_at"] = max(
-            [float(ep.get("modified_at") or 0) for ep in show.get("files") or [] if isinstance(ep, dict)] or [0.0]
+            [float(ep.get("modified_at") or 0) for ep in files] or [0.0]
         )
     recent = sorted(
         [*movies, *shows],
@@ -5455,11 +5476,21 @@ def _beta_finalize_catalog(data: dict) -> dict:
         reverse=True,
     )[:24]
     episodes = sum(int(row.get("episode_count") or 0) for row in shows)
+    transcoded = sum(1 for row in movies if _beta_media_is_transcoded(row)) + sum(
+        int(row.get("transcoded_count") or 0) for row in shows
+    )
+    stats = data.setdefault("stats", {})
+    if isinstance(stats, dict):
+        stats["transcoded"] = transcoded
+        # Kept for older clients that still display this field. Transcoded
+        # outputs are cataloged now, not skipped.
+        stats["skipped_tsd"] = 0
     data["catalog"] = {
         "total_titles": len(movies) + len(shows),
         "movies": len(movies),
         "shows": len(shows),
         "episodes": episodes,
+        "transcoded": transcoded,
         "complete": not bool((data.get("stats") or {}).get("limited")),
         "recently_added": recent,
     }
@@ -5580,10 +5611,6 @@ def _beta_scan_library(root_path: str, *, recursive: bool, posters: bool, settin
             full = os.path.join(root_dir, name)
             if not os.path.isfile(full):
                 continue
-            if os.path.splitext(name)[0].lower().endswith("-tsd"):
-                skipped_tsd += 1
-                continue
-
             item = _beta_parse_media(full, root_kind=root_kind, library_root=root_path)
             if root_kind == "movies":
                 item["type"] = "movie"
@@ -5741,7 +5768,11 @@ def _beta_refresh_predictions(data: dict) -> dict:
         item["is_hdr"] = is_hdr
         if is_hdr and (not item.get("hdr_reason") or item.get("hdr_reason") == "filename"):
             item["hdr_reason"] = filename_hdr_reason or item.get("hdr_reason") or "filename"
-        item["prediction"] = _history_prediction_for(int(item.get("size_bytes") or 0), preset, is_hdr, model)
+        item["prediction"] = (
+            {"available": False, "sample_count": 0, "reason": "already transcoded"}
+            if _beta_media_is_transcoded(item)
+            else _history_prediction_for(int(item.get("size_bytes") or 0), preset, is_hdr, model)
+        )
 
     for show in data.get("shows") or []:
         if not isinstance(show, dict):
@@ -5759,7 +5790,11 @@ def _beta_refresh_predictions(data: dict) -> dict:
             if is_hdr and (not ep.get("hdr_reason") or ep.get("hdr_reason") == "filename"):
                 ep["hdr_reason"] = filename_hdr_reason or ep.get("hdr_reason") or "filename"
             show_is_hdr = show_is_hdr or is_hdr
-            ep["prediction"] = _history_prediction_for(int(ep.get("size_bytes") or 0), preset, is_hdr, model)
+            ep["prediction"] = (
+                {"available": False, "sample_count": 0, "reason": "already transcoded"}
+                if _beta_media_is_transcoded(ep)
+                else _history_prediction_for(int(ep.get("size_bytes") or 0), preset, is_hdr, model)
+            )
             file_predictions.append(ep["prediction"])
         show["is_hdr"] = bool(show_is_hdr)
         if show["is_hdr"] and not show.get("hdr_reason"):
@@ -5997,9 +6032,6 @@ def _beta_library_from_scan_index(index: dict, *, settings: dict, recursive: boo
         if not item:
             continue
         scanned += 1
-        if os.path.splitext(os.path.basename(item.get("path") or ""))[0].lower().endswith("-tsd"):
-            skipped_tsd += 1
-            continue
         if item.get("type") == "show":
             key = _beta_resolve_show_group_key(shows, item.get("title"), item.get("year"))
             identity = f"{item.get('title', '').lower()}::{item.get('year') or ''}"
@@ -6074,6 +6106,10 @@ def _beta_update_scan_index(settings: dict, *, force_full: bool = False) -> tupl
     started = time.monotonic()
     now = time.time()
     index = _beta_load_scan_index()
+    try:
+        index_version = int(index.get("version") or 0)
+    except (TypeError, ValueError):
+        index_version = 0
     files = index.setdefault("files", {})
     directories = index.setdefault("directories", {})
     try:
@@ -6082,6 +6118,7 @@ def _beta_update_scan_index(settings: dict, *, force_full: bool = False) -> tupl
         last_full_scan_at = 0
     full_scan = bool(
         force_full
+        or index_version < BETA_LIBRARY_PARSER_VERSION
         or not directories
         or not last_full_scan_at
         or (now - last_full_scan_at) >= BETA_SCAN_FULL_VERIFY_SECONDS
@@ -6300,9 +6337,6 @@ def _beta_update_scan_index(settings: dict, *, force_full: bool = False) -> tupl
                                 continue
                             if not entry.name.lower().endswith(VIDEO_EXTS) or not entry.is_file():
                                 continue
-                            if os.path.splitext(entry.name)[0].lower().endswith("-tsd"):
-                                summary["skipped_tsd"] += 1
-                                continue
                             stat_result = entry.stat()
                             summary["file_stats"] += 1
                             process_file(entry.path, stat_result, root_kind, root_path)
@@ -6415,6 +6449,12 @@ def _beta_queue_stable_tracked_episodes(data: dict, index: dict, settings: dict)
                     continue
                 path = str(ep.get("path") or "")
                 if not path or path in known:
+                    continue
+                if _beta_media_is_transcoded(ep):
+                    # Completed ByteSqueeze outputs are visible for manual
+                    # audio optimization, but must never re-enter video
+                    # automation.
+                    newly_known.add(path)
                     continue
                 idx_row = index_files.get(path) if isinstance(index_files.get(path), dict) else {}
                 if path in active_paths:
@@ -6535,7 +6575,9 @@ def _autopilot_candidates(data: dict, index: dict, settings: dict) -> dict:
         reason = "Eligible: stable, allowed, and within the configured policy."
         decision = "eligible"
 
-        if not path or not is_allowed_path(path) or not idx_row or idx_row.get("removed"):
+        if _beta_media_is_transcoded(item):
+            decision, reason = "skip", "Already transcoded; available for manual audio-only optimization."
+        elif not path or not is_allowed_path(path) or not idx_row or idx_row.get("removed"):
             decision, reason = "skip", "File is missing or outside an allowed media root."
         elif path_is_temporarily_unavailable(path):
             decision, reason = "wait", "The library path is temporarily unavailable; the next scan will verify it again."
@@ -7656,6 +7698,7 @@ def _queue_local_paths(
     smart_tuning: dict | None = None,
     *,
     automation_source: str = "library_smart",
+    operations: dict | None = None,
 ) -> tuple[int, list[dict]]:
     if isinstance(raw_paths, str):
         raw_paths = [raw_paths]
@@ -7664,6 +7707,8 @@ def _queue_local_paths(
     preset = str(preset or "auto").strip().lower()
     if preset not in {"auto", "1080", "4k", "smart"}:
         preset = "auto"
+    operations = operations if isinstance(operations, dict) else {}
+    audio_only = str(operations.get("job_type") or "").strip().lower() == "audio_only"
 
     seen = set()
     to_create = []
@@ -7680,7 +7725,7 @@ def _queue_local_paths(
             reason = "path not allowed"
         elif not src.lower().endswith(VIDEO_EXTS):
             reason = "not a video"
-        elif os.path.splitext(os.path.basename(src))[0].lower().endswith("-tsd"):
+        elif os.path.splitext(os.path.basename(src))[0].lower().endswith("-tsd") and not audio_only:
             reason = "already tagged -TSD"
         if reason:
             skipped.append({"path": src, "reason": reason})
@@ -7702,10 +7747,19 @@ def _queue_local_paths(
                     tuning=smart_tuning,
                     automation_source=automation_source,
                     recommendation=recommendations.get(src),
+                    operations=operations or None,
                 )
                 count += 1
             except Exception as exc:
                 skipped.append({"path": src, "reason": f"smart preset planning failed: {str(exc)[:140]}"})
+        return count, skipped
+    if operations:
+        count = 0
+        for src, effective in to_create:
+            before = len([job for job in list_jobs_for_api() if job.get("src") == src and job.get("status") in {"queued", "running"}])
+            create_job(src, effective, operations=operations)
+            after = len([job for job in list_jobs_for_api() if job.get("src") == src and job.get("status") in {"queued", "running"}])
+            count += 1 if after > before else 0
         return count, skipped
     return int(create_jobs_batch(to_create) or 0), skipped
 
@@ -11862,7 +11916,12 @@ def register_routes(app):
             )
 
         if mode == "local":
-            count, skipped = _queue_local_paths(paths, preset, data.get("smart_tuning"))
+            count, skipped = _queue_local_paths(
+                paths,
+                preset,
+                data.get("smart_tuning"),
+                operations=request_operations or None,
+            )
             if count <= 0:
                 return jsonify(error="no files could be queued", skipped=skipped), 400
             return jsonify(ok=True, target="local", count=count, skipped=skipped)

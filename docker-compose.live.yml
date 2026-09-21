@@ -1,0 +1,25 @@
+services:
+  hb-web:
+    # Reuse the installed image for system packages and HandBrake, but run the
+    # controller directly from this checkout.
+    image: kevina1724/handbrake-tsd-helper:latest
+    pull_policy: never
+    environment:
+      FLASK_ENV: development
+      FLASK_DEBUG: "0"
+    volumes:
+      - ./webui:/app/webui:ro
+    command:
+      - gunicorn
+      - --bind=0.0.0.0:8080
+      - --workers=1
+      - --threads=4
+      - --timeout=300
+      - --graceful-timeout=30
+      - --reload
+      - --reload-engine=poll
+      - --error-logfile=-
+      - --access-logfile=-
+      - --capture-output
+      - --log-level=info
+      - webui.app:create_app()

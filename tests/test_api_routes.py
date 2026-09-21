@@ -208,6 +208,49 @@ class ApiRouteSmokeTests(unittest.TestCase):
         self.assertEqual(call.kwargs["operations"]["video_action"], "copy")
         self.assertTrue(call.kwargs["operations"]["replace_source"])
 
+    def test_audio_only_executor_repairs_legacy_marker_before_encoder_selection(self):
+        path = os.path.join(TEST_MEDIA, "Legacy.Audio.Only-TSD.mkv")
+        with open(path, "wb") as stream:
+            stream.write(b"media")
+        job_id = "legacy-audio-only"
+        app_jobs.jobs[job_id] = {
+            "status": "queued",
+            "src": path,
+            "preset": "1080",
+            "preset_selection": "audio-only",
+            "operations": {
+                "job_type": "video_preserve_audio",
+                "video_action": "encode",
+            },
+            "mode": "local",
+        }
+        inventory = {
+            "duration_seconds": 60,
+            "total_bytes": 5,
+            "audio_streams": [],
+            "video_streams": [{"index": 0, "codec": "av1"}],
+            "subtitle_streams": [],
+            "attachment_streams": [],
+            "chapter_count": 0,
+            "aggregate": {"video_bytes": 5, "audio_bytes": 0},
+        }
+        try:
+            with (
+                patch.object(app_jobs, "scan_media", return_value=inventory),
+                patch.object(app_jobs, "_run_audio_only_job") as audio_runner,
+                patch.object(app_jobs, "_job_encode_metadata", side_effect=AssertionError("video encoder selected")),
+                patch.object(app_jobs, "_append_job_log"),
+                patch.object(app_jobs, "save_jobs"),
+            ):
+                app_jobs.run_encode(job_id, path, "1080")
+            audio_runner.assert_called_once()
+            self.assertEqual(app_jobs.jobs[job_id]["job_type"], "audio_only")
+            self.assertEqual(app_jobs.jobs[job_id]["operations"]["video_action"], "copy")
+            self.assertEqual(app_jobs.jobs[job_id]["encoder"], "copy")
+            self.assertEqual(app_jobs.jobs[job_id]["encode_method"], "ffmpeg_audio_only")
+        finally:
+            app_jobs.jobs.pop(job_id, None)
+
     def test_mobile_device_admin_can_forget_one_or_clear_inactive_records(self):
         with patch.object(app_routes, "forget_mobile_device", return_value=True) as forget:
             response = self.client.delete("/api/mobile/devices/phone-old/forget")
@@ -3550,12 +3593,37 @@ class ApiRouteSmokeTests(unittest.TestCase):
                 parsed = app_routes._beta_parse_media(os.path.join(TEST_MEDIA, name))
                 self.assertEqual((parsed["title"], parsed["year"]), expected)
 
+    def test_library_catalog_includes_and_labels_transcoded_outputs(self):
+        path = os.path.join(TEST_MEDIA, "Finished.Movie.2026-TSD.mkv")
+        with open(path, "wb") as handle:
+            handle.write(b"finished")
+        item = app_routes._beta_parse_media(path, root_kind="movies", library_root=TEST_MEDIA)
+        self.assertTrue(item["transcoded"])
+        data = app_routes._beta_library_from_scan_index(
+            {
+                "files": {
+                    path: {
+                        "path": path,
+                        "removed": False,
+                        "item": item,
+                    },
+                },
+            },
+            settings={},
+        )
+        self.assertEqual(len(data["movies"]), 1)
+        self.assertTrue(data["movies"][0]["transcoded"])
+        self.assertEqual(data["stats"]["transcoded"], 1)
+        self.assertEqual(data["catalog"]["transcoded"], 1)
+
     def test_v3_library_exposes_poster_health_filters_and_incremental_grid(self):
         response = self.client.get("/library?ui=v3")
         self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
         markup = response.get_data(as_text=True)
         self.assertIn('class="beta-page ui-v3"', markup)
         self.assertIn('value="artwork"', markup)
+        self.assertIn('value="transcoded"', markup)
+        self.assertIn('filter === "transcoded"', markup)
         self.assertIn('id="statArtwork"', markup)
         self.assertIn('className = "library-load-more"', markup)
         self.assertIn('img.decoding = "async"', markup)

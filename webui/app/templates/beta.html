@@ -1060,6 +1060,7 @@
             <option value="all" selected>Everything</option>
             <option value="savings">Best savings</option>
             <option value="hdr">HDR sources</option>
+            <option value="transcoded">Already transcoded</option>
             <option value="tracked">Tracked shows</option>
             <option value="learning">Needs prediction data</option>
             <option value="artwork">Missing artwork</option>
@@ -1421,6 +1422,7 @@
       if (!filter || filter === "all") return true;
       if (filter === "savings") return predictedSavedBytes(item) > 0 && savingsPercent(item) >= 10;
       if (filter === "hdr") return Boolean(item?.is_hdr) || (kind === "show" && showEpisodes(item).some((ep) => ep?.is_hdr));
+      if (filter === "transcoded") return Boolean(item?.transcoded || item?.has_transcoded || (kind === "show" && showEpisodes(item).some((ep) => ep?.transcoded)));
       if (filter === "tracked") return kind === "show" && Boolean(item?.tracked);
       if (filter === "learning") return !item?.prediction?.available;
       if (filter === "artwork") return !String(item?.poster_url || "").trim();
@@ -1446,7 +1448,7 @@
     function selectVisible() {
       const visible = visibleLibraryRows();
       [...visible.movies, ...visible.shows].forEach((item) => {
-        itemPaths(item).forEach((path) => selectedPaths.add(path));
+        videoQueuePaths(item).forEach((path) => selectedPaths.add(path));
       });
       updateSelectionUi();
       renderLibrary();
@@ -1458,6 +1460,14 @@
         return item.files.map((file) => file.path).filter(Boolean);
       }
       return item.path ? [item.path] : [];
+    }
+
+    function videoQueuePaths(item) {
+      if (!item) return [];
+      if (Array.isArray(item.files)) {
+        return item.files.filter((file) => !file?.transcoded).map((file) => file.path).filter(Boolean);
+      }
+      return item.transcoded ? [] : (item.path ? [item.path] : []);
     }
 
     function pathsAreSelected(paths) {
@@ -1527,7 +1537,7 @@
         const group = groups.get(number);
         group.episodes.push(ep);
         group.totalBytes += Number(ep.size_bytes || 0) || 0;
-        if (ep.path) group.paths.push(ep.path);
+        if (ep.path && !ep.transcoded) group.paths.push(ep.path);
       });
       return Array.from(groups.values())
         .map((group) => {
@@ -1553,11 +1563,11 @@
     }
 
     function itemIsSelected(item) {
-      return pathsAreSelected(itemPaths(item));
+      return pathsAreSelected(videoQueuePaths(item));
     }
 
     function setItemSelected(item, checked) {
-      setPathsSelected(itemPaths(item), checked);
+      setPathsSelected(videoQueuePaths(item), checked);
     }
 
     function clearSelection() {
@@ -2288,7 +2298,7 @@
 
       const body = document.createElement("div");
       body.className = "beta-card-body";
-      addSelectLine(body, item, "Select movie");
+      if (!item.transcoded) addSelectLine(body, item, "Select movie");
 
       const title = document.createElement("div");
       title.className = "beta-card-title";
@@ -2297,6 +2307,7 @@
 
       addBadgeRow(body, [
         mediaBadge("Movie"),
+        item.transcoded ? mediaBadge("Transcoded", "badge-sdr") : null,
         mediaBadge(qualityBadge(item)),
         mediaBadge(item.is_hdr ? "HDR" : "SDR", item.is_hdr ? "badge-hdr" : "badge-sdr"),
         mediaBadge(sourceCodec(item))
@@ -2331,7 +2342,7 @@
       wizard.textContent = "Size Wizard";
       wizard.setAttribute("aria-label", `Open ${item.title || "movie"} in Size Wizard`);
       wizard.onclick = () => openInWizard(item.path);
-      actions.appendChild(wizard);
+      if (!item.transcoded) actions.appendChild(wizard);
       const audio = document.createElement("button");
       audio.type = "button";
       audio.className = "wizard-open-button";
@@ -2344,20 +2355,20 @@
       queue.className = "smart-queue-button";
       queue.textContent = "Smart Queue";
       queue.onclick = () => queuePaths([item.path], item.title || "movie", { preset: "smart", trigger: queue });
-      actions.appendChild(queue);
+      if (!item.transcoded) actions.appendChild(queue);
       const tune = document.createElement("button");
       tune.type = "button";
       tune.className = "smart-tune-button";
       tune.textContent = "Tune";
       tune.setAttribute("aria-label", `Fine tune Smart Preset for ${item.title || "movie"}`);
       tune.onclick = () => openSmartTune([item.path], item.title || "movie", tune);
-      actions.appendChild(tune);
+      if (!item.transcoded) actions.appendChild(tune);
       const preview = document.createElement("button");
       preview.type = "button";
       preview.textContent = "Preview";
       preview.setAttribute("aria-label", `Preview Smart Preset for ${item.title || "movie"}`);
       preview.onclick = () => openSmartPreview([item.path], item.title || "movie", preview);
-      actions.insertBefore(preview, tune);
+      if (!item.transcoded) actions.insertBefore(preview, tune);
       body.appendChild(actions);
 
       card.appendChild(body);
@@ -2392,6 +2403,7 @@
       meta.className = "episode-meta";
       const predicted = ep.prediction?.available ? `${fmtBytes(ep.prediction.estimated_out_bytes)} predicted` : "Prediction learning";
       meta.textContent = `${fmtBytes(ep.size_bytes)} source / ${ep.is_hdr ? "HDR" : "SDR"} / ${predicted}`;
+      if (ep.transcoded) meta.textContent = `${fmtBytes(ep.size_bytes)} / Already transcoded · audio-only optimization available`;
       main.appendChild(meta);
       row.appendChild(main);
 
@@ -2403,7 +2415,7 @@
       wizard.textContent = "Size Wizard";
       wizard.setAttribute("aria-label", `Open ${episodeLabel(ep)} in Size Wizard`);
       wizard.onclick = () => openInWizard(ep.path);
-      actions.appendChild(wizard);
+      if (!ep.transcoded) actions.appendChild(wizard);
       const audio = document.createElement("button");
       audio.type = "button";
       audio.className = "wizard-open-button";
@@ -2416,18 +2428,18 @@
       queue.className = "smart-queue-button";
       queue.textContent = "Smart Queue";
       queue.onclick = () => queuePaths([ep.path], ep.filename || "episode", { preset: "smart", trigger: queue });
-      actions.appendChild(queue);
+      if (!ep.transcoded) actions.appendChild(queue);
       const tune = document.createElement("button");
       tune.type = "button";
       tune.className = "smart-tune-button";
       tune.textContent = "Tune";
       tune.onclick = () => openSmartTune([ep.path], `${show.title} ${episodeLabel(ep)}`, tune);
-      actions.appendChild(tune);
+      if (!ep.transcoded) actions.appendChild(tune);
       const preview = document.createElement("button");
       preview.type = "button";
       preview.textContent = "Preview";
       preview.onclick = () => openSmartPreview([ep.path], `${show.title} ${episodeLabel(ep)}`, preview);
-      actions.insertBefore(preview, tune);
+      if (!ep.transcoded) actions.insertBefore(preview, tune);
       row.appendChild(actions);
 
       return row;
@@ -2465,6 +2477,7 @@
 
       const actions = document.createElement("div");
       actions.className = "season-actions";
+      const canVideoEncode = group.paths.length > 0;
       const select = document.createElement("label");
       select.className = "beta-select-line season-select";
       const checkbox = document.createElement("input");
@@ -2474,25 +2487,25 @@
       checkbox.addEventListener("change", () => setPathsSelected(group.paths, checkbox.checked));
       select.appendChild(checkbox);
       select.appendChild(document.createTextNode("Select season"));
-      actions.appendChild(select);
+      if (canVideoEncode) actions.appendChild(select);
 
       const queue = document.createElement("button");
       queue.type = "button";
       queue.className = "smart-queue-button";
       queue.textContent = "Smart Queue Season";
       queue.onclick = () => queuePaths(group.paths, `${item.title} ${label}`, { preset: "smart", trigger: queue });
-      actions.appendChild(queue);
+      if (canVideoEncode) actions.appendChild(queue);
       const tune = document.createElement("button");
       tune.type = "button";
       tune.className = "smart-tune-button";
       tune.textContent = "Fine tune";
       tune.onclick = () => openSmartTune(group.paths, `${item.title} ${label}`, tune);
-      actions.appendChild(tune);
+      if (canVideoEncode) actions.appendChild(tune);
       const preview = document.createElement("button");
       preview.type = "button";
       preview.textContent = "Preview season";
       preview.onclick = () => openSmartPreview(group.paths, `${item.title} ${label}`, preview);
-      actions.insertBefore(preview, tune);
+      if (canVideoEncode) actions.insertBefore(preview, tune);
       row.appendChild(actions);
 
       if (expanded) {
@@ -2567,6 +2580,7 @@
       titleWrap.appendChild(title);
       addBadgeRow(titleWrap, [
         mediaBadge("Show"),
+        item.has_transcoded ? mediaBadge(`${item.transcoded_count || 0} transcoded`, "badge-sdr") : null,
         item.tracked ? mediaBadge("Tracked", "badge-sdr") : null,
         mediaBadge(item.is_hdr ? "HDR" : "SDR", item.is_hdr ? "badge-hdr" : "badge-sdr"),
         mediaBadge(sourceCodec(item)),
@@ -2631,6 +2645,7 @@
 
       const actions = document.createElement("div");
       actions.className = "show-action-bar";
+      const videoPaths = videoQueuePaths(item);
       const details = document.createElement("button");
       details.type = "button";
       details.className = "show-browse-button";
@@ -2651,26 +2666,26 @@
         setItemSelected(item, !itemIsSelected(item));
         renderLibrary();
       };
-      actions.appendChild(selectAll);
+      if (videoPaths.length) actions.appendChild(selectAll);
 
       const queue = document.createElement("button");
       queue.type = "button";
       queue.className = "smart-queue-button";
       queue.textContent = "Smart Queue Full Show";
-      queue.onclick = () => queuePaths(itemPaths(item), item.title || "show", { preset: "smart", trigger: queue });
-      actions.appendChild(queue);
+      queue.onclick = () => queuePaths(videoPaths, item.title || "show", { preset: "smart", trigger: queue });
+      if (videoPaths.length) actions.appendChild(queue);
       const tune = document.createElement("button");
       tune.type = "button";
       tune.className = "smart-tune-button show-secondary-action";
       tune.textContent = "Fine tune show";
-      tune.onclick = () => openSmartTune(itemPaths(item), item.title || "show", tune);
-      actions.appendChild(tune);
+      tune.onclick = () => openSmartTune(videoPaths, item.title || "show", tune);
+      if (videoPaths.length) actions.appendChild(tune);
       const preview = document.createElement("button");
       preview.type = "button";
       preview.className = "show-secondary-action";
       preview.textContent = "Preview show";
-      preview.onclick = () => openSmartPreview(itemPaths(item), item.title || "show", preview);
-      actions.insertBefore(preview, tune);
+      preview.onclick = () => openSmartPreview(videoPaths, item.title || "show", preview);
+      if (videoPaths.length) actions.insertBefore(preview, tune);
       body.appendChild(actions);
 
       if (expanded) {
