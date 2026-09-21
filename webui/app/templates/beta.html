@@ -1431,8 +1431,8 @@
     function matchesQuickFilter(item, filter, kind) {
       if (!filter || filter === "all") return true;
       if (filter === "savings") return predictedSavedBytes(item) > 0 && savingsPercent(item) >= 10;
-      if (filter === "hdr") return Boolean(item?.is_hdr) || (kind === "show" && showEpisodes(item).some((ep) => ep?.is_hdr));
-      if (filter === "transcoded") return Boolean(item?.transcoded || item?.has_transcoded || (kind === "show" && showEpisodes(item).some((ep) => ep?.transcoded)));
+      if (filter === "hdr") return Boolean(item?.is_hdr) || (["show", "dvr_show"].includes(kind) && showEpisodes(item).some((ep) => ep?.is_hdr));
+      if (filter === "transcoded") return Boolean(item?.transcoded || item?.has_transcoded || (["show", "dvr_show"].includes(kind) && showEpisodes(item).some((ep) => ep?.transcoded)));
       if (filter === "tracked") return kind === "show" && Boolean(item?.tracked);
       if (filter === "learning") return !item?.prediction?.available;
       if (filter === "artwork") return !String(item?.poster_url || "").trim();
@@ -1453,7 +1453,7 @@
           sortMode
         ),
         dvr: sortItems(
-          (libraryData.dvr || []).filter((item) => includesFilter(item, needle) && matchesQuickFilter(item, quickFilter, "dvr")),
+          (libraryData.dvr || []).filter((item) => includesFilter(item, needle) && matchesQuickFilter(item, quickFilter, item?.type === "dvr_show" ? "dvr_show" : "dvr_movie")),
           sortMode
         )
       };
@@ -1831,7 +1831,7 @@
       if (/\b(2160p|4k|uhd)\b/.test(text)) return "2160p";
       if (/\b(1080p|fhd)\b/.test(text)) return "1080p";
       if (/\b(720p)\b/.test(text)) return "720p";
-      return item?.type === "show" ? "Show" : item?.type === "dvr" ? "DVR" : "Movie";
+      return item?.type === "show" ? "Show" : String(item?.type || "").startsWith("dvr_") ? "DVR" : "Movie";
     }
 
     function targetCodec() {
@@ -2316,8 +2316,9 @@
     }
 
     function makeMovieCard(item) {
-      const mediaLabel = item?.type === "dvr" ? "DVR" : "Movie";
-      const itemLabel = item?.type === "dvr" ? "DVR recording" : "movie";
+      const isDvr = item?.type === "dvr_movie";
+      const mediaLabel = isDvr ? "DVR Movie" : "Movie";
+      const itemLabel = isDvr ? "DVR movie" : "movie";
       const card = document.createElement("article");
       card.className = "beta-card";
       if (itemIsSelected(item)) card.classList.add("beta-card-selected");
@@ -2356,7 +2357,7 @@
       const meta = document.createElement("div");
       meta.className = "beta-card-meta";
       appendMetaLine(meta, predictionText(item.prediction));
-      appendMetaLine(meta, `${mediaLabel} target: calculated per ${item?.type === "dvr" ? "recording" : "title"} in Size Wizard`);
+      appendMetaLine(meta, `${mediaLabel} target: calculated per ${isDvr ? "recording" : "title"} in Size Wizard`);
       appendMetaLine(meta, item.filename || "");
       details.appendChild(meta);
       body.appendChild(details);
@@ -2558,13 +2559,15 @@
     }
 
     function makeShowCard(item) {
+      const isDvrShow = item?.type === "dvr_show";
+      const showLabel = isDvrShow ? "DVR Show" : "Show";
       const key = showKey(item);
       const expanded = expandedShows.has(key);
       const card = document.createElement("article");
       card.className = "beta-card beta-show-card";
       if (expanded) card.classList.add("beta-show-expanded");
       if (itemIsSelected(item)) card.classList.add("beta-card-selected");
-      const poster = cardPoster(item, "Show");
+      const poster = cardPoster(item, showLabel);
       poster.tabIndex = 0;
       poster.setAttribute("role", "button");
       poster.setAttribute("aria-label", `${expanded ? "Hide" : "Browse"} ${item.title || "show"} seasons`);
@@ -2606,7 +2609,7 @@
       title.textContent = `${item.title}${item.year ? ` (${item.year})` : ""}`;
       titleWrap.appendChild(title);
       addBadgeRow(titleWrap, [
-        mediaBadge("Show"),
+        mediaBadge(showLabel),
         item.has_transcoded ? mediaBadge(`${item.transcoded_count || 0} transcoded`, "badge-sdr") : null,
         item.tracked ? mediaBadge("Tracked", "badge-sdr") : null,
         mediaBadge(item.is_hdr ? "HDR" : "SDR", item.is_hdr ? "badge-hdr" : "badge-sdr"),
@@ -2623,8 +2626,8 @@
       track.className = `beta-track-button${item.tracked ? " is-tracked" : ""}`;
       track.textContent = item.tracked ? "Tracked" : "Track new episodes";
       track.onclick = () => setShowTracking(item, !item.tracked, track);
-      controls.appendChild(track);
-      if (item.tracked) {
+      if (!isDvrShow) controls.appendChild(track);
+      if (!isDvrShow && item.tracked) {
         const rebuild = document.createElement("button");
         rebuild.type = "button";
         rebuild.className = "beta-track-button";
@@ -2650,7 +2653,7 @@
       body.appendChild(summary);
       body.appendChild(makeSavingsBar(item));
 
-      if (item.tracked) {
+      if (!isDvrShow && item.tracked) {
         const note = document.createElement("div");
         note.className = "beta-show-note";
         const newCount = Number(item.tracking?.new_episode_count || 0);
@@ -2698,19 +2701,19 @@
       const queue = document.createElement("button");
       queue.type = "button";
       queue.className = "smart-queue-button";
-      queue.textContent = "Smart Queue Full Show";
+      queue.textContent = isDvrShow ? "Smart Queue DVR Show" : "Smart Queue Full Show";
       queue.onclick = () => queuePaths(videoPaths, item.title || "show", { preset: "smart", trigger: queue });
       if (videoPaths.length) actions.appendChild(queue);
       const tune = document.createElement("button");
       tune.type = "button";
       tune.className = "smart-tune-button show-secondary-action";
-      tune.textContent = "Fine tune show";
+      tune.textContent = isDvrShow ? "Fine tune DVR show" : "Fine tune show";
       tune.onclick = () => openSmartTune(videoPaths, item.title || "show", tune);
       if (videoPaths.length) actions.appendChild(tune);
       const preview = document.createElement("button");
       preview.type = "button";
       preview.className = "show-secondary-action";
-      preview.textContent = "Preview show";
+      preview.textContent = isDvrShow ? "Preview DVR show" : "Preview show";
       preview.onclick = () => openSmartPreview(videoPaths, item.title || "show", preview);
       if (videoPaths.length) actions.insertBefore(preview, tune);
       body.appendChild(actions);
@@ -2782,7 +2785,7 @@
       el("dvrGrid").innerHTML = "";
       visibleMovies.forEach((item) => el("moviesGrid").appendChild(makeMovieCard(item)));
       visibleShows.forEach((item) => el("showsGrid").appendChild(makeShowCard(item)));
-      visibleDvr.forEach((item) => el("dvrGrid").appendChild(makeMovieCard(item)));
+      visibleDvr.forEach((item) => el("dvrGrid").appendChild(item?.type === "dvr_show" ? makeShowCard(item) : makeMovieCard(item)));
       renderLoadMore(el("moviesGrid"), "movies", visibleMovies.length, movies.length);
       renderLoadMore(el("showsGrid"), "shows", visibleShows.length, shows.length);
       renderLoadMore(el("dvrGrid"), "dvr", visibleDvr.length, dvr.length);

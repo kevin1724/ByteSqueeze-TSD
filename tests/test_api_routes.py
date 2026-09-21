@@ -3850,7 +3850,8 @@ class ApiRouteSmokeTests(unittest.TestCase):
             self.assertEqual(data["stats"]["dvr"], 1)
             self.assertEqual(data["stats"]["movies"], 0)
             self.assertEqual(data["movies"], [])
-            self.assertEqual(data["dvr"][0]["type"], "dvr")
+            self.assertEqual(data["dvr"][0]["type"], "dvr_movie")
+            self.assertEqual(data["dvr"][0]["dvr_media_type"], "movie")
             self.assertEqual(data["dvr"][0]["root_kind"], "dvr")
             self.assertEqual(data["dvr"][0]["path"], recording)
             self.assertEqual(data["catalog"]["dvr"], 1)
@@ -3859,6 +3860,51 @@ class ApiRouteSmokeTests(unittest.TestCase):
                 os.remove(recording)
             if os.path.isdir(dvr_root):
                 os.rmdir(dvr_root)
+
+    def test_dvr_root_uses_plex_folders_to_group_show_episodes(self):
+        dvr_root = os.path.join(TEST_MEDIA, "plex-dvr-structured")
+        show_dir = os.path.join(dvr_root, "TV Shows", "Como dice el dicho (2011)", "Season 02")
+        movie_dir = os.path.join(dvr_root, "Movies", "Recorded Movie (2025)")
+        os.makedirs(show_dir, exist_ok=True)
+        os.makedirs(movie_dir, exist_ok=True)
+        episodes = [
+            os.path.join(show_dir, "Como dice el dicho - S02E01 - La verdad.ts"),
+            os.path.join(show_dir, "Como dice el dicho - S02E02 - La promesa.ts"),
+        ]
+        movie = os.path.join(movie_dir, "Recorded Movie (2025).ts")
+        for media_path in [*episodes, movie]:
+            with open(media_path, "wb") as handle:
+                handle.write(b"transport-stream")
+        try:
+            with patch.object(
+                app_routes,
+                "_beta_mapped_roots",
+                return_value=[{"path": dvr_root, "kind": "dvr", "label": "DVR"}],
+            ):
+                data = app_routes._beta_scan_library(
+                    dvr_root,
+                    recursive=True,
+                    posters=False,
+                    settings={"beta_media_folders": {"dvr": [{"path": dvr_root}]}},
+                    root_kind="dvr",
+                )
+
+            self.assertEqual(data["stats"]["dvr"], 2)
+            self.assertEqual(data["stats"]["dvr_shows"], 1)
+            self.assertEqual(data["stats"]["dvr_movies"], 1)
+            self.assertEqual(data["stats"]["dvr_episodes"], 2)
+            show = next(row for row in data["dvr"] if row["type"] == "dvr_show")
+            self.assertEqual(show["title"], "Como dice el dicho")
+            self.assertEqual(show["year"], 2011)
+            self.assertEqual(show["episode_count"], 2)
+            self.assertEqual(show["season_count"], 1)
+            self.assertEqual(sorted(row["episode"] for row in show["files"]), [1, 2])
+            recording = next(row for row in data["dvr"] if row["type"] == "dvr_movie")
+            self.assertEqual(recording["title"], "Recorded Movie")
+            self.assertEqual(recording["year"], 2025)
+            self.assertEqual(recording["path"], movie)
+        finally:
+            shutil.rmtree(dvr_root, ignore_errors=True)
 
     def test_dvr_folder_mapping_is_normalized_and_exposed_as_a_root(self):
         dvr_root = os.path.join(TEST_MEDIA, "recordings")

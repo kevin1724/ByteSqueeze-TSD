@@ -28,6 +28,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
   bool get _shows => _section == 'shows';
   bool get _dvr => _section == 'dvr';
 
+  bool _isShowItem(Map<String, dynamic> item) =>
+      item['type'] == 'show' || item['type'] == 'dvr_show';
+
   @override
   void dispose() {
     _search.dispose();
@@ -271,8 +274,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
                                   )['recently_added'],
                                 )
                                   .map(asMap)
-                                  .where((item) =>
-                                      item['type'] == (_dvr ? 'dvr' : 'movie'))
+                                  .where((item) => _dvr
+                                      ? '${item['type'] ?? ''}'
+                                          .startsWith('dvr_')
+                                      : item['type'] == 'movie')
                                   .toList())
                           .take(12)
                           .toList(),
@@ -341,7 +346,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     itemCount: items.length,
                     itemBuilder: (context, index) => _MediaTile(
                       item: items[index],
-                      isShow: _shows,
+                      isShow: _isShowItem(items[index]),
                       onTap: () => _openDetails(items[index]),
                     ),
                   ),
@@ -363,7 +368,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       builder: (context) => _MediaDetails(
         controller: widget.controller,
         item: item,
-        isShow: _shows,
+        isShow: _isShowItem(item),
       ),
     );
     if (mounted) setState(() {});
