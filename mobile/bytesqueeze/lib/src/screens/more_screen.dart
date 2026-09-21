@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' hide appBuildNumber;
+import 'package:url_launcher/url_launcher.dart';
 
 import '../app_controller.dart';
 import '../app_meta.dart';
@@ -131,31 +133,18 @@ class MoreScreen extends StatelessWidget {
                   ],
                 ),
               ],
-              const SectionHeader(title: 'About'),
+              const SectionHeader(title: 'Credits & licenses'),
               _SettingsGroup(
                 children: [
                   _MoreTile(
-                    icon: Icons.info_outline_rounded,
-                    color: ByteSqueezeColors.muted,
-                    title: 'About',
-                    subtitle: 'ByteSqueeze $appVersion',
-                    onTap: () => showAboutDialog(
-                      context: context,
-                      applicationName: 'ByteSqueeze',
-                      applicationVersion: '$appVersion+$appBuildNumber',
-                      applicationIcon: ClipRRect(
-                        borderRadius: BorderRadius.circular(18),
-                        child: Image.asset(
-                          'assets/branding/bytesqueeze_icon.png',
-                          width: 72,
-                          height: 72,
-                        ),
-                      ),
-                      children: const [
-                        Text(
-                          'A cross-platform remote control for HandBrake TSD Helper. All encoding stays on the Docker-hosted server.',
-                        ),
-                      ],
+                    icon: Icons.favorite_rounded,
+                    color: ByteSqueezeColors.violet,
+                    title: 'Creator, source & licenses',
+                    subtitle:
+                        'Created by Kevin Ruiz Arzate · ByteSqueeze $appVersion',
+                    onTap: () => _open(
+                      context,
+                      const CreditsLicensesPage(),
                     ),
                   ),
                 ],
@@ -215,6 +204,180 @@ class MoreScreen extends StatelessWidget {
             ) ==
             true;
     if (confirmed) await controller.disconnect();
+  }
+}
+
+class CreditsLicensesPage extends StatelessWidget {
+  const CreditsLicensesPage({super.key});
+
+  static final Uri _profileUrl = Uri.parse('https://github.com/kevin1724');
+  static final Uri _repositoryUrl =
+      Uri.parse('https://github.com/kevin1724/ByteSqueeze-TSD');
+
+  @override
+  Widget build(BuildContext context) {
+    return _DetailScaffold(
+      title: 'Credits & licenses',
+      child: Align(
+        alignment: Alignment.topCenter,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 760),
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 40),
+            children: [
+              SurfaceCard(
+                gradient: const LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [Color(0xFF17384B), Color(0xFF17142D)],
+                ),
+                borderColor: ByteSqueezeColors.cyan.withValues(alpha: .34),
+                child: Column(
+                  children: [
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(22),
+                      child: Image.asset(
+                        'assets/branding/bytesqueeze_icon.png',
+                        width: 88,
+                        height: 88,
+                      ),
+                    ),
+                    const SizedBox(height: 15),
+                    Text(
+                      'ByteSqueeze',
+                      style: Theme.of(context).textTheme.headlineSmall,
+                    ),
+                    const SizedBox(height: 5),
+                    const Text(
+                      'A smarter, friendlier remote control for a distributed HandBrake encoding system.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: ByteSqueezeColors.softInk),
+                    ),
+                    const SizedBox(height: 12),
+                    const StatusPill(
+                      label: 'Version $appVersion+$appBuildNumber',
+                      icon: Icons.rocket_launch_rounded,
+                      color: ByteSqueezeColors.cyan,
+                    ),
+                  ],
+                ),
+              ),
+              const SectionHeader(
+                title: 'Created by',
+                subtitle: 'The person behind ByteSqueeze',
+              ),
+              SurfaceCard(
+                borderColor: ByteSqueezeColors.violet.withValues(alpha: .32),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const Row(
+                      children: [
+                        CircleAvatar(
+                          radius: 25,
+                          backgroundColor: Color(0x2422D3EE),
+                          child: Icon(
+                            Icons.person_rounded,
+                            color: ByteSqueezeColors.cyan,
+                            size: 28,
+                          ),
+                        ),
+                        SizedBox(width: 13),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Kevin Ruiz Arzate',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w900,
+                                  fontSize: 17,
+                                ),
+                              ),
+                              SizedBox(height: 3),
+                              Text(
+                                'Creator and lead developer',
+                                style: TextStyle(
+                                  color: ByteSqueezeColors.muted,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 17),
+                    FilledButton.icon(
+                      onPressed: () => _openLink(context, _profileUrl),
+                      icon: const Icon(Icons.person_search_rounded),
+                      label: const Text('Open Kevin’s GitHub'),
+                    ),
+                    const SizedBox(height: 9),
+                    OutlinedButton.icon(
+                      onPressed: () => _openLink(context, _repositoryUrl),
+                      icon: const Icon(Icons.code_rounded),
+                      label: const Text('View ByteSqueeze source'),
+                    ),
+                  ],
+                ),
+              ),
+              const SectionHeader(
+                title: 'Open source',
+                subtitle: 'Project links and software acknowledgements',
+              ),
+              _SettingsGroup(
+                children: [
+                  _MoreTile(
+                    icon: Icons.account_tree_outlined,
+                    color: ByteSqueezeColors.cyan,
+                    title: 'GitHub repository',
+                    subtitle: 'github.com/kevin1724/ByteSqueeze-TSD',
+                    onTap: () => _openLink(context, _repositoryUrl),
+                  ),
+                  _MoreTile(
+                    icon: Icons.description_outlined,
+                    color: ByteSqueezeColors.blue,
+                    title: 'Open-source licenses',
+                    subtitle: 'Flutter and third-party package notices',
+                    onTap: () => showLicensePage(
+                      context: context,
+                      applicationName: 'ByteSqueeze',
+                      applicationVersion: '$appVersion+$appBuildNumber',
+                      applicationIcon: Padding(
+                        padding: const EdgeInsets.all(8),
+                        child: Image.asset(
+                          'assets/branding/bytesqueeze_icon.png',
+                          width: 64,
+                          height: 64,
+                        ),
+                      ),
+                      applicationLegalese:
+                          'Created by Kevin Ruiz Arzate\nhttps://github.com/kevin1724',
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openLink(BuildContext context, Uri uri) async {
+    var opened = false;
+    try {
+      opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      opened = false;
+    }
+    if (opened || !context.mounted) return;
+    await Clipboard.setData(ClipboardData(text: uri.toString()));
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+          content: Text('Could not open the browser. Copied $uri instead.')),
+    );
   }
 }
 

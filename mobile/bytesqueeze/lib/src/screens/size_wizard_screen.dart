@@ -326,6 +326,42 @@ class _SizeWizardScreenState extends State<SizeWizardScreen> {
     _scheduleEstimate();
   }
 
+  void _applyTuningPreset(String preset) {
+    final next = Map<String, dynamic>.from(_options)
+      ..['target_size_auto'] = true;
+    switch (preset) {
+      case 'quality':
+        next['quality'] = 'high';
+        next['resolution_mode'] = 'keep';
+        next['encoder_speed'] = 'slow';
+        break;
+      case 'compact':
+        next['quality'] = 'small';
+        next['resolution_mode'] = '1080';
+        next['encoder_speed'] = 'medium';
+        break;
+      default:
+        next['quality'] = 'balanced';
+        next['resolution_mode'] = 'auto';
+        next['encoder_speed'] = 'auto';
+    }
+    setState(() {
+      _options = next;
+      _dirty = true;
+      _editRevision += 1;
+    });
+    _scheduleEstimate();
+  }
+
+  String get _activeTuningPreset {
+    final quality = '${_options['quality'] ?? 'balanced'}';
+    final resolution = '${_options['resolution_mode'] ?? 'keep'}';
+    if (quality == 'high' && resolution == 'keep') return 'quality';
+    if (quality == 'small' && resolution == '1080') return 'compact';
+    if (quality == 'balanced' && resolution == 'auto') return 'balanced';
+    return 'custom';
+  }
+
   void _targetChanged() {
     setState(() {
       _dirty = true;
@@ -483,7 +519,72 @@ class _SizeWizardScreenState extends State<SizeWizardScreen> {
                     ],
                   ),
                 ),
-                const SectionHeader(title: 'Size and picture'),
+                const SectionHeader(
+                  title: 'Choose your goal',
+                  subtitle:
+                      'Start with an easy intent. You can fine-tune every detail below.',
+                ),
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final cards = [
+                      _TuningGoalCard(
+                        icon: Icons.high_quality_rounded,
+                        title: 'Keep quality',
+                        description:
+                            'Preserve source resolution and favor detail over speed.',
+                        selected: _activeTuningPreset == 'quality',
+                        color: ByteSqueezeColors.violet,
+                        onTap: () => _applyTuningPreset('quality'),
+                      ),
+                      _TuningGoalCard(
+                        icon: Icons.balance_rounded,
+                        title: 'Balanced',
+                        description:
+                            'Let Smart sizing balance quality, space, and encode time.',
+                        selected: _activeTuningPreset == 'balanced',
+                        color: ByteSqueezeColors.cyan,
+                        onTap: () => _applyTuningPreset('balanced'),
+                      ),
+                      _TuningGoalCard(
+                        icon: Icons.compress_rounded,
+                        title: 'Save space',
+                        description:
+                            'Aim for a compact 1080p file that still looks good.',
+                        selected: _activeTuningPreset == 'compact',
+                        color: ByteSqueezeColors.mint,
+                        onTap: () => _applyTuningPreset('compact'),
+                      ),
+                    ];
+                    if (constraints.maxWidth >= 700) {
+                      return Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          for (var index = 0;
+                              index < cards.length;
+                              index++) ...[
+                            Expanded(child: cards[index]),
+                            if (index != cards.length - 1)
+                              const SizedBox(width: 10),
+                          ],
+                        ],
+                      );
+                    }
+                    return Column(
+                      children: [
+                        for (var index = 0; index < cards.length; index++) ...[
+                          cards[index],
+                          if (index != cards.length - 1)
+                            const SizedBox(height: 9),
+                        ],
+                      ],
+                    );
+                  },
+                ),
+                const SectionHeader(
+                  title: 'Size and picture',
+                  subtitle:
+                      'Control the file-size target and the maximum output resolution.',
+                ),
                 SurfaceCard(
                   child: Column(
                     children: [
@@ -569,13 +670,21 @@ class _SizeWizardScreenState extends State<SizeWizardScreen> {
                     ],
                   ),
                 ),
-                const SectionHeader(title: 'Encode choices'),
+                const SectionHeader(
+                  title: 'Manual fine tuning',
+                  subtitle:
+                      'Optional controls with plain-language guidance for each choice.',
+                ),
                 SurfaceCard(
                   padding: EdgeInsets.zero,
                   child: ExpansionTile(
-                    initiallyExpanded: controller.showSecondaryUi,
+                    initiallyExpanded: true,
+                    leading: const Icon(
+                      Icons.tune_rounded,
+                      color: ByteSqueezeColors.cyan,
+                    ),
                     title: const Text(
-                      'Codec, hardware, audio, and subtitles',
+                      'Video, speed, audio, and subtitles',
                       style: TextStyle(fontWeight: FontWeight.w800),
                     ),
                     subtitle: Text(
@@ -587,15 +696,23 @@ class _SizeWizardScreenState extends State<SizeWizardScreen> {
                     ),
                     childrenPadding: const EdgeInsets.fromLTRB(14, 0, 14, 16),
                     children: [
+                      const _TuningTip(
+                        icon: Icons.lightbulb_outline_rounded,
+                        text:
+                            'Safe default: keep H.265 10-bit, Automatic speed, and Smart audio unless compatibility is more important than file size.',
+                      ),
+                      const SizedBox(height: 13),
                       _dropdown(
                         label: 'Video codec',
                         value: '${_options['video_codec'] ?? 'h265'}',
                         values: const ['h265', 'h264', 'av1'],
                         labels: const {
-                          'h265': 'H.265 / HEVC',
-                          'h264': 'H.264',
-                          'av1': 'AV1',
+                          'h265': 'H.265 / HEVC · recommended',
+                          'h264': 'H.264 · widest compatibility',
+                          'av1': 'AV1 · smallest, slowest',
                         },
+                        helper:
+                            'H.265 is the best default for Plex. H.264 plays almost everywhere; AV1 saves more space but needs newer clients.',
                         onChanged: (value) => _setOption('video_codec', value),
                       ),
                       const SizedBox(height: 11),
@@ -604,10 +721,12 @@ class _SizeWizardScreenState extends State<SizeWizardScreen> {
                         value: '${_options['encoder_family'] ?? 'software'}',
                         values: const ['software', 'qsv', 'nvenc'],
                         labels: const {
-                          'software': 'Software / CPU',
-                          'qsv': 'Intel Quick Sync',
-                          'nvenc': 'NVIDIA NVENC',
+                          'software': 'Software / CPU · best precision',
+                          'qsv': 'Intel Quick Sync · fast',
+                          'nvenc': 'NVIDIA NVENC · fast',
                         },
+                        helper:
+                            'Hardware encoding is much faster. CPU encoding is slower and may squeeze out slightly more efficiency.',
                         onChanged: (value) =>
                             _setOption('encoder_family', value),
                       ),
@@ -641,11 +760,13 @@ class _SizeWizardScreenState extends State<SizeWizardScreen> {
                         value: '${_options['audio_mode'] ?? 'copy'}',
                         values: const ['copy', 'eac3', 'aac', 'auto'],
                         labels: const {
-                          'copy': 'Passthrough / copy',
-                          'eac3': 'Smart lossless optimize · 1024k',
-                          'aac': 'AAC · choose bitrate',
-                          'auto': 'Automatic · quality first',
+                          'copy': 'Keep every original track',
+                          'eac3': 'Optimize surround · 1024 kbps',
+                          'aac': 'AAC · compact and compatible',
+                          'auto': 'Smart audio · recommended',
                         },
+                        helper:
+                            'Smart audio removes duplicate language tracks and keeps the best track for each selected language.',
                         onChanged: (value) => _setOption('audio_mode', value),
                       ),
                       if ('${_options['audio_mode'] ?? 'copy'}' != 'copy') ...[
@@ -676,10 +797,12 @@ class _SizeWizardScreenState extends State<SizeWizardScreen> {
                         value: '${_options['subtitle_mode'] ?? 'all'}',
                         values: const ['all', 'first', 'none'],
                         labels: const {
-                          'all': 'Keep all',
-                          'first': 'First matching',
-                          'none': 'None',
+                          'all': 'Keep all subtitle tracks',
+                          'first': 'Keep the first matching track',
+                          'none': 'Remove subtitles',
                         },
+                        helper:
+                            'Keeping all tracks is safest. Removing subtitles saves very little space.',
                         onChanged: (value) =>
                             _setOption('subtitle_mode', value),
                       ),
@@ -792,10 +915,11 @@ class _SizeWizardScreenState extends State<SizeWizardScreen> {
     required String value,
     required List<String> values,
     Map<String, String> labels = const {},
+    String? helper,
     required ValueChanged<String> onChanged,
   }) {
     final safeValue = values.contains(value) ? value : values.first;
-    return DropdownButtonFormField<String>(
+    final field = DropdownButtonFormField<String>(
       key: ValueKey('$label-$safeValue'),
       initialValue: safeValue,
       decoration: InputDecoration(labelText: label),
@@ -812,6 +936,38 @@ class _SizeWizardScreenState extends State<SizeWizardScreen> {
           : (next) {
               if (next != null) onChanged(next);
             },
+    );
+    if (helper == null || helper.isEmpty) return field;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        field,
+        const SizedBox(height: 6),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Icon(
+                Icons.info_outline_rounded,
+                size: 14,
+                color: ByteSqueezeColors.muted,
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  helper,
+                  style: const TextStyle(
+                    color: ByteSqueezeColors.muted,
+                    fontSize: 11.5,
+                    height: 1.3,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 
@@ -834,6 +990,130 @@ class _SizeWizardScreenState extends State<SizeWizardScreen> {
               ),
             ),
           ],
+        ),
+      );
+}
+
+class _TuningGoalCard extends StatelessWidget {
+  const _TuningGoalCard({
+    required this.icon,
+    required this.title,
+    required this.description,
+    required this.selected,
+    required this.color,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String title;
+  final String description;
+  final bool selected;
+  final Color color;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Material(
+        color:
+            selected ? color.withValues(alpha: .12) : ByteSqueezeColors.surface,
+        borderRadius: BorderRadius.circular(15),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(15),
+              border: Border.all(
+                color: selected
+                    ? color.withValues(alpha: .7)
+                    : ByteSqueezeColors.line,
+                width: selected ? 1.4 : 1,
+              ),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: color.withValues(alpha: .13),
+                      borderRadius: BorderRadius.circular(11),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(9),
+                      child: Icon(icon, color: color, size: 21),
+                    ),
+                  ),
+                  const SizedBox(width: 11),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                title,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w900,
+                                ),
+                              ),
+                            ),
+                            if (selected)
+                              Icon(Icons.check_circle_rounded,
+                                  color: color, size: 19),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          description,
+                          style: const TextStyle(
+                            color: ByteSqueezeColors.muted,
+                            fontSize: 11.5,
+                            height: 1.3,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+}
+
+class _TuningTip extends StatelessWidget {
+  const _TuningTip({required this.icon, required this.text});
+
+  final IconData icon;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => DecoratedBox(
+        decoration: BoxDecoration(
+          color: ByteSqueezeColors.cyan.withValues(alpha: .07),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: ByteSqueezeColors.cyan.withValues(alpha: .2),
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(icon, color: ByteSqueezeColors.cyan, size: 19),
+              const SizedBox(width: 9),
+              Expanded(
+                child: Text(
+                  text,
+                  style: const TextStyle(fontSize: 12, height: 1.35),
+                ),
+              ),
+            ],
+          ),
         ),
       );
 }

@@ -90,6 +90,44 @@ void main() {
     expect(await controller.store.loadInterfaceVersion(), 'v2');
   });
 
+  testWidgets('release radar and creator credits are easy to find',
+      (tester) async {
+    tester.view.physicalSize = const Size(430, 932);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    final controller = AppController()..enterDemo();
+    await tester.pumpWidget(ByteSqueezeApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byIcon(Icons.tune_outlined));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(find.text('Upcoming episodes'), 220,
+        scrollable: find.byType(Scrollable).first);
+    await tester.tap(find.text('Upcoming episodes'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('What’s coming next'), findsOneWidget);
+    expect(find.text('All releases'), findsOneWidget);
+    expect(find.text('Next 7 days'), findsOneWidget);
+    expect(find.text('Foundation'), findsWidgets);
+
+    await tester.tap(find.byType(BackButton));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+        find.text('Creator, source & licenses'), 260,
+        scrollable: find.byType(Scrollable).first);
+    await tester.tap(find.text('Creator, source & licenses'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Kevin Ruiz Arzate'), findsOneWidget);
+    expect(find.text('Open Kevin’s GitHub'), findsOneWidget);
+    expect(find.text('View ByteSqueeze source'), findsOneWidget);
+    expect(find.text('Open-source licenses'), findsOneWidget);
+  });
+
   testWidgets('mobile settings expose GPU slots and CPU exclusivity',
       (tester) async {
     final controller = AppController()..enterDemo();
@@ -339,6 +377,9 @@ void main() {
 
     expect(find.text('Size Wizard'), findsOneWidget);
     expect(find.textContaining('source FPS preserved'), findsOneWidget);
+    expect(find.text('Keep quality'), findsOneWidget);
+    expect(find.text('Balanced'), findsWidgets);
+    expect(find.text('Save space'), findsOneWidget);
     expect(find.text('Queue encode'), findsOneWidget);
     final wizardScroll = find
         .descendant(
