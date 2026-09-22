@@ -52,7 +52,7 @@ from webui.app.presets import guess_preset_from_filename, load_preset_config
 from webui.app.settings import load_settings, normalize_output_container, save_settings
 
 
-WORKER_RELEASE = "2.13.6"
+WORKER_RELEASE = "2.13.7"
 
 
 def _public_encoding_policy() -> dict:
@@ -116,6 +116,63 @@ def _apply_controller_encoding_policy(policy: dict | None) -> dict:
 
 def _work_dir() -> str:
     return os.path.abspath(os.environ.get("TSD_WORKER_TEMP_DIR") or "/work/jobs")
+
+
+def _normalized_worker_job_intent(job: dict, transfer: dict) -> tuple[dict | None, dict | None]:
+    """Preserve controller operation intent when a headless worker queues a job.
+
+    Older worker receivers accepted the transfer but omitted ``operations``
+    when they created the local queue row. Audio-only jobs then inherited the
+    video preset and incorrectly entered HandBrake instead of the FFmpeg audio
+    optimizer. Normalize every durable audio-only marker here so both current
+    and older controller plans stay on the stream-copy video path.
+    """
+    metadata_source = job.get("encode_metadata")
+    if not isinstance(metadata_source, dict):
+        metadata_source = transfer.get("encode_metadata")
+    metadata = dict(metadata_source) if isinstance(metadata_source, dict) else {}
+
+    operations_source = job.get("operations")
+    if not isinstance(operations_source, dict):
+        operations_source = metadata.get("operations")
+    operations = dict(operations_source) if isinstance(operations_source, dict) else {}
+
+    markers = (
+        operations.get("job_type"),
+        job.get("job_type"),
+        job.get("preset_selection"),
+        job.get("encode_method"),
+        metadata.get("job_type"),
+        metadata.get("preset_selection"),
+        metadata.get("encode_method"),
+    )
+    audio_only = any(
+        str(value or "").strip().lower()
+        in {"audio_only", "audio-only", "ffmpeg_audio_only"}
+        for value in markers
+    )
+    if audio_only:
+        operations.update({
+            "job_type": "audio_only",
+            "video_action": "copy",
+            "subtitle_action": "copy",
+            "replace_source": operations.get("replace_source", True),
+        })
+        if str(operations.get("audio_policy") or "").strip().lower() in {"", "preserve"}:
+            operations["audio_policy"] = "optimize_lossless"
+        metadata.update({
+            "job_type": "audio_only",
+            "preset_selection": "audio-only",
+            "encode_method": "ffmpeg_audio_only",
+            "encoder": "copy",
+            "encoder_family": "stream_copy",
+            "bit_depth": "copy",
+            "operations": operations,
+        })
+    elif operations:
+        metadata["operations"] = operations
+
+    return (metadata or None, operations or None)
 
 
 def _scratch_dir() -> str:
@@ -446,6 +503,7 @@ def create_worker_app(*, announce_pairing: bool = True) -> Flask:
                 skipped.append({"path": src, "reason": f"missing transfer data: {', '.join(missing)}"})
                 continue
             transfer["remote_temp_dir"] = current_work_dir
+            encode_metadata, operations = _normalized_worker_job_intent(job, transfer)
             preset = str(job.get("preset") or "auto").strip().lower()
             if preset not in {"auto", "1080", "4k"}:
                 preset = "auto"
@@ -456,12 +514,14 @@ def create_worker_app(*, announce_pairing: bool = True) -> Flask:
                 transfer,
                 extra_args=str(job.get("extra_args") or ""),
                 preset_bundle=job.get("preset_bundle"),
-                encode_metadata=job.get("encode_metadata") if isinstance(job.get("encode_metadata"), dict) else None,
+                encode_metadata=encode_metadata,
                 encoding_policy=(
                     job.get("encoding_policy")
                     if isinstance(job.get("encoding_policy"), dict)
                     else applied_policy
                 ),
+                operations=operations,
+                parent_job_id=str(job.get("parent_job_id") or ""),
             )
             count += 1 if created else 0
 

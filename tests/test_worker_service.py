@@ -6,7 +6,7 @@ import unittest
 from unittest import mock
 
 from webui.app import jobs, node_linking, settings
-from worker.app import create_worker_app
+from worker.app import _normalized_worker_job_intent, create_worker_app
 
 
 class HeadlessWorkerServiceTests(unittest.TestCase):
@@ -273,6 +273,92 @@ class HeadlessWorkerServiceTests(unittest.TestCase):
         )
         self.assertTrue(response.get_json()["token"])
         self.assertEqual(self.client.get("/api/node/status").status_code, 401)
+
+    def test_worker_receiver_preserves_audio_only_operations(self):
+        pairing = node_linking.create_pairing_code()
+        paired = self.client.post(
+            "/api/node/pair/accept",
+            json={
+                "code": pairing["code"],
+                "controller_id": "controller-audio-only",
+                "controller_name": "Main controller",
+                "controller_url": "http://controller:8080",
+                "protocol_version": 2,
+            },
+        ).get_json()
+        operations = {
+            "job_type": "audio_only",
+            "audio_policy": "optimize_lossless",
+            "preferred_languages": ["eng", "spa"],
+            "deduplicate_languages": True,
+            "transcode_selected_audio": True,
+            "default_target_codec": "aac",
+            "default_target_bitrate_kbps": 1024,
+        }
+        payload = {
+            "jobs": [{
+                "src": "/media/Movie.mkv",
+                "preset": "4k",
+                "parent_job_id": "controller-job-id",
+                "operations": operations,
+                "encode_metadata": {
+                    "preset_selection": "audio-only",
+                    "encode_method": "svt_av1_10bit",
+                },
+                "transfer": {
+                    "id": "transfer-audio-only",
+                    "controller_id": "controller-audio-only",
+                    "controller_url": "http://controller:8080",
+                    "source_url": "http://controller:8080/source",
+                    "upload_url": "http://controller:8080/output",
+                    "download_token": "download-token",
+                    "upload_token": "upload-token",
+                    "worker_node_id": "worker-id",
+                    "original_path": "/media/Movie.mkv",
+                    "source_basename": "Movie.mkv",
+                },
+            }],
+        }
+        body = json.dumps(payload).encode("utf-8")
+        headers = node_linking.hmac_headers(
+            "POST",
+            "/api/node/jobs",
+            body,
+            node_id="controller-audio-only",
+            token=paired["token"],
+        )
+        with mock.patch(
+            "worker.app.create_remote_transfer_job",
+            return_value=("worker-audio-job", True),
+        ) as create:
+            response = self.client.post(
+                "/api/node/jobs",
+                data=body,
+                content_type="application/json",
+                headers=headers,
+            )
+
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        self.assertEqual(response.get_json()["count"], 1)
+        call = create.call_args
+        self.assertEqual(call.kwargs["parent_job_id"], "controller-job-id")
+        self.assertEqual(call.kwargs["operations"]["job_type"], "audio_only")
+        self.assertEqual(call.kwargs["operations"]["video_action"], "copy")
+        self.assertEqual(call.kwargs["operations"]["preferred_languages"], ["eng", "spa"])
+        self.assertEqual(call.kwargs["encode_metadata"]["encode_method"], "ffmpeg_audio_only")
+        self.assertEqual(call.kwargs["encode_metadata"]["encoder_family"], "stream_copy")
+
+    def test_worker_receiver_repairs_legacy_audio_only_marker(self):
+        job = {
+            "preset_selection": "audio-only",
+            "encode_metadata": {"encode_method": "svt_av1_10bit"},
+        }
+        metadata, operations = _normalized_worker_job_intent(job, {})
+
+        self.assertEqual(operations["job_type"], "audio_only")
+        self.assertEqual(operations["audio_policy"], "optimize_lossless")
+        self.assertEqual(metadata["encode_method"], "ffmpeg_audio_only")
+        self.assertEqual(metadata["encoder"], "copy")
 
     def test_pairing_prefers_controller_route_observed_by_worker(self):
         pairing = node_linking.create_pairing_code()
@@ -580,7 +666,7 @@ class HeadlessWorkerServiceTests(unittest.TestCase):
         self.assertEqual(jobs._hardware_transcode_limit(job=stale_job), 3)
 
         health = self.client.get("/api/health").get_json()
-        self.assertEqual(health["release"], "2.13.6")
+        self.assertEqual(health["release"], "2.13.7")
         self.assertEqual(health["encoding_policy"]["hardware_transcode_concurrency"], 3)
         self.assertEqual(health["encoding_policy"]["output_container"], "mp4")
         self.assertTrue(health["encoding_policy"]["web_optimized"])
