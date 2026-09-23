@@ -553,7 +553,7 @@ docker run -d \
 ```
 
 The `latest` and `main` images are published automatically from `main`. Stable
-controller releases also publish `3.25.1` and `3.25` tags. The legacy
+controller releases also publish `3.25.2` and `3.25` tags. The legacy
 `kevina1724/handbrake-tsd-helper` name is published from the same build and will
 continue receiving identical updates, so existing installations do not break.
 

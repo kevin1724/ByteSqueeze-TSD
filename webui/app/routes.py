@@ -3499,6 +3499,53 @@ def _wizard_audio_operations(plan: dict, operations: dict | None = None) -> dict
     }
 
 
+def _dvr_queue_safety_reason(src: str, settings: dict | None = None, *, now: float | None = None) -> str:
+    """Block Plex transport streams until the recording has stopped changing."""
+    src = str(src or "").strip()
+    stem, extension = os.path.splitext(os.path.basename(src))
+    if extension.lower() != ".ts" or stem.lower().endswith("-tsd"):
+        return ""
+    settings = settings if isinstance(settings, dict) else load_settings()
+    source_real = os.path.normcase(os.path.realpath(src))
+    inside_dvr = False
+    for root in _beta_mapped_roots(settings):
+        if str(root.get("kind") or "") != "dvr":
+            continue
+        root_path = str(root.get("path") or "").strip()
+        if not root_path:
+            continue
+        try:
+            root_real = os.path.normcase(os.path.realpath(root_path))
+            if os.path.commonpath([source_real, root_real]) == root_real:
+                inside_dvr = True
+                break
+        except (OSError, ValueError):
+            continue
+    if not inside_dvr:
+        return ""
+    try:
+        stat = os.stat(src)
+    except OSError:
+        return "Plex DVR recording is no longer available. Refresh the library and try again."
+    if int(stat.st_size) <= 0:
+        return "Plex DVR recording is still empty. Wait for Plex to finish recording it."
+    configured_minutes = max(1, int(settings.get("beta_auto_scan_file_stability_minutes") or 10))
+    # DVR safety remains active even if general Auto Scan stability is turned
+    # off. Two minutes is the hard floor; the configured window is used when
+    # stability protection is enabled.
+    wait_seconds = 120
+    if settings.get("beta_auto_scan_file_stability_enabled", True):
+        wait_seconds = max(wait_seconds, configured_minutes * 60)
+    age_seconds = max(0.0, float(now if now is not None else time.time()) - float(stat.st_mtime))
+    if age_seconds < wait_seconds:
+        remaining = max(1, int((wait_seconds - age_seconds + 59) // 60))
+        return (
+            "Plex is still writing this DVR recording. "
+            f"Wait about {remaining} more minute{'s' if remaining != 1 else ''} after it stops changing."
+        )
+    return ""
+
+
 def _create_smart_job(
     src: str,
     *,
@@ -3508,6 +3555,9 @@ def _create_smart_job(
     recommendation: dict | None = None,
     operations: dict | None = None,
 ) -> tuple[str, dict]:
+    safety_reason = _dvr_queue_safety_reason(src)
+    if safety_reason:
+        raise ValueError(safety_reason)
     if isinstance(recommendation, dict):
         recommendation = deepcopy(recommendation)
     else:
@@ -3583,6 +3633,9 @@ def _create_smart_job(
 def _queue_wizard_job(data: dict) -> dict:
     """Queue one fixed Wizard plan and record it as an approved preference."""
     data = dict(data or {})
+    safety_reason = _dvr_queue_safety_reason(str(data.get("src") or ""))
+    if safety_reason:
+        raise ValueError(safety_reason)
     plan = _wizard_plan(data, probe_func=_probe_media, for_queue=True, preview=False)
     learning_context = smart_feedback_context(
         plan,
@@ -3765,7 +3818,7 @@ BETA_AUTOSCAN_HEALTH = {
     "cycle_errors": 0,
     "last_error": "",
 }
-BETA_LIBRARY_PARSER_VERSION = 9
+BETA_LIBRARY_PARSER_VERSION = 10
 
 
 def _beta_scan_full_verify_seconds() -> int:
@@ -3802,7 +3855,7 @@ BETA_MEDIA_TAG_RE = re.compile(
 )
 
 
-APP_RELEASE = "3.25.1"
+APP_RELEASE = "3.25.2"
 BETA_DIMENSION_TAG_RE = re.compile(r"(?<!\d)(?:\d{3,4}x\d{3,4}|(?:8|10|12)bit)(?!\d)", re.IGNORECASE)
 HDR_PATH_RE = re.compile(
     r"(?:^|[ ._\-\[\(])(?:"
@@ -5756,8 +5809,57 @@ def _beta_add_show_episode(groups: dict, item: dict, *, group_type: str = "show"
     group["files"].append(item.copy())
 
 
+def _beta_collapse_episode_versions(group: dict) -> None:
+    """Expose one canonical file per numbered episode while retaining versions."""
+    buckets: dict[tuple, list[dict]] = {}
+    for raw in group.get("files") or []:
+        if not isinstance(raw, dict):
+            continue
+        embedded = raw.get("versions") if isinstance(raw.get("versions"), list) else []
+        candidates = embedded or [raw]
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            version = candidate.copy()
+            version.pop("versions", None)
+            season = version.get("season")
+            episode = version.get("episode")
+            key = (
+                "episode",
+                int(season),
+                int(episode),
+            ) if season is not None and episode is not None else (
+                "path",
+                str(version.get("path") or version.get("filename") or ""),
+            )
+            buckets.setdefault(key, []).append(version)
+
+    collapsed = []
+    for versions in buckets.values():
+        versions.sort(
+            key=lambda row: (
+                1 if row.get("queue_ready") is not False else 0,
+                int(row.get("size_bytes") or 0),
+                1 if row.get("transcoded") else 0,
+                float(row.get("modified_at") or 0),
+                str(row.get("filename") or "").lower(),
+            ),
+            reverse=True,
+        )
+        canonical = versions[0].copy()
+        canonical["versions"] = [row.copy() for row in versions]
+        canonical["version_count"] = len(versions)
+        canonical["versions_size_bytes"] = sum(int(row.get("size_bytes") or 0) for row in versions)
+        collapsed.append(canonical)
+
+    group["files"] = collapsed
+    group["episode_count"] = len(collapsed)
+    group["total_size_bytes"] = sum(int(row.get("size_bytes") or 0) for row in collapsed)
+
+
 def _beta_finalize_show_groups(groups: dict) -> list[dict]:
     for group in groups.values():
+        _beta_collapse_episode_versions(group)
         seasons = sorted({ep["season"] for ep in group["files"] if ep.get("season") is not None})
         group["season_count"] = len(seasons)
         group["seasons"] = seasons
@@ -5865,8 +5967,6 @@ def _beta_merge_show_group(groups: dict, incoming: dict) -> None:
         },
     )
 
-    group["episode_count"] += int(incoming.get("episode_count") or 0)
-    group["total_size_bytes"] += int(incoming.get("total_size_bytes") or 0)
     group["files"].extend(incoming.get("files") or [])
     if not group.get("year") and incoming.get("year"):
         group["year"] = incoming.get("year")
@@ -5883,6 +5983,7 @@ def _beta_merge_show_group(groups: dict, incoming: dict) -> None:
                 if poster_url and not group_art.get(str(season)):
                     group_art[str(season)] = poster_url
 
+    _beta_collapse_episode_versions(group)
     seasons = sorted({ep["season"] for ep in group["files"] if ep.get("season") is not None})
     group["season_count"] = len(seasons)
     group["seasons"] = seasons
@@ -6230,8 +6331,15 @@ def _beta_library_from_scan_index(index: dict, *, settings: dict, recursive: boo
         item = row.get("item") if isinstance(row.get("item"), dict) else None
         if not item:
             continue
+        item = item.copy()
         scanned += 1
         root_kind = str(row.get("root_kind") or item.get("root_kind") or "")
+        if root_kind == "dvr":
+            complete = bool(item.get("transcoded") or _beta_file_is_stable(row, settings))
+            item["queue_ready"] = complete
+            item["queue_blocked_reason"] = "" if complete else (
+                "Plex is still writing this recording. ByteSqueeze will make it queueable after it stops changing."
+            )
         if root_kind == "dvr" and item.get("type") == "show":
             _beta_add_show_episode(dvr_shows, item, group_type="dvr_show")
         elif root_kind == "dvr":
@@ -7428,9 +7536,9 @@ def _cancel_worker_transfer_grant(node: dict, worker_job_id: str) -> None:
         return
 
 
-def _combined_jobs_for_api() -> list[dict]:
+def _combined_jobs_for_api(history_limit: int = 5000) -> list[dict]:
     """Return local/controller history plus live and failed worker jobs."""
-    items = list_job_history_for_api()
+    items = list_job_history_for_api(limit=history_limit)
     by_id = {str(item.get("id") or ""): item for item in items}
     for worker_item in _linked_worker_jobs_for_api():
         status = str(worker_item.get("status") or "").lower()
@@ -7919,6 +8027,8 @@ def _queue_local_paths(
             reason = "not a video"
         elif os.path.splitext(os.path.basename(src))[0].lower().endswith("-tsd") and not audio_only:
             reason = "already tagged -TSD"
+        elif _dvr_queue_safety_reason(src):
+            reason = _dvr_queue_safety_reason(src)
         if reason:
             skipped.append({"path": src, "reason": reason})
             continue
@@ -8082,6 +8192,9 @@ def _node_queue_plan(
     *,
     smart_recommendation: dict | None = None,
 ) -> dict:
+    safety_reason = _dvr_queue_safety_reason(src)
+    if safety_reason:
+        raise ValueError(safety_reason)
     requested = str(requested_preset or "auto").strip().lower()
     if requested == "smart":
         recommendation = (
@@ -9207,6 +9320,8 @@ def _transfer_output_path_for_src(src: str, output_container: str | None = None)
     suffix = (os.environ.get("SUFFIX") or "TSD").strip() or "TSD"
     folder = os.path.dirname(src)
     name = os.path.splitext(os.path.basename(src))[0]
+    if os.path.splitext(str(src or ""))[1].lower() == ".ts":
+        name = re.sub(r"\s*\(copy\s+\d+\)$", "", name, flags=re.IGNORECASE).rstrip()
     requested = str(output_container or "").strip().lower()
     extension = ".ts" if requested == "ts" else ".mp4" if normalize_output_container(requested) == "mp4" else ".mkv"
     return os.path.join(folder, f"{name}-{suffix}{extension}")
@@ -10239,6 +10354,8 @@ def register_routes(app):
                 reason = "not a video"
             elif os.path.splitext(os.path.basename(src))[0].lower().endswith("-tsd"):
                 reason = "already tagged -TSD"
+            elif _dvr_queue_safety_reason(src):
+                reason = _dvr_queue_safety_reason(src)
 
             if reason:
                 skipped.append({"path": src, "reason": reason})
@@ -10604,7 +10721,11 @@ def register_routes(app):
     def mobile_jobs_api():
         if not _authenticated_mobile("read"):
             return jsonify(error="unauthorized mobile device"), 401
-        return jsonify(ok=True, jobs=_combined_jobs_for_api(), summary=_combined_job_summary(), paused=get_queue_state())
+        try:
+            history_limit = max(50, min(500, int(request.args.get("limit") or 300)))
+        except (TypeError, ValueError):
+            history_limit = 300
+        return jsonify(ok=True, jobs=_combined_jobs_for_api(history_limit), summary=_combined_job_summary(), paused=get_queue_state())
 
     @app.route("/api/mobile/v1/jobs/<job_id>/action", methods=["POST"])
     def mobile_job_action_api(job_id):
@@ -10830,6 +10951,8 @@ def register_routes(app):
                 reason = "not a video"
             elif os.path.splitext(os.path.basename(src))[0].lower().endswith("-tsd"):
                 reason = "already tagged -TSD"
+            elif _dvr_queue_safety_reason(src):
+                reason = _dvr_queue_safety_reason(src)
             if reason:
                 skipped.append({"path": src, "reason": reason})
             else:
@@ -12465,6 +12588,9 @@ def register_routes(app):
             raise ValueError("the media file no longer exists")
         if not is_allowed_path(path):
             raise ValueError("path not allowed")
+        safety_reason = _dvr_queue_safety_reason(path)
+        if safety_reason:
+            raise ValueError(safety_reason)
         inventory = scan_media(path, exact=False)
         requested = data.get("operations") if isinstance(data.get("operations"), dict) else {}
         requested = dict(requested)
@@ -12645,6 +12771,9 @@ def register_routes(app):
 
         if not is_allowed_path(src):
             return jsonify(error="path not allowed"), 400
+        safety_reason = _dvr_queue_safety_reason(src)
+        if safety_reason:
+            return jsonify(error=safety_reason), 400
 
         if preset not in ("1080", "4k", "auto", "smart"):
             return jsonify(error="invalid preset"), 400

@@ -528,7 +528,10 @@ class AppController extends ChangeNotifier {
 
   Future<void> refreshJobsAndDashboard() async {
     if (demoMode) return;
-    final values = await Future.wait([api.get('/jobs'), api.get('/dashboard')]);
+    final values = await Future.wait([
+      api.get('/jobs?limit=300', timeout: const Duration(seconds: 45)),
+      api.get('/dashboard', timeout: const Duration(seconds: 45)),
+    ]);
     jobs = values[0];
     dashboard = values[1];
     notifyListeners();
@@ -578,7 +581,7 @@ class AppController extends ChangeNotifier {
     });
     final values = await Future.wait([
       api.get('/nodes'),
-      api.get('/jobs'),
+      api.get('/jobs?limit=300', timeout: const Duration(seconds: 45)),
       api.get('/dashboard'),
     ]);
     nodes = values[0];
@@ -818,7 +821,7 @@ class AppController extends ChangeNotifier {
       timeout: const Duration(minutes: 2),
     );
     final refreshed = await Future.wait([
-      api.get('/jobs'),
+      api.get('/jobs?limit=300', timeout: const Duration(seconds: 45)),
       api.get('/dashboard'),
       api.get('/smart_presets'),
     ]);

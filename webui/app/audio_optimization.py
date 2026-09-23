@@ -855,14 +855,31 @@ def validate_audio_only(before: dict, after: dict, operations: dict) -> tuple[bo
 
 
 def storage_breakdown(before: dict, after: dict, input_total: int, output_total: int) -> dict:
-    before_agg = before.get("aggregate") if isinstance(before.get("aggregate"), dict) else {}
-    after_agg = after.get("aggregate") if isinstance(after.get("aggregate"), dict) else {}
-    input_video = _int(before_agg.get("video_bytes"))
-    output_video = _int(after_agg.get("video_bytes"))
-    input_audio = _int(before_agg.get("audio_bytes"))
-    output_audio = _int(after_agg.get("audio_bytes"))
-    input_other = max(0, _int(input_total) - input_video - input_audio)
-    output_other = max(0, _int(output_total) - output_video - output_audio)
+    def reconciled_components(inventory: dict, total: int) -> tuple[int, int, int, bool]:
+        """Fit stream estimates inside the real container size.
+
+        MPEG-TS metadata frequently reports a nominal stream bitrate over the
+        programme duration even when Plex is still writing a short fragment.
+        Those estimates can be larger than the file itself. Scale only that
+        impossible case so every displayed component reconciles exactly with
+        the measured input/output totals.
+        """
+        aggregate = inventory.get("aggregate") if isinstance(inventory.get("aggregate"), dict) else {}
+        measured_total = max(0, _int(total))
+        video = max(0, _int(aggregate.get("video_bytes")))
+        audio = max(0, _int(aggregate.get("audio_bytes")))
+        primary = video + audio
+        if primary <= measured_total:
+            return video, audio, measured_total - primary, False
+        if primary <= 0 or measured_total <= 0:
+            return 0, 0, measured_total, primary > measured_total
+        scaled_video = int(round(measured_total * (video / primary)))
+        scaled_video = max(0, min(measured_total, scaled_video))
+        scaled_audio = measured_total - scaled_video
+        return scaled_video, scaled_audio, 0, True
+
+    input_video, input_audio, input_other, input_reconciled = reconciled_components(before, input_total)
+    output_video, output_audio, output_other, output_reconciled = reconciled_components(after, output_total)
     total_saved = _int(input_total) - _int(output_total)
     video_saved = input_video - output_video
     audio_saved = input_audio - output_audio
@@ -883,4 +900,5 @@ def storage_breakdown(before: dict, after: dict, input_total: int, output_total:
         "video_saved_percent": round((video_saved / input_video) * 100.0, 1) if input_video else 0.0,
         "audio_saved_percent": round((audio_saved / input_audio) * 100.0, 1) if input_audio else 0.0,
         "measured": True,
+        "components_reconciled": bool(input_reconciled or output_reconciled),
     }

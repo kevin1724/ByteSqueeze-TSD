@@ -634,7 +634,8 @@ class _MediaDetailsState extends State<_MediaDetails> {
     if (widget.isShow) {
       return asList(widget.item['files'])
           .map(asMap)
-          .where((row) => row['transcoded'] != true)
+          .where((row) =>
+              row['transcoded'] != true && row['queue_ready'] != false)
           .map((row) => '${row['path'] ?? ''}')
           .where((path) => path.isNotEmpty)
           .toList();
@@ -649,10 +650,16 @@ class _MediaDetailsState extends State<_MediaDetails> {
   }) async {
     final queuePaths = paths ?? _videoPaths;
     if (queuePaths.isEmpty) {
+      final waitingForRecording = widget.isShow &&
+          asList(widget.item['files']).map(asMap).any((row) =>
+              row['transcoded'] != true && row['queue_ready'] == false);
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
+        SnackBar(
           content: Text(
-              'This video is already transcoded. Use Optimize audio only.'),
+            waitingForRecording
+                ? 'Plex is still writing this recording. It will become queueable after it stops changing.'
+                : 'This video is already transcoded. Use Optimize audio only.',
+          ),
         ),
       );
       return;
@@ -850,7 +857,10 @@ class _MediaDetailsState extends State<_MediaDetails> {
     final seasons = widget.isShow
         ? _seasonGroups(files)
         : <int, List<Map<String, dynamic>>>{};
-    final allTranscoded = _paths.isNotEmpty && _videoPaths.isEmpty;
+    final allTranscoded = widget.isShow
+        ? _paths.isNotEmpty &&
+            files.map(asMap).every((row) => row['transcoded'] == true)
+        : widget.item['transcoded'] == true;
     final posterSource =
         '${widget.item['poster_source'] ?? widget.item['metadata_source'] ?? widget.item['source'] ?? ''}'
             .toLowerCase();
@@ -1235,7 +1245,8 @@ class _MediaDetailsState extends State<_MediaDetails> {
               final season = entry.key;
               final rows = entry.value;
               final paths = _filePaths(
-                rows.where((row) => row['transcoded'] != true),
+                rows.where((row) =>
+                    row['transcoded'] != true && row['queue_ready'] != false),
               );
               final totalBytes = rows.fold<int>(
                 0,
@@ -1316,7 +1327,11 @@ class _MediaDetailsState extends State<_MediaDetails> {
                           overflow: TextOverflow.ellipsis,
                         ),
                         subtitle: Text(
-                          formatBytes(file['size_bytes']),
+                          file['queue_ready'] == false
+                              ? 'Recording in progress · ${formatBytes(file['size_bytes'])}'
+                              : ((file['version_count'] as num?)?.toInt() ?? 1) > 1
+                                  ? '${file['version_count']} versions · ${formatBytes(file['size_bytes'])}'
+                                  : formatBytes(file['size_bytes']),
                           style: const TextStyle(
                             color: ByteSqueezeColors.muted,
                           ),
@@ -1325,13 +1340,19 @@ class _MediaDetailsState extends State<_MediaDetails> {
                           children: [
                             IconButton(
                               tooltip: 'Optimize episode audio only',
-                              onPressed: () => _openAudioOptimization(file),
+                              onPressed: file['queue_ready'] == false
+                                  ? null
+                                  : () => _openAudioOptimization(file),
                               icon: const Icon(Icons.graphic_eq_rounded),
                             ),
                             if (file['transcoded'] != true)
                               IconButton(
-                                tooltip: 'Open this episode in Size Wizard',
-                                onPressed: () => _openSizeWizard(file),
+                                tooltip: file['queue_ready'] == false
+                                    ? 'Wait for Plex to finish this recording'
+                                    : 'Open this episode in Size Wizard',
+                                onPressed: file['queue_ready'] == false
+                                    ? null
+                                    : () => _openSizeWizard(file),
                                 icon: const Icon(Icons.straighten_rounded),
                               ),
                           ],

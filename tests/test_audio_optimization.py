@@ -359,6 +359,36 @@ class AudioOptimizationTests(unittest.TestCase):
         self.assertGreater(split["audio_saved_bytes"], 0)
         self.assertEqual(split["total_saved_bytes"], 3 * 1024**3)
 
+    def test_storage_breakdown_reconciles_impossible_transport_stream_estimates(self):
+        source = {
+            "aggregate": {
+                "video_bytes": 1231536648,
+                "audio_bytes": 6128957,
+            },
+        }
+        output = {
+            "aggregate": {
+                "video_bytes": 79,
+                "audio_bytes": 378638,
+            },
+        }
+        split = storage_breakdown(source, output, 20505724, 4841376)
+
+        self.assertTrue(split["components_reconciled"])
+        self.assertEqual(
+            split["input_video_bytes"]
+            + split["input_audio_bytes"]
+            + split["input_other_bytes"],
+            split["input_total_bytes"],
+        )
+        self.assertEqual(
+            split["video_saved_bytes"]
+            + split["audio_saved_bytes"]
+            + split["other_saved_bytes"],
+            split["total_saved_bytes"],
+        )
+        self.assertEqual(split["total_saved_bytes"], 15664348)
+
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg tools are unavailable")
     def test_real_ffmpeg_audio_only_encode_stream_copies_video(self):
         with tempfile.TemporaryDirectory(prefix="bytesqueeze-audio-") as folder:

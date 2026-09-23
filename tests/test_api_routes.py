@@ -84,7 +84,7 @@ class ApiRouteSmokeTests(unittest.TestCase):
 
         status = self.client.get("/api/autopilot/status")
         self.assertEqual(status.status_code, 200)
-        self.assertEqual(status.get_json()["release"], "3.25.1")
+        self.assertEqual(status.get_json()["release"], "3.25.2")
         self.assertIn("continuous_learning", status.get_json())
         self.assertIn("onboarding", status.get_json())
 
@@ -1587,6 +1587,21 @@ class ApiRouteSmokeTests(unittest.TestCase):
             ),
             os.path.join(TEST_MEDIA, "Plex.DVR-TSD.ts"),
         )
+        self.assertEqual(
+            app_routes._transfer_output_path_for_src(
+                os.path.join(TEST_MEDIA, "Show - S01E07 (copy 4).ts"),
+                "ts",
+            ),
+            os.path.join(TEST_MEDIA, "Show - S01E07-TSD.ts"),
+        )
+        self.assertEqual(
+            app_jobs._output_path_for_source(
+                os.path.join(TEST_MEDIA, "Show - S01E07 (copy 9).ts"),
+                "TSD",
+                plan={"extension": ".ts"},
+            ),
+            os.path.join(TEST_MEDIA, "Show - S01E07-TSD.ts"),
+        )
         self.assertEqual(app_routes._resolved_transfer_output_container("auto", "mp4"), "mp4")
         self.assertEqual(app_routes._resolved_transfer_output_container("auto", "mkv"), "mkv")
         self.assertEqual(app_routes._resolved_transfer_output_container("auto", "invalid"), "mkv")
@@ -2892,6 +2907,48 @@ class ApiRouteSmokeTests(unittest.TestCase):
         self.assertEqual(archived["saved_bytes"], 3000)
         self.assertEqual(archived["history_source"], "encode_ledger")
 
+    def test_job_history_limit_caps_live_terminal_rows_and_repairs_legacy_savings(self):
+        original_jobs = dict(app_jobs.jobs)
+        original_queue = list(app_jobs.job_queue)
+        try:
+            app_jobs.jobs.clear()
+            app_jobs.job_queue.clear()
+            app_jobs.jobs["active"] = {
+                "src": os.path.join(TEST_MEDIA, "Active.mkv"),
+                "status": "queued",
+                "created_at": 500,
+            }
+            for index in range(4):
+                app_jobs.jobs[f"done-{index}"] = {
+                    "src": os.path.join(TEST_MEDIA, f"Done-{index}.ts"),
+                    "status": "done",
+                    "created_at": 100 + index,
+                    "finished_at": 100 + index,
+                }
+            with patch.object(app_jobs, "list_encodes", return_value=[]):
+                visible = app_jobs.list_job_history_for_api(limit=2)
+        finally:
+            app_jobs.jobs.clear()
+            app_jobs.jobs.update(original_jobs)
+            app_jobs.job_queue.clear()
+            app_jobs.job_queue.extend(original_queue)
+
+        self.assertEqual(visible[0]["id"], "active")
+        self.assertEqual([row["id"] for row in visible[1:]], ["done-3", "done-2"])
+
+        fixed = app_jobs._reconciled_job_storage_breakdown(
+            {"total_saved_bytes": 14900000, "video_saved_bytes": 1100000000},
+            {"aggregate": {"video_bytes": 1231536648, "audio_bytes": 6128957}},
+            {"aggregate": {"video_bytes": 79, "audio_bytes": 378638}},
+            20505724,
+            4841376,
+        )
+        self.assertEqual(fixed["total_saved_bytes"], 15664348)
+        self.assertEqual(
+            fixed["video_saved_bytes"] + fixed["audio_saved_bytes"] + fixed["other_saved_bytes"],
+            fixed["total_saved_bytes"],
+        )
+
     def test_clear_finished_hides_queue_rows_but_keeps_lifetime_totals(self):
         original_jobs = dict(app_jobs.jobs)
         original_queue = list(app_jobs.job_queue)
@@ -3906,6 +3963,69 @@ class ApiRouteSmokeTests(unittest.TestCase):
         finally:
             shutil.rmtree(dvr_root, ignore_errors=True)
 
+    def test_dvr_show_collapses_plex_copy_variants_to_one_episode(self):
+        groups = {}
+        base = {
+            "type": "show",
+            "root_kind": "dvr",
+            "title": "The Goldbergs",
+            "year": 2013,
+            "season": 1,
+            "episode": 7,
+            "transcoded": False,
+            "queue_ready": True,
+        }
+        app_routes._beta_add_show_episode(
+            groups,
+            {**base, "path": "/dvr/episode (copy 1).ts", "filename": "episode (copy 1).ts", "size_bytes": 20},
+            group_type="dvr_show",
+        )
+        app_routes._beta_add_show_episode(
+            groups,
+            {**base, "path": "/dvr/episode (copy 5).ts", "filename": "episode (copy 5).ts", "size_bytes": 50},
+            group_type="dvr_show",
+        )
+
+        show = app_routes._beta_finalize_show_groups(groups)[0]
+        self.assertEqual(show["episode_count"], 1)
+        self.assertEqual(len(show["files"]), 1)
+        self.assertEqual(show["files"][0]["path"], "/dvr/episode (copy 5).ts")
+        self.assertEqual(show["files"][0]["version_count"], 2)
+        self.assertEqual(len(show["files"][0]["versions"]), 2)
+
+    def test_recent_dvr_recording_is_not_queueable(self):
+        dvr_root = os.path.join(TEST_MEDIA, "active-dvr")
+        os.makedirs(dvr_root, exist_ok=True)
+        source = os.path.join(dvr_root, "Show - S01E01.ts")
+        finished = os.path.join(dvr_root, "Show - S01E01-TSD.ts")
+        with open(source, "wb") as handle:
+            handle.write(b"still-recording")
+        with open(finished, "wb") as handle:
+            handle.write(b"finished")
+        settings = {
+            "beta_media_folders": {"dvr": [{"path": dvr_root, "label": "DVR"}]},
+            "beta_auto_scan_file_stability_enabled": True,
+            "beta_auto_scan_file_stability_minutes": 10,
+        }
+        try:
+            reason = app_routes._dvr_queue_safety_reason(
+                source,
+                settings,
+                now=os.path.getmtime(source) + 30,
+            )
+            self.assertIn("still writing", reason)
+            self.assertEqual(app_routes._dvr_queue_safety_reason(finished, settings), "")
+            self.assertEqual(
+                app_routes._dvr_queue_safety_reason(
+                    source,
+                    settings,
+                    now=os.path.getmtime(source) + 601,
+                ),
+                "",
+            )
+        finally:
+            shutil.rmtree(dvr_root, ignore_errors=True)
+
     def test_dvr_folder_mapping_is_normalized_and_exposed_as_a_root(self):
         dvr_root = os.path.join(TEST_MEDIA, "recordings")
         settings = {
@@ -4623,7 +4743,7 @@ class ApiRouteSmokeTests(unittest.TestCase):
 
         self.assertEqual(dashboard.status_code, 200, dashboard.get_data(as_text=True))
         dashboard_payload = dashboard.get_json()
-        self.assertEqual(dashboard_payload["release"], "3.25.1")
+        self.assertEqual(dashboard_payload["release"], "3.25.2")
         self.assertEqual(dashboard_payload["library"]["movies"], 1)
         self.assertIn("automation", dashboard_payload)
         self.assertIn("storage", dashboard_payload)

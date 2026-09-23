@@ -1,3 +1,3 @@
-const appVersion = '0.17.0';
-const appBuildNumber = 29;
+const appVersion = '0.17.1';
+const appBuildNumber = 30;
 const appReleaseLabel = 'V3';

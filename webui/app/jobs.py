@@ -1141,6 +1141,11 @@ def _output_path_for_source(
     plan = plan if isinstance(plan, dict) else _output_container_plan(policy)
     folder = os.path.dirname(src)
     name = os.path.splitext(os.path.basename(src))[0]
+    if os.path.splitext(str(src or ""))[1].lower() == ".ts":
+        # Plex adds "(copy N)" while resolving duplicate/in-progress DVR
+        # recordings. All versions of one episode must converge on one final
+        # ByteSqueeze identity instead of creating copy-1-TSD, copy-2-TSD, ...
+        name = re.sub(r"\s*\(copy\s+\d+\)$", "", name, flags=re.IGNORECASE).rstrip()
     return os.path.join(folder, f"{name}-{suffix}{plan['extension']}")
 
 
@@ -3962,8 +3967,7 @@ def _job_operation_labels(job: dict) -> dict:
     audio_actions = operations.get("audio_actions") if isinstance(operations.get("audio_actions"), list) else []
     audio_encoded = any(str(row.get("action") or "copy").lower() == "encode" for row in audio_actions if isinstance(row, dict))
     audio_removed = any(str(row.get("action") or "copy").lower() == "remove" for row in audio_actions if isinstance(row, dict))
-    audio_policy = str(operations.get("audio_policy") or "preserve").strip().lower()
-    audio_processed = bool(job_type == "audio_only" or audio_encoded or audio_removed or audio_policy != "preserve")
+    audio_processed = bool(job_type == "audio_only" or audio_encoded or audio_removed)
     if audio_encoded:
         audio_label = "Audio encoded"
     elif audio_removed:
@@ -3978,6 +3982,26 @@ def _job_operation_labels(job: dict) -> dict:
         "audio_processing_label": audio_label,
         "audio_processed": audio_processed,
     }
+
+
+def _reconciled_job_storage_breakdown(
+    stored: object,
+    input_inventory: object,
+    output_inventory: object,
+    src_bytes: object,
+    out_bytes: object,
+) -> dict | None:
+    """Repair legacy stream estimates before presenting saved-space totals."""
+    if isinstance(input_inventory, dict) and isinstance(output_inventory, dict):
+        try:
+            input_total = max(0, int(src_bytes or 0))
+            output_total = max(0, int(out_bytes or 0))
+        except (TypeError, ValueError):
+            input_total = 0
+            output_total = 0
+        if input_total or output_total:
+            return storage_breakdown(input_inventory, output_inventory, input_total, output_total)
+    return stored if isinstance(stored, dict) else None
 
 
 def list_jobs_for_api(*, include_log_tail: bool = False) -> list[dict]:
@@ -4006,6 +4030,13 @@ def list_jobs_for_api(*, include_log_tail: bool = False) -> list[dict]:
             except (TypeError, ValueError):
                 eta_val = None
         method = _job_encode_metadata(j)
+        reconciled_breakdown = _reconciled_job_storage_breakdown(
+            j.get("storage_breakdown"),
+            j.get("audio_inventory"),
+            j.get("output_inventory"),
+            j.get("src_bytes"),
+            j.get("out_bytes"),
+        )
 
         job_items.append(
             {
@@ -4030,7 +4061,7 @@ def list_jobs_for_api(*, include_log_tail: bool = False) -> list[dict]:
                 "parent_job_id": j.get("parent_job_id") or "",
                 "audio_inventory": j.get("audio_inventory") if isinstance(j.get("audio_inventory"), dict) else None,
                 "output_inventory": j.get("output_inventory") if isinstance(j.get("output_inventory"), dict) else None,
-                "storage_breakdown": j.get("storage_breakdown") if isinstance(j.get("storage_breakdown"), dict) else None,
+                "storage_breakdown": reconciled_breakdown,
                 **_job_operation_labels(j),
                 "uses_hardware_encoder": _job_uses_hardware_encoder(j),
                 **_job_learning_metadata(j),
@@ -4152,6 +4183,13 @@ def _encode_history_job(row: dict, index: int) -> dict:
     if not job_id:
         job_id = f"history-{int(finished_at * 1000)}-{index}"
     started_at = max(0.0, finished_at - duration_seconds) if finished_at else 0.0
+    reconciled_breakdown = _reconciled_job_storage_breakdown(
+        row.get("storage_breakdown"),
+        row.get("input_inventory"),
+        row.get("output_inventory"),
+        src_bytes,
+        out_bytes,
+    )
 
     return {
         "id": job_id,
@@ -4168,7 +4206,7 @@ def _encode_history_job(row: dict, index: int) -> dict:
         "parent_job_id": row.get("parent_job_id") or "",
         "audio_inventory": row.get("input_inventory") if isinstance(row.get("input_inventory"), dict) else None,
         "output_inventory": row.get("output_inventory") if isinstance(row.get("output_inventory"), dict) else None,
-        "storage_breakdown": row.get("storage_breakdown") if isinstance(row.get("storage_breakdown"), dict) else None,
+        "storage_breakdown": reconciled_breakdown,
         **_job_operation_labels(row),
         "mode": "linked_node" if row.get("node_id") else "local",
         "node_id": row.get("node_id") or "",
@@ -4254,7 +4292,7 @@ def list_job_history_for_api(limit: int = 5000) -> list[dict]:
         return (-timestamp, str(item.get("id") or ""))
 
     terminal_items.sort(key=_finished_key)
-    return active_items + terminal_items
+    return active_items + terminal_items[:history_limit]
 
 
 # -------------------------------------------------------------------

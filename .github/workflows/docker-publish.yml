@@ -42,7 +42,7 @@ env:
   WORKER_IMAGES: |
     kevina1724/bytesqueeze-tsd-worker
     kevina1724/handbrake-tsd-worker
-  CONTROLLER_VERSION: 3.25.1
+  CONTROLLER_VERSION: 3.25.2
   WORKER_VERSION: 2.13.7
 
 jobs:
