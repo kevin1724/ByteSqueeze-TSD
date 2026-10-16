@@ -102,6 +102,8 @@ job_queue: list[str] = []
 queue_paused: bool = False
 dispatcher_started: bool = False
 transfer_retry_started: bool = False
+DISPATCHER_THREAD: threading.Thread | None = None
+TRANSFER_RETRY_THREAD: threading.Thread | None = None
 dashboard_totals: dict[str, float | int] = {}
 # Completed rows at or before this timestamp remain part of lifetime storage
 # totals, but are hidden from the operational queue/history table after the
@@ -5585,76 +5587,102 @@ def _run_dispatched_job(job_id: str) -> None:
         DISPATCH_WAKE_EVENT.set()
 
 
+def _prune_stale_queue_entries() -> bool:
+    """Remove missing and terminal records that can corrupt queue positions."""
+    changed = False
+    for job_id in list(job_queue):
+        job = jobs.get(job_id)
+        status = str((job or {}).get("status") or "").lower()
+        if job and status in {"queued", "dispatching", "running", "waiting_to_upload"}:
+            continue
+        if job_id in RUNNING_JOB_THREADS:
+            continue
+        try:
+            job_queue.remove(job_id)
+            changed = True
+        except ValueError:
+            pass
+    return changed
+
+
+def _dispatcher_pass() -> tuple[bool, bool]:
+    """Run one guarded scheduling pass and return (launched, queue_changed)."""
+    launched = False
+    queue_changed = False
+    if queue_paused:
+        return launched, queue_changed
+
+    with DISPATCH_LOCK:
+        for job_id, thread in list(RUNNING_JOB_THREADS.items()):
+            if not thread.is_alive():
+                RUNNING_JOB_THREADS.pop(job_id, None)
+        queue_changed = _prune_stale_queue_entries()
+
+        next_id = None
+        for job_id in list(job_queue):
+            job = jobs.get(job_id)
+            if not job or job.get("status") != "queued":
+                continue
+            if job.get("mode") == "auto_node":
+                # Automatic jobs must remain at the head of the queue until
+                # the node coordinator assigns real capacity.
+                break
+            next_id = job_id
+            break
+
+        if next_id:
+            next_job = jobs.get(next_id)
+            running_jobs = [
+                jobs[job_id]
+                for job_id in RUNNING_JOB_THREADS
+                if job_id in jobs and jobs[job_id].get("status") == "running"
+            ]
+            route_available = True
+            if next_job:
+                previous_route_error = str(next_job.get("gpu_route_error") or "")
+                route_available, _assignment = _assign_windows_gpu_route(next_job, running_jobs)
+                if str(next_job.get("gpu_route_error") or "") != previous_route_error:
+                    queue_changed = True
+            if next_job and route_available and _can_dispatch_job(
+                next_job,
+                running_jobs,
+                _hardware_transcode_limit(job=next_job),
+            ):
+                # Claim before starting the thread so this loop cannot
+                # overfill the GPU while the thread is still booting.
+                next_job["status"] = "running"
+                thread = threading.Thread(
+                    target=_run_dispatched_job,
+                    args=(next_id,),
+                    daemon=True,
+                    name=f"encode-{next_id[:8]}",
+                )
+                RUNNING_JOB_THREADS[next_id] = thread
+                thread.start()
+                launched = True
+    return launched, queue_changed
+
+
 def dispatcher_loop():
-    """Dispatch FIFO jobs with CPU exclusivity and bounded GPU concurrency."""
-    global job_queue, queue_paused
+    """Dispatch queued work without allowing one scheduler error to kill it."""
     print("[DISPATCHER] started", flush=True)
 
     while True:
-        launched = False
-        queue_changed = False
-
-        if not queue_paused:
-            with DISPATCH_LOCK:
-                for job_id, thread in list(RUNNING_JOB_THREADS.items()):
-                    if not thread.is_alive():
-                        RUNNING_JOB_THREADS.pop(job_id, None)
-
-                next_id = None
-                for job_id in list(job_queue):
-                    job = jobs.get(job_id)
-                    if not job:
-                        try:
-                            job_queue.remove(job_id)
-                        except ValueError:
-                            pass
-                        queue_changed = True
-                        continue
-                    if job.get("status") == "queued":
-                        # Automatic jobs must remain at the head of the queue
-                        # until the node coordinator assigns real capacity.
-                        if job.get("mode") == "auto_node":
-                            break
-                        next_id = job_id
-                        break
-
-                if next_id:
-                    next_job = jobs.get(next_id)
-                    running_jobs = [
-                        jobs[job_id]
-                        for job_id in RUNNING_JOB_THREADS
-                        if job_id in jobs and jobs[job_id].get("status") == "running"
-                    ]
-                    route_available = True
-                    if next_job:
-                        previous_route_error = str(next_job.get("gpu_route_error") or "")
-                        route_available, _assignment = _assign_windows_gpu_route(next_job, running_jobs)
-                        if str(next_job.get("gpu_route_error") or "") != previous_route_error:
-                            queue_changed = True
-                    if next_job and route_available and _can_dispatch_job(
-                        next_job,
-                        running_jobs,
-                        _hardware_transcode_limit(job=next_job),
-                    ):
-                        # Claim before starting the thread so this loop cannot
-                        # overfill the GPU while the thread is still booting.
-                        next_job["status"] = "running"
-                        thread = threading.Thread(
-                            target=_run_dispatched_job,
-                            args=(next_id,),
-                            daemon=True,
-                            name=f"encode-{next_id[:8]}",
-                        )
-                        RUNNING_JOB_THREADS[next_id] = thread
-                        thread.start()
-                        launched = True
-
-        if launched or queue_changed:
-            save_jobs()
-        if launched:
-            # Re-evaluate immediately so another hardware job can fill the
-            # next slot without waiting for the polling interval.
-            continue
+        try:
+            launched, queue_changed = _dispatcher_pass()
+            if launched or queue_changed:
+                save_jobs()
+            if launched:
+                # Re-evaluate immediately so another hardware job can fill
+                # the next slot without waiting for the polling interval.
+                continue
+        except Exception as exc:
+            # A transient hardware probe, persistence, or routing exception
+            # must never permanently strand every later queued item.
+            print(
+                f"[DISPATCHER] scheduling pass failed; retrying: {exc}\n{traceback.format_exc()}",
+                flush=True,
+            )
 
         DISPATCH_WAKE_EVENT.wait(1.0)
         DISPATCH_WAKE_EVENT.clear()
@@ -5725,13 +5753,24 @@ def ensure_dispatcher():
     the background thread.
     """
     global dispatcher_started, transfer_retry_started
+    global DISPATCHER_THREAD, TRANSFER_RETRY_THREAD
     with DISPATCH_LOCK:
-        if not dispatcher_started:
+        if DISPATCHER_THREAD is None or not DISPATCHER_THREAD.is_alive():
             dispatcher_started = True
-            threading.Thread(target=dispatcher_loop, daemon=True, name="dispatcher").start()
-        if not transfer_retry_started:
+            DISPATCHER_THREAD = threading.Thread(
+                target=dispatcher_loop,
+                daemon=True,
+                name="dispatcher",
+            )
+            DISPATCHER_THREAD.start()
+        if TRANSFER_RETRY_THREAD is None or not TRANSFER_RETRY_THREAD.is_alive():
             transfer_retry_started = True
-            threading.Thread(target=transfer_retry_loop, daemon=True, name="transfer-retry").start()
+            TRANSFER_RETRY_THREAD = threading.Thread(
+                target=transfer_retry_loop,
+                daemon=True,
+                name="transfer-retry",
+            )
+            TRANSFER_RETRY_THREAD.start()
     DISPATCH_WAKE_EVENT.set()
 
 

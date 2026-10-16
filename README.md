@@ -553,7 +553,7 @@ docker run -d \
 ```
 
 The `latest` and `main` images are published automatically from `main`. Stable
-controller releases also publish `3.25.2` and `3.25` tags. The legacy
+controller releases also publish `3.25.3` and `3.25` tags. The legacy
 `kevina1724/handbrake-tsd-helper` name is published from the same build and will
 continue receiving identical updates, so existing installations do not break.
 
@@ -564,7 +564,7 @@ The encoding-only worker has its own public Docker Hub image:
 [kevina1724/bytesqueeze-tsd-worker on Docker Hub](https://hub.docker.com/r/kevina1724/bytesqueeze-tsd-worker)
 
 `latest` and `main` follow the main branch. Stable worker releases also publish
-`2.13.7` and `2.13` tags:
+`2.13.8` and `2.13` tags:
 
 ```bash
 docker pull kevina1724/bytesqueeze-tsd-worker:latest

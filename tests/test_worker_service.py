@@ -174,6 +174,84 @@ class HeadlessWorkerServiceTests(unittest.TestCase):
             jobs.JOBS_FILE = original_jobs_file
             jobs.queue_paused = original_queue_paused
 
+    def test_dispatcher_prunes_terminal_and_missing_queue_entries(self):
+        original_jobs = jobs.jobs
+        original_queue = jobs.job_queue
+        original_threads = jobs.RUNNING_JOB_THREADS
+        try:
+            jobs.jobs = {
+                "canceled": {"status": "canceled"},
+                "dispatching": {"status": "dispatching"},
+                "running": {"status": "running"},
+                "uploading": {"status": "waiting_to_upload"},
+                "queued": {"status": "queued"},
+            }
+            jobs.job_queue = [
+                "missing", "canceled", "dispatching", "running", "uploading", "queued"
+            ]
+            jobs.RUNNING_JOB_THREADS = {}
+
+            with jobs.DISPATCH_LOCK:
+                changed = jobs._prune_stale_queue_entries()
+
+            self.assertTrue(changed)
+            self.assertEqual(
+                jobs.job_queue,
+                ["dispatching", "running", "uploading", "queued"],
+            )
+        finally:
+            jobs.jobs = original_jobs
+            jobs.job_queue = original_queue
+            jobs.RUNNING_JOB_THREADS = original_threads
+
+    def test_ensure_dispatcher_restarts_a_dead_supervisor_thread(self):
+        original_dispatcher = jobs.DISPATCHER_THREAD
+        original_transfer_retry = jobs.TRANSFER_RETRY_THREAD
+        original_dispatcher_started = jobs.dispatcher_started
+        original_transfer_started = jobs.transfer_retry_started
+
+        class FakeThread:
+            def __init__(self, *, target, daemon, name, args=()):
+                self.target = target
+                self.daemon = daemon
+                self.name = name
+                self.args = args
+                self.started = False
+
+            def start(self):
+                self.started = True
+
+            def is_alive(self):
+                return self.started
+
+        dead_dispatcher = mock.Mock()
+        dead_dispatcher.is_alive.return_value = False
+        live_transfer = mock.Mock()
+        live_transfer.is_alive.return_value = True
+        created = []
+
+        def fake_thread(**kwargs):
+            thread = FakeThread(**kwargs)
+            created.append(thread)
+            return thread
+
+        try:
+            jobs.DISPATCHER_THREAD = dead_dispatcher
+            jobs.TRANSFER_RETRY_THREAD = live_transfer
+            with mock.patch.object(jobs.threading, "Thread", side_effect=fake_thread):
+                jobs.ensure_dispatcher()
+
+            self.assertEqual([thread.name for thread in created], ["dispatcher"])
+            self.assertTrue(created[0].started)
+            self.assertIs(jobs.DISPATCHER_THREAD, created[0])
+            self.assertIs(jobs.TRANSFER_RETRY_THREAD, live_transfer)
+        finally:
+            jobs.DISPATCHER_THREAD = original_dispatcher
+            jobs.TRANSFER_RETRY_THREAD = original_transfer_retry
+            jobs.dispatcher_started = original_dispatcher_started
+            jobs.transfer_retry_started = original_transfer_started
+            jobs.DISPATCH_WAKE_EVENT.clear()
+
     def test_live_output_estimate_retries_until_output_exists(self):
         with tempfile.TemporaryDirectory() as tempdir:
             output = os.path.join(tempdir, "encode.tmp.mkv")
@@ -666,7 +744,7 @@ class HeadlessWorkerServiceTests(unittest.TestCase):
         self.assertEqual(jobs._hardware_transcode_limit(job=stale_job), 3)
 
         health = self.client.get("/api/health").get_json()
-        self.assertEqual(health["release"], "2.13.7")
+        self.assertEqual(health["release"], "2.13.8")
         self.assertEqual(health["encoding_policy"]["hardware_transcode_concurrency"], 3)
         self.assertEqual(health["encoding_policy"]["output_container"], "mp4")
         self.assertTrue(health["encoding_policy"]["web_optimized"])
