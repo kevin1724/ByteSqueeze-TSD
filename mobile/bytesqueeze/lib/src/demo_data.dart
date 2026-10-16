@@ -1,4 +1,11 @@
 abstract final class DemoData {
+  static String _dateAfter(int days) {
+    final date = DateTime.now().add(Duration(days: days));
+    final month = date.month.toString().padLeft(2, '0');
+    final day = date.day.toString().padLeft(2, '0');
+    return '${date.year}-$month-$day';
+  }
+
   static Map<String, dynamic> get dashboard => {
     'release': '3.17.0',
     'queue': {
@@ -130,52 +137,56 @@ abstract final class DemoData {
     ],
   };
 
-  static Map<String, dynamic> get calendar => {
-    'provider': {'name': 'TVmaze', 'url': 'https://www.tvmaze.com/'},
-    'count': 4,
-    'days': [
-      {
-        'date': '2026-09-23',
-        'episodes': [
-          {
-            'show_title': 'Foundation',
-            'season': 3,
-            'episode': 5,
-            'name': 'The Weight of Worlds',
-            'airdate': '2026-09-23',
-            'airtime': '9:00 PM',
-            'poster_url': '',
-            'tracked': true,
-          },
-        ],
-      },
-      {
-        'date': '2026-09-27',
-        'episodes': [
-          {
-            'show_title': 'Severance',
-            'season': 3,
-            'episode': 1,
-            'name': 'After Hours',
-            'airdate': '2026-09-27',
-            'airtime': '8:00 PM',
-            'poster_url': '',
-            'tracked': true,
-          },
-          {
-            'show_title': 'Silo',
-            'season': 3,
-            'episode': 2,
-            'name': 'The Descent',
-            'airdate': '2026-09-27',
-            'airtime': '10:00 PM',
-            'poster_url': '',
-            'tracked': false,
-          },
-        ],
-      },
-    ],
-  };
+  static Map<String, dynamic> get calendar {
+    final nextRelease = _dateAfter(1);
+    final laterRelease = _dateAfter(5);
+    return {
+      'provider': {'name': 'TVmaze', 'url': 'https://www.tvmaze.com/'},
+      'count': 3,
+      'days': [
+        {
+          'date': nextRelease,
+          'episodes': [
+            {
+              'show_title': 'Foundation',
+              'season': 3,
+              'episode': 5,
+              'name': 'The Weight of Worlds',
+              'airdate': nextRelease,
+              'airtime': '9:00 PM',
+              'poster_url': '',
+              'tracked': true,
+            },
+          ],
+        },
+        {
+          'date': laterRelease,
+          'episodes': [
+            {
+              'show_title': 'Severance',
+              'season': 3,
+              'episode': 1,
+              'name': 'After Hours',
+              'airdate': laterRelease,
+              'airtime': '8:00 PM',
+              'poster_url': '',
+              'tracked': true,
+            },
+            {
+              'show_title': 'Silo',
+              'season': 3,
+              'episode': 2,
+              'name': 'The Descent',
+              'airdate': laterRelease,
+              'airtime': '10:00 PM',
+              'poster_url': '',
+              'tracked': false,
+            },
+          ],
+        },
+      ],
+    };
+  }
 
   static Map<String, dynamic> get automation => {
     'settings': {
