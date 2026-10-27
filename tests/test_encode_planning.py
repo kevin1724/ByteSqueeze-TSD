@@ -683,6 +683,16 @@ class EncodePlanningTests(unittest.TestCase):
             dockerfile,
         )
 
+        with open(
+            os.path.join(root, "worker", "runtime", "webui", "app", "settings.py"),
+            "r",
+            encoding="utf-8",
+        ) as stream:
+            worker_settings = stream.read()
+        self.assertIn("def normalize_output_container", worker_settings)
+        self.assertIn('"audio_optimize_bitrate_kbps": 1024', worker_settings)
+        self.assertIn('"audio_preferred_languages": ["eng", "spa"]', worker_settings)
+
 
 if __name__ == "__main__":
     unittest.main()
