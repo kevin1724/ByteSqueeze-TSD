@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(2, 13, 7, 0),
-    prodvers=(2, 13, 7, 0),
+    filevers=(2, 13, 9, 0),
+    prodvers=(2, 13, 9, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -16,12 +16,12 @@ VSVersionInfo(
         [
           StringStruct('CompanyName', 'ByteSqueeze'),
           StringStruct('FileDescription', 'ByteSqueeze Windows Worker'),
-          StringStruct('FileVersion', '2.13.8'),
+          StringStruct('FileVersion', '2.13.9'),
           StringStruct('InternalName', 'ByteSqueezeWorker'),
           StringStruct('LegalCopyright', 'ByteSqueeze contributors'),
           StringStruct('OriginalFilename', 'ByteSqueezeWorker.exe'),
           StringStruct('ProductName', 'ByteSqueeze Windows Worker'),
-          StringStruct('ProductVersion', '2.13.8'),
+          StringStruct('ProductVersion', '2.13.9'),
         ],
       )
     ]),

@@ -744,7 +744,7 @@ class HeadlessWorkerServiceTests(unittest.TestCase):
         self.assertEqual(jobs._hardware_transcode_limit(job=stale_job), 3)
 
         health = self.client.get("/api/health").get_json()
-        self.assertEqual(health["release"], "2.13.8")
+        self.assertEqual(health["release"], "2.13.9")
         self.assertEqual(health["encoding_policy"]["hardware_transcode_concurrency"], 3)
         self.assertEqual(health["encoding_policy"]["output_container"], "mp4")
         self.assertTrue(health["encoding_policy"]["web_optimized"])

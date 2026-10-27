@@ -673,6 +673,11 @@ class EncodePlanningTests(unittest.TestCase):
         # launcher through webui; encode-one.sh remains a compatibility aid.
         self.assertIn("COPY webui /app/webui", dockerfile)
         self.assertIn("COPY webui/app/encode_runner.py /app/webui/app/encode_runner.py", dockerfile)
+        self.assertIn("COPY webui/app/process_utils.py /app/webui/app/process_utils.py", dockerfile)
+        self.assertIn(
+            'python -c "import worker.app; import webui.app.jobs;',
+            dockerfile,
+        )
         self.assertIn(
             "COPY worker/__init__.py worker/app.py worker/encode_runner.py /app/worker/",
             dockerfile,
