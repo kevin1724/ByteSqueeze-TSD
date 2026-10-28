@@ -1658,6 +1658,7 @@ class ApiRouteSmokeTests(unittest.TestCase):
                 patch.object(app_routes, "record_encode") as record,
                 patch.object(app_routes, "save_transfer") as save,
                 patch.object(app_routes, "get_node_private", return_value={}),
+                patch.object(app_routes, "_schedule_library_reconcile_after_transfer") as reconcile,
                 patch.object(app_routes, "log_event"),
             ):
                 result = app_routes._finalize_transfer_output(row, upload)
@@ -1667,6 +1668,7 @@ class ApiRouteSmokeTests(unittest.TestCase):
             self.assertTrue(row["source_missing_at_return"])
             record.assert_called_once()
             save.assert_called_once()
+            reconcile.assert_called_once_with()
         finally:
             for path in (upload, output):
                 if os.path.isfile(path):
@@ -1746,6 +1748,7 @@ class ApiRouteSmokeTests(unittest.TestCase):
                 patch.object(app_routes, "record_encode") as record,
                 patch.object(app_routes, "save_transfer") as save,
                 patch.object(app_routes, "get_node_private", return_value={"name": "Worker"}),
+                patch.object(app_routes, "_schedule_library_reconcile_after_transfer") as reconcile,
                 patch.object(app_routes, "log_event"),
             ):
                 result = app_routes._recover_existing_transfer_output(row, retry)
@@ -1759,6 +1762,7 @@ class ApiRouteSmokeTests(unittest.TestCase):
             self.assertTrue(os.path.isfile(output))
             record.assert_called_once()
             save.assert_called_once()
+            reconcile.assert_called_once_with()
         finally:
             for path in (source, output):
                 if os.path.isfile(path):

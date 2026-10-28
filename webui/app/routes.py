@@ -3855,7 +3855,7 @@ BETA_MEDIA_TAG_RE = re.compile(
 )
 
 
-APP_RELEASE = "3.25.4"
+APP_RELEASE = "3.25.5"
 BETA_DIMENSION_TAG_RE = re.compile(r"(?<!\d)(?:\d{3,4}x\d{3,4}|(?:8|10|12)bit)(?!\d)", re.IGNORECASE)
 HDR_PATH_RE = re.compile(
     r"(?:^|[ ._\-\[\(])(?:"
@@ -7357,6 +7357,30 @@ def _beta_autoscan_loop() -> None:
         BETA_AUTOSCAN_HEALTH["running"] = False
 
 
+def _schedule_library_reconcile_after_transfer() -> None:
+    """Refresh the catalog shortly after a worker installs its output.
+
+    The upload response must not wait for a library scan, especially for a
+    large remote library.  A short delay also lets the worker publish its
+    terminal heartbeat before the forced incremental scan rebuilds the
+    catalog.  Concurrent completions are naturally coalesced by
+    ``BETA_AUTOSCAN_LOCK``.
+    """
+
+    def reconcile() -> None:
+        time.sleep(2.0)
+        _beta_run_incremental_auto_scan(
+            reason="node_transfer_finished",
+            force=True,
+        )
+
+    threading.Thread(
+        target=reconcile,
+        name="node-transfer-library-reconcile",
+        daemon=True,
+    ).start()
+
+
 def _start_beta_autoscan_thread(*, force_serving_process: bool = False) -> bool:
     global BETA_AUTOSCAN_THREAD
     if os.environ.get("TSD_DISABLE_BETA_AUTOSCAN") == "1":
@@ -9481,6 +9505,7 @@ def _recover_existing_transfer_output(row: dict, retry: dict) -> dict | None:
         "recovered_after_lost_response": True,
     })
     save_transfer(row)
+    _schedule_library_reconcile_after_transfer()
     log_event(
         "node_transfer_recovered",
         f"Recovered completed worker upload: {os.path.basename(src)}",
@@ -9610,6 +9635,7 @@ def _finalize_transfer_output(row: dict, upload_tmp: str) -> dict:
             "storage_breakdown": actual_breakdown,
         })
         save_transfer(row)
+        _schedule_library_reconcile_after_transfer()
         log_event(
             "node_transfer_deduplicated",
             f"Validated duplicate worker output discarded: {os.path.basename(src)}",
@@ -9763,6 +9789,7 @@ def _finalize_transfer_output(row: dict, upload_tmp: str) -> dict:
         "storage_breakdown": actual_breakdown,
     })
     save_transfer(row)
+    _schedule_library_reconcile_after_transfer()
     log_event(
         "node_transfer_finished",
         f"Remote worker output accepted: {os.path.basename(src)} - saved {round(saved_bytes/(1024**3), 3)} GB",
